@@ -40,4 +40,5 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
 
     # Convert to Antimony format
     name = os.path.basename(calling_file_path).replace('.py', '')
-    convert_to_antimony(model_path, name, rules_path)
+    output_dir = os.path.join(script_dir, '..')
+    convert_to_antimony(model_path, name, rules_path, output_dir=output_dir)
