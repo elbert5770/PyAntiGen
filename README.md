@@ -14,7 +14,7 @@ PyAntiGen is a declarative, object-oriented framework for generating compartment
 You can install PyAntiGen globally into your preferred Python environment by cloning this repository and running pip:
 
 ```bash
-git clone https://github.com/<your-username>/PyAntiGen.git
+git clone https://github.com/elbert5770/PyAntiGen.git
 cd PyAntiGen
 pip install -e .
 ```
