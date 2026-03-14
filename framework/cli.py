@@ -105,10 +105,12 @@ def create_project():
     with open(generate_script_path, "w") as f:
         f.write(textwrap.dedent("""\
             \"\"\"
-            Example model builder (MODEL_NAME = 'Example'). Outputs go to antimony_models/Example/ and generated/Example/.
+            Example model builder. Outputs go to antimony_models/Example/ and generated/Example/.
             \"\"\"
             import os
             import sys
+
+            MODEL_NAME = "Example"
 
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
@@ -118,7 +120,7 @@ def create_project():
 
             if __name__ == "__main__":
                 Isotopes = ['']
-                model = PyAntiGen(name="Example", isotopes=Isotopes)
+                model = PyAntiGen(name=MODEL_NAME, isotopes=Isotopes)
                 BasicMAReaction(model)
 
                 print(f"Reactions generated: {model.counter}")
@@ -126,8 +128,8 @@ def create_project():
                 model.generate(__file__)
                 print("\\nModel generated successfully.")
                 print("Next steps:")
-                print("  1. Optionally edit parameters in antimony_models/Example/Example_parameters.csv")
-                print("  2. From scripts/Example/, run: python Example_run.py")
+                print(f"  1. Optionally edit parameters in antimony_models/{MODEL_NAME}/{MODEL_NAME}_parameters.csv")
+                print(f"  2. From scripts/{MODEL_NAME}/, run: python {MODEL_NAME}_run.py")
         """))
     print("  Created file: scripts/Example/Example_generate.py")
 
@@ -169,7 +171,7 @@ def create_project():
                 from framework.antimony_utils import load_antimony_files, archive_antimony_snapshot
                 full_model_text = load_antimony_files(MODEL_NAME, project_root)
                 if not full_model_text.strip():
-                    print("No model content loaded. Generate the model first: python Example_generate.py")
+                    print(f"No model content loaded. Generate the model first: python {MODEL_NAME}_generate.py")
                     return
 
                 print("Loading model into Tellurium...")
@@ -208,6 +210,114 @@ def create_project():
                 run_simulation()
         """))
     print("  Created file: scripts/Example/Example_run.py")
+
+    # Project-named folder with boilerplate generate/run (MODEL_NAME = project name, XXX placeholders)
+    project_scripts_dir = os.path.join(project_dir, "scripts", project_dir)
+    os.makedirs(project_scripts_dir, exist_ok=True)
+    project_antimony_dir = os.path.join(project_dir, "antimony_models", project_dir)
+    project_generated_dir = os.path.join(project_dir, "generated", project_dir)
+    project_results_dir = os.path.join(project_dir, "results", project_dir)
+    os.makedirs(project_antimony_dir, exist_ok=True)
+    os.makedirs(project_generated_dir, exist_ok=True)
+    os.makedirs(project_results_dir, exist_ok=True)
+
+    project_generate_path = os.path.join(project_scripts_dir, f"{project_dir}_generate.py")
+    with open(project_generate_path, "w") as f:
+        f.write(textwrap.dedent(f"""\
+            \"\"\"
+            Model builder for {project_dir}. Outputs go to antimony_models/{project_dir}/ and generated/{project_dir}/.
+            \"\"\"
+            import os
+            import sys
+
+            MODEL_NAME = "{project_dir}"
+
+            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+
+            from framework.pyantigen import PyAntiGen
+            # XXX: import your module(s)
+            # from modules.XXX import XXX
+
+            if __name__ == "__main__":
+                Isotopes = ['']
+                model = PyAntiGen(name=MODEL_NAME, isotopes=Isotopes)
+                # XXX: instantiate your module(s)
+                # XXX(model)
+
+                print(f"Reactions generated: {{model.counter}}")
+                print(f"Rules generated: {{len(model.rules)}}")
+                model.generate(__file__)
+                print("\\nModel generated successfully.")
+                print("Next steps:")
+                print(f"  1. Optionally edit parameters in antimony_models/{{MODEL_NAME}}/{{MODEL_NAME}}_parameters.csv")
+                print(f"  2. From scripts/{{MODEL_NAME}}/, run: python {{MODEL_NAME}}_run.py")
+        """))
+    print(f"  Created file: scripts/{project_dir}/{project_dir}_generate.py")
+
+    project_run_path = os.path.join(project_scripts_dir, f"{project_dir}_run.py")
+    with open(project_run_path, "w") as f:
+        f.write(textwrap.dedent(f"""\
+            import tellurium as te
+            import numpy as np
+            import matplotlib.pyplot as plt
+            import os
+            import time
+
+            MODEL_NAME = "{project_dir}"
+
+            def run_simulation():
+                current_dir = os.path.dirname(__file__)
+                if os.path.basename(current_dir) == "scripts":
+                    project_root = os.path.normpath(os.path.join(current_dir, ".."))
+                else:
+                    project_root = os.path.normpath(os.path.join(current_dir, "..", ".."))
+                plot_path = os.path.normpath(os.path.join(project_root, "results", MODEL_NAME))
+                os.makedirs(plot_path, exist_ok=True)
+                plot_name = os.path.join(plot_path, os.path.basename(__file__).replace(".py", ".png"))
+
+                from framework.antimony_utils import load_antimony_files, archive_antimony_snapshot
+                full_model_text = load_antimony_files(MODEL_NAME, project_root)
+                if not full_model_text.strip():
+                    print(f"No model content loaded. Generate the model first: python {{MODEL_NAME}}_generate.py")
+                    return
+
+                print("Loading model into Tellurium...")
+                try:
+                    r = te.loada(full_model_text)
+                except Exception as e:
+                    print(f"Error loading model: {{e}}")
+                    print("Model Text:")
+                    print(full_model_text)
+                    return
+
+                sbml_content = r.getSBML()
+                archive_dir = archive_antimony_snapshot(MODEL_NAME, project_root, sbml_content=sbml_content)
+                print(f"Archive and SBML written to: {{archive_dir}}")
+
+                r.setIntegrator("cvode")
+                print("Running simulation...")
+                t0 = time.perf_counter()
+                result = r.simulate(0, 100, 100)
+                elapsed = time.perf_counter() - t0
+                print(f"Simulation time: {{elapsed:.3f}} s")
+
+                plt.figure(figsize=(8, 6))
+                time_points = result[:, 0]
+                for i in range(1, result.shape[1]):
+                    plt.plot(time_points, result[:, i], label=result.colnames[i])
+                plt.xlabel("XXX")
+                plt.ylabel("XXX")
+                plt.title("XXX")
+                plt.legend()
+                plt.savefig(plot_name)
+                print(f"Plot saved to: {{plot_name}}")
+                plt.show()
+
+            if __name__ == "__main__":
+                run_simulation()
+        """))
+    print(f"  Created file: scripts/{project_dir}/{project_dir}_run.py")
 
     print("\nProject scaffolded successfully!")
     print("Note: Because PyAntiGen is installed in your Python environment,")
