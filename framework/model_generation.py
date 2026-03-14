@@ -21,8 +21,12 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
     model_name = script_basename[:-9] if script_basename.endswith('_generate') else script_basename
 
     script_dir = os.path.dirname(calling_file_path)
-    output_dir = os.path.abspath(os.path.join(script_dir, '..'))
-    generated_dir = os.path.join(output_dir, 'generated')
+    # Project root: parent of "scripts", or two levels up when script is in scripts/Example/
+    if os.path.basename(script_dir) == "scripts":
+        output_dir = os.path.abspath(os.path.join(script_dir, ".."))
+    else:
+        output_dir = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    generated_dir = os.path.join(output_dir, "generated", model_name)
     os.makedirs(generated_dir, exist_ok=True)
 
     # Output rules and reaction_dict using model_name only (one write each)

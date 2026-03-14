@@ -35,26 +35,32 @@ MyNewModel/
 ├── .agents/
 │   └── skills/          (agent skills, e.g. module generation, ODE conversion)
 ├── scripts/
-│   └── MyNewModel_generate.py
+│   └── Example/
+│       ├── Example_generate.py
+│       └── Example_run.py
 ├── modules/
 │   └── __init__.py
 ├── data/
 ├── antimony_models/
+│   └── Example/         (Example_parameters.csv, Example_InitialConditions.csv, etc.)
 ├── generated/
+│   └── Example/         (reaction dict, rules, unique_*, etc. after generate)
 ├── results/
-└── SBML_models/
+│   └── Example/         (plots from Example_run.py)
+├── SBML_models/
+└── pyantigen_settings.json   (e.g. archive_with_timestamp: false)
 ```
 
-Navigate to `MyNewModel/scripts/` and run:
+All model-specific files are grouped under folders named by `MODEL_NAME` (here, `Example`). From `MyNewModel/scripts/Example/` run:
 
 ```bash
-python MyNewModel_generate.py
+python Example_generate.py
 ```
 
-This generates the model and writes the Antimony script to `antimony_models/`. To run the simulation, first edit parameters if desired in `antimony_models/MyNewModel_parameters.csv`, then from `scripts/` run:
+This generates the model and writes outputs to `antimony_models/Example/` and `generated/Example/`. Edit parameters if desired in `antimony_models/Example/Example_parameters.csv`, then run:
 
 ```bash
-python MyNewModel_run.py
+python Example_run.py
 ```
 
 Keeping the simulation step separate gives you time to adjust parameters and inspect the generated files before running.
@@ -64,4 +70,4 @@ Keeping the simulation step separate gives you time to adjust parameters and ins
 The **Play** button uses whichever Python interpreter is currently selected. If your environment (conda/venv) isn’t loaded, the run may fail with import or path errors.
 
 1. **Select the correct interpreter**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) → **Python: Select Interpreter** → choose the environment where you ran `pip install -e .` (e.g. your conda or venv).
-2. **Run from project root**: Open the *project* folder (e.g. `MyNewModel` or `PyAntiGen_test5`) as the workspace. Use **Run and Debug** (or Play on the main script); the provided launch config uses the project root as the working directory so `generated/` and `antimony_models/` resolve correctly.
+2. **Run from project root**: Open the *project* folder (e.g. `MyNewModel`) as the workspace. Use **Run and Debug** (or Play on `scripts/Example/Example_run.py`); the project root is resolved from the script location so `antimony_models/Example/`, `generated/Example/`, and `results/Example/` resolve correctly.

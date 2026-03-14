@@ -105,7 +105,7 @@ def test_silk_script_generates_all_reactions(
 ):
     """Run the SILK script and assert the generated _reaction_dict file is valid and has expected content."""
     name = script_name.replace(".py", "")
-    reactions_file = os.path.join(silk_project_path, "generated", f"{name}_reaction_dict.txt")
+    reactions_file = os.path.join(silk_project_path, "generated", name, f"{name}_reaction_dict.txt")
 
     # Run the script to (re)generate the file
     result = run_script(silk_project_path, script_name, pyantigen_root)
@@ -131,18 +131,19 @@ def test_silk_all_reactions_file_structure(silk_project_path):
     validate their structure without re-running the scripts.
     """
     cases = [
-        ("Elbert_2022_1a_reaction_dict.txt", 100),
-        ("Bloomingdale_2021_1a_reaction_dict.txt", 25),
-        ("Lin_2022_1b_reaction_dict.txt", 70),
+        ("Elbert_2022_1a", 100),
+        ("Bloomingdale_2021_1a", 25),
+        ("Lin_2022_1b", 70),
     ]
-    for filename, min_reactions in cases:
-        path = os.path.join(silk_project_path, "generated", filename)
+    for name, min_reactions in cases:
+        filename = f"{name}_reaction_dict.txt"
+        path = os.path.join(silk_project_path, "generated", name, filename)
         if not os.path.isfile(path):
             pytest.skip(f"Pre-generated file not found: {path}")
         reactions, errors = load_reactions_file(path)
         assert not errors, f"Parse errors in {path}: {errors}"
         assert len(reactions) >= min_reactions, (
-            f"{filename}: expected at least {min_reactions} reactions, got {len(reactions)}"
+            f"{name}: expected at least {min_reactions} reactions, got {len(reactions)}"
         )
         for r in reactions:
             assert REQUIRED_KEYS.issubset(set(r.keys())), f"Missing keys in reaction {r.get('Reaction_name')}"

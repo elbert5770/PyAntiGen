@@ -5,6 +5,7 @@ Compartment can be explicit per reaction (compartment= / compartment_reverse=) o
 Rate units and volume scaling: see framework.rate_laws.
 """
 import json
+import os
 import re
 import sys
 
@@ -530,30 +531,32 @@ if __name__ == "__main__":
         exit()
     else:
         name = sys.argv[1]
-    rxn_filename = f"generated/{name}_reaction_dict.txt"
+    rxn_filename = f"generated/{name}/{name}_reaction_dict.txt"
     print(rxn_filename)
     # Generate Antimony script from text file
     complete_script, species, parameters, unique_compartments, errors = generate_antimony_from_txt(rxn_filename, name)
     
-    # Write complete script to file with name
-    antimony_filename = f"antimony_models/{name}_reactions.txt"
+    # Write complete script to file with name (under model subfolder)
+    antimony_models_name_dir = f"antimony_models/{name}"
+    antimony_filename = f"{antimony_models_name_dir}/{name}_reactions.txt"
+    os.makedirs(antimony_models_name_dir, exist_ok=True)
     with open(antimony_filename, "w") as f:
         f.write(complete_script)
     
-    # Write unique compartments to file with name
-    compartments_filename = f"generated/{name}_unique_compartments.txt"
+    # Write unique compartments/species/parameters under generated/name/
+    generated_name_dir = f"generated/{name}"
+    os.makedirs(generated_name_dir, exist_ok=True)
+    compartments_filename = f"{generated_name_dir}/{name}_unique_compartments.txt"
     with open(compartments_filename, "w") as f:
         for compartment in sorted(unique_compartments):
             f.write(f"{compartment}\n")
     
-    # Write species and parameters to files with name
-    species_filename = f'generated/{name}_unique_species.txt'
-    parameters_filename = f'generated/{name}_unique_parameters.txt'
+    species_filename = f'{generated_name_dir}/{name}_unique_species.txt'
+    parameters_filename = f'{generated_name_dir}/{name}_unique_parameters.txt'
     write_list_to_file(species, species_filename)
     write_list_to_file(parameters, parameters_filename)
     
-    # Write errors to file with name
-    errors_filename = f"generated/conversion_errors_{name}.log"
+    errors_filename = f"{generated_name_dir}/conversion_errors_{name}.log"
     with open(errors_filename, "w") as f:
         for error in errors:
             f.write(f"{error}\n")

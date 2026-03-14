@@ -6,9 +6,9 @@ The tests in `test_silk_all_reactions.py` run scripts and assert on the generate
 
 | Script | Generated file | Min reactions |
 |--------|----------------|---------------|
-| `scripts/Elbert_2022_1a.py` | `generated/Elbert_2022_1a_reaction_dict.txt` | 100 |
-| `scripts/Bloomingdale_2021_1a.py` | `generated/Bloomingdale_2021_1a_reaction_dict.txt` | 25 |
-| `scripts/Lin_2022_1b.py` | `generated/Lin_2022_1b_reaction_dict.txt` | 70 |
+| `scripts/Elbert_2022_1a.py` | `generated/Elbert_2022_1a/Elbert_2022_1a_reaction_dict.txt` | 100 |
+| `scripts/Bloomingdale_2021_1a.py` | `generated/Bloomingdale_2021_1a/Bloomingdale_2021_1a_reaction_dict.txt` | 25 |
+| `scripts/Lin_2022_1b.py` | `generated/Lin_2022_1b/Lin_2022_1b_reaction_dict.txt` | 70 |
 
 ### Where the scripts come from
 

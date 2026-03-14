@@ -1,8 +1,37 @@
 import csv
+import json
 import os
 import shutil
+from datetime import datetime
 
 from framework.RxnDict_to_antimony import generate_antimony_from_txt, write_list_to_file
+
+# Default project settings (used when pyantigen_settings.json is missing or incomplete)
+DEFAULT_SETTINGS = {
+    "archive_with_timestamp": False,
+}
+SETTINGS_FILENAME = "pyantigen_settings.json"
+
+
+def load_project_settings(project_root):
+    """
+    Load PyAntiGen project settings from project_root/pyantigen_settings.json.
+    Missing or invalid keys fall back to DEFAULT_SETTINGS.
+    """
+    path = os.path.join(os.path.abspath(project_root), SETTINGS_FILENAME)
+    settings = dict(DEFAULT_SETTINGS)
+    if not os.path.isfile(path):
+        return settings
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key in DEFAULT_SETTINGS:
+                if key in data:
+                    settings[key] = data[key]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return settings
 
 # Filenames (without path) that load_antimony_files expects, in concatenation order
 ANTIMONY_FILE_NAMES = [
@@ -96,8 +125,9 @@ def load_antimony_files(model_name, project_root):
         str: Concatenated Antimony model text for Tellurium.
     """
     project_root = os.path.abspath(project_root)
-    antimony_models_dir = os.path.join(project_root, "antimony_models")
-    generated_dir = os.path.join(project_root, "generated")
+    # Files for a model live in subfolders named by model_name
+    antimony_models_dir = os.path.join(project_root, "antimony_models", model_name)
+    generated_dir = os.path.join(project_root, "generated", model_name)
 
     for base_name in ANTIMONY_FILE_NAMES:
         _ensure_file_in_antimony_models(model_name, base_name, antimony_models_dir, generated_dir)
@@ -116,6 +146,56 @@ def load_antimony_files(model_name, project_root):
                 parts.append(f.read().rstrip())
 
     return "\n".join(p for p in parts if p.strip())
+
+
+def archive_antimony_snapshot(model_name, project_root, sbml_content=None):
+    """
+    Archive the six Antimony source files and optional SBML into SBML_models/MODEL_NAME/.
+
+    By default writes to SBML_models/model_name/ (overwrites each run). If the project
+    setting archive_with_timestamp is true in pyantigen_settings.json, uses a
+    timestamped subfolder (e.g. 2025-03-14_15-30-22) so each run is kept.
+
+    Copies reactions, parameters, InitialConditions, manual, rules, and events from
+    antimony_models with an "_archive" suffix on each filename, and writes
+    model_name.xml there if sbml_content is provided.
+
+    Args:
+        model_name (str): Base name of the model.
+        project_root (str): Project directory containing antimony_models and SBML_models.
+        sbml_content (str, optional): SBML XML string to write as model_name.xml in the archive.
+
+    Returns:
+        str: Path to the archive folder created.
+    """
+    project_root = os.path.abspath(project_root)
+    settings = load_project_settings(project_root)
+    antimony_models_model_dir = os.path.join(project_root, "antimony_models", model_name)
+    sbml_models_dir = os.path.join(project_root, "SBML_models")
+    model_archive_base = os.path.join(sbml_models_dir, model_name)
+    if settings.get("archive_with_timestamp", False):
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        archive_dir = os.path.join(model_archive_base, timestamp)
+    else:
+        archive_dir = model_archive_base
+    os.makedirs(archive_dir, exist_ok=True)
+
+    for base_name in ANTIMONY_FILE_NAMES:
+        src = os.path.join(antimony_models_model_dir, f"{model_name}{base_name}")
+        if not os.path.isfile(src):
+            continue
+        # Add _archive before extension: e.g. _reactions.txt -> _reactions_archive.txt
+        stem, ext = os.path.splitext(base_name)
+        archive_basename = f"{model_name}{stem}_archive{ext}"
+        dest = os.path.join(archive_dir, archive_basename)
+        shutil.copy2(src, dest)
+
+    if sbml_content is not None:
+        sbml_path = os.path.join(archive_dir, f"{model_name}.xml")
+        with open(sbml_path, "w", encoding="utf-8") as f:
+            f.write(sbml_content)
+
+    return archive_dir
 
 
 def convert_to_antimony(model_path, name, rules_path, output_dir=None):
@@ -139,9 +219,10 @@ def convert_to_antimony(model_path, name, rules_path, output_dir=None):
     # Generate Antimony script from text file
     complete_script, species, parameters, unique_compartments, errors = generate_antimony_from_txt(model_path, name)
     
-    generated_dir = os.path.join(output_dir, "generated")
+    # Group all outputs by model name into subfolders
+    generated_dir = os.path.join(output_dir, "generated", name)
     os.makedirs(generated_dir, exist_ok=True)
-    antimony_models_dir = os.path.join(output_dir, "antimony_models")
+    antimony_models_dir = os.path.join(output_dir, "antimony_models", name)
     os.makedirs(antimony_models_dir, exist_ok=True)
 
     # Write _reactions.txt to both antimony_models and generated
