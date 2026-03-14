@@ -93,7 +93,6 @@ def create_project():
             \"\"\"
             import os
             import sys
-            import subprocess
             
             # Ensure the project root and the PyAntiGen root are in sys.path so we can import modules
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -117,13 +116,11 @@ def create_project():
                 # Write and Convert to Antimony
                 model.generate(__file__)
                 
-                # Automatically execute the generated Antimony model simulation
-                script_path = os.path.join(os.path.dirname(__file__), "Antimony_{project_dir}_main.py")
                 print("\\nModel generated successfully.")
-                print("You can specify custom parameters in `antimony_models/{project_dir}_main_parameters.csv`.")
-                print(f"Running simulation now via: python {{os.path.basename(script_path)}}")
-                print("-" * 50)
-                subprocess.call(["python", script_path])
+                print("Next steps:")
+                print("  1. Optionally edit parameters in antimony_models/{project_dir}_main_parameters.csv")
+                print("  2. From this directory (scripts/), run the simulation:")
+                print(f"     python Antimony_{project_dir}_main.py")
         """))
     print(f"  Created file: scripts/{project_dir}_main.py")
 

@@ -45,4 +45,23 @@ MyNewModel/
 └── SBML_models/
 ```
 
-Navigate to `MyNewModel/scripts/` and run `python MyNewModel_main.py`—your model will automatically generate an Antimony script and safely log it to your `antimony_models` directory!
+Navigate to `MyNewModel/scripts/` and run:
+
+```bash
+python MyNewModel_main.py
+```
+
+This generates the model and writes the Antimony script to `antimony_models/`. To run the simulation, first edit parameters if desired in `antimony_models/MyNewModel_main_parameters.csv`, then from `scripts/` run:
+
+```bash
+python Antimony_MyNewModel_main.py
+```
+
+Keeping the simulation step separate gives you time to adjust parameters and inspect the generated files before running.
+
+### Running from an IDE (Cursor / VS Code)
+
+The **Play** button uses whichever Python interpreter is currently selected. If your environment (conda/venv) isn’t loaded, the run may fail with import or path errors.
+
+1. **Select the correct interpreter**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) → **Python: Select Interpreter** → choose the environment where you ran `pip install -e .` (e.g. your conda or venv).
+2. **Run from project root**: Open the *project* folder (e.g. `MyNewModel` or `PyAntiGen_test5`) as the workspace. Use **Run and Debug** (or Play on the main script); the provided launch config uses the project root as the working directory so `generated/` and `antimony_models/` resolve correctly.
