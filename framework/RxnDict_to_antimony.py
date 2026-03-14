@@ -541,14 +541,14 @@ if __name__ == "__main__":
         f.write(complete_script)
     
     # Write unique compartments to file with name
-    compartments_filename = f"generated/unique_compartments_{name}.txt"
+    compartments_filename = f"generated/{name}_unique_compartments.txt"
     with open(compartments_filename, "w") as f:
         for compartment in sorted(unique_compartments):
             f.write(f"{compartment}\n")
     
     # Write species and parameters to files with name
-    species_filename = f'generated/unique_species_{name}.txt'
-    parameters_filename = f'generated/unique_parameters_{name}.txt'
+    species_filename = f'generated/{name}_unique_species.txt'
+    parameters_filename = f'generated/{name}_unique_parameters.txt'
     write_list_to_file(species, species_filename)
     write_list_to_file(parameters, parameters_filename)
     

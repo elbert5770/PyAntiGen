@@ -16,31 +16,29 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
     Isotopes = ensure_isotopes_format(Isotopes)
     all_reactions, rules = build_reactions_func(Isotopes)
     
-    # Determine directories based on the calling file's location (assuming calling file is in scripts/)
-    script_dir = os.path.dirname(calling_file_path) 
-    
-    # Output rules
-    filename = os.path.basename(calling_file_path).replace('.py', '_rules.txt')
-    rules_path = os.path.join(script_dir, '..', 'generated', filename)
-    os.makedirs(os.path.dirname(rules_path), exist_ok=True)
+    # Model name = project name: strip _generate from script name if present (e.g. MyNewModel_generate.py -> MyNewModel)
+    script_basename = os.path.basename(calling_file_path).replace('.py', '')
+    model_name = script_basename[:-9] if script_basename.endswith('_generate') else script_basename
+
+    script_dir = os.path.dirname(calling_file_path)
+    output_dir = os.path.abspath(os.path.join(script_dir, '..'))
+    generated_dir = os.path.join(output_dir, 'generated')
+    os.makedirs(generated_dir, exist_ok=True)
+
+    # Output rules and reaction_dict using model_name only (one write each)
+    rules_path = os.path.join(generated_dir, f'{model_name}_rules.txt')
     with open(rules_path, "w", encoding="utf-8") as f:
         for rule in rules:
             f.write(str(rule) + "\n")
     print("Wrote to", rules_path)
-    
-    # Output reactions
-    filename = os.path.basename(calling_file_path).replace('.py', '_reaction_dict.txt')
-    model_path = os.path.join(script_dir, '..', 'generated', filename)
-    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+
+    model_path = os.path.join(generated_dir, f'{model_name}_reaction_dict.txt')
     with open(model_path, "w", encoding="utf-8") as f:
         for reaction in all_reactions:
             f.write(str(reaction) + "\n")
-
     print("Wrote to", model_path)
 
     # Convert to Antimony format (use absolute paths so outputs go to project dir regardless of cwd)
-    name = os.path.basename(calling_file_path).replace('.py', '')
-    output_dir = os.path.abspath(os.path.join(script_dir, '..'))
     model_path_abs = os.path.abspath(model_path)
     rules_path_abs = os.path.abspath(rules_path)
-    convert_to_antimony(model_path_abs, name, rules_path_abs, output_dir=output_dir)
+    convert_to_antimony(model_path_abs, model_name, rules_path_abs, output_dir=output_dir)

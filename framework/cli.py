@@ -124,15 +124,21 @@ def create_project():
         """))
     print(f"  Created file: scripts/{project_dir}_generate.py")
 
-    # Create dummy parameter configuration
+    # Example parameters only (no initial conditions / species amounts here)
     param_csv_path = os.path.join(project_dir, "antimony_models", f"{project_dir}_parameters.csv")
     with open(param_csv_path, "w") as f:
         f.write("Parameter,Value,Units,Comment\n")
         f.write("k_A_to_B,0.1,,Default rate constant for A to B\n")
         f.write("V_comp1,1.0,,Default compartment volume\n")
+    print(f"  Created file: antimony_models/{project_dir}_parameters.csv")
+
+    # Example initial conditions (species amounts) in antimony_models; user can edit or copy from generated
+    init_cond_path = os.path.join(project_dir, "antimony_models", f"{project_dir}_InitialConditions.csv")
+    with open(init_cond_path, "w") as f:
+        f.write("Species,InitialCondition,Units,Comment\n")
         f.write("A_comp1,10.0,,Initial amount of A\n")
         f.write("B_comp1,0.0,,Initial amount of B\n")
-    print(f"  Created file: antimony_models/{project_dir}_parameters.csv")
+    print(f"  Created file: antimony_models/{project_dir}_InitialConditions.csv")
 
     # Create Antimony simulation script
     run_script_path = os.path.join(project_dir, "scripts", f"{project_dir}_run.py")

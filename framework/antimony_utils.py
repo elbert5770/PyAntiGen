@@ -151,15 +151,14 @@ def convert_to_antimony(model_path, name, rules_path, output_dir=None):
         with open(path, "w", encoding="utf-8") as f:
             f.write(complete_script)
     
-    # Write unique compartments to file
-    compartments_filename = os.path.join(generated_dir, f'unique_compartments_{name}.txt')
+    # Write unique compartments/species/parameters to generated (model_name before unique_*)
+    compartments_filename = os.path.join(generated_dir, f'{name}_unique_compartments.txt')
     with open(compartments_filename, "w", encoding="utf-8") as f:
         for compartment in sorted(unique_compartments):
             f.write(f"{compartment}\n")
     
-    # Write species and parameters lists to generated
-    species_filename = os.path.join(generated_dir, f'unique_species_{name}.txt')
-    parameters_list_filename = os.path.join(generated_dir, f'unique_parameters_{name}.txt')
+    species_filename = os.path.join(generated_dir, f'{name}_unique_species.txt')
+    parameters_list_filename = os.path.join(generated_dir, f'{name}_unique_parameters.txt')
     write_list_to_file(species, species_filename)
     write_list_to_file(parameters, parameters_list_filename)
     
