@@ -38,7 +38,9 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
 
     print("Wrote to", model_path)
 
-    # Convert to Antimony format
+    # Convert to Antimony format (use absolute paths so outputs go to project dir regardless of cwd)
     name = os.path.basename(calling_file_path).replace('.py', '')
-    output_dir = os.path.join(script_dir, '..')
-    convert_to_antimony(model_path, name, rules_path, output_dir=output_dir)
+    output_dir = os.path.abspath(os.path.join(script_dir, '..'))
+    model_path_abs = os.path.abspath(model_path)
+    rules_path_abs = os.path.abspath(rules_path)
+    convert_to_antimony(model_path_abs, name, rules_path_abs, output_dir=output_dir)

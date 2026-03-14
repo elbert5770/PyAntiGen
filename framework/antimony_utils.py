@@ -4,7 +4,7 @@ from framework.RxnDict_to_antimony import generate_antimony_from_txt, write_list
 def convert_to_antimony(model_path, name, rules_path, output_dir=None):
     """
     Convert the generated reaction file to Antimony format.
-    
+
     Args:
         model_path (str): Path to the generated reaction text file
         name (str): Name to use for output files
@@ -12,7 +12,12 @@ def convert_to_antimony(model_path, name, rules_path, output_dir=None):
         output_dir (str): Base directory for outputs (defaults to parent of this file)
     """
     if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(__file__), '..')
+        output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    else:
+        output_dir = os.path.abspath(output_dir)
+
+    # Resolve model path so the reaction file is found regardless of cwd
+    model_path = os.path.abspath(model_path)
 
     # Generate Antimony script from text file
     complete_script, species, parameters, unique_compartments, errors = generate_antimony_from_txt(model_path, name)
