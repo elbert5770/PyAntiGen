@@ -1,10 +1,10 @@
 """
-Tests that run Elbert_2022_SILK scripts and validate the generated *_all_reactions files.
+Tests that run Elbert_2022_SILK scripts and validate the generated *_reaction_dict files.
 
 Target scripts (and their reaction output files):
-- scripts/Elbert_2022_1a.py  -> generated/Elbert_2022_1a_all_reactions.txt
-- scripts/Bloomingdale_2021_1a.py -> generated/Bloomingdale_2021_1a_all_reactions.txt
-- scripts/Lin_2022_1b.py -> generated/Lin_2022_1b_all_reactions.txt
+- scripts/Elbert_2022_1a.py  -> generated/Elbert_2022_1a_reaction_dict.txt
+- scripts/Bloomingdale_2021_1a.py -> generated/Bloomingdale_2021_1a_reaction_dict.txt
+- scripts/Lin_2022_1b.py -> generated/Lin_2022_1b_reaction_dict.txt
 
 Requires the Elbert_2022_SILK project to be available (sibling directory or SILK_PROJECT_PATH).
 """
@@ -21,7 +21,7 @@ VALID_RATE_TYPES = {"MA", "RMA", "UDF", "BDF", "custom", "custom_conc_per_time",
 
 
 def parse_reaction_line(line):
-    """Parse a single line from *_all_reactions.txt into a dict. Uses ast.literal_eval for safety."""
+    """Parse a single line from *_reaction_dict.txt into a dict. Uses ast.literal_eval for safety."""
     line = line.strip()
     if not line:
         return None
@@ -33,7 +33,7 @@ def parse_reaction_line(line):
 
 
 def load_reactions_file(path):
-    """Load and parse a generated _all_reactions.txt file. Returns list of reaction dicts and errors."""
+    """Load and parse a generated _reaction_dict.txt file. Returns list of reaction dicts and errors."""
     if not os.path.isfile(path):
         return [], [f"File not found: {path}"]
     reactions = []
@@ -58,7 +58,7 @@ def load_reactions_file(path):
 
 
 def run_script(silk_root, script_basename, pyantigen_root):
-    """Run a script from the SILK project so it generates *_all_reactions.txt."""
+    """Run a script from the SILK project so it generates *_reaction_dict.txt."""
     script_path = os.path.join(silk_root, "scripts", script_basename)
     if not os.path.isfile(script_path):
         raise FileNotFoundError(f"Script not found: {script_path}")
@@ -103,9 +103,9 @@ def test_silk_script_generates_all_reactions(
     expected_min_reactions,
     expected_reaction_names,
 ):
-    """Run the SILK script and assert the generated _all_reactions file is valid and has expected content."""
+    """Run the SILK script and assert the generated _reaction_dict file is valid and has expected content."""
     name = script_name.replace(".py", "")
-    reactions_file = os.path.join(silk_project_path, "generated", f"{name}_all_reactions.txt")
+    reactions_file = os.path.join(silk_project_path, "generated", f"{name}_reaction_dict.txt")
 
     # Run the script to (re)generate the file
     result = run_script(silk_project_path, script_name, pyantigen_root)
@@ -127,13 +127,13 @@ def test_silk_script_generates_all_reactions(
 
 def test_silk_all_reactions_file_structure(silk_project_path):
     """
-    If the SILK project exists and has pre-generated _all_reactions files,
+    If the SILK project exists and has pre-generated _reaction_dict files,
     validate their structure without re-running the scripts.
     """
     cases = [
-        ("Elbert_2022_1a_all_reactions.txt", 100),
-        ("Bloomingdale_2021_1a_all_reactions.txt", 25),
-        ("Lin_2022_1b_all_reactions.txt", 70),
+        ("Elbert_2022_1a_reaction_dict.txt", 100),
+        ("Bloomingdale_2021_1a_reaction_dict.txt", 25),
+        ("Lin_2022_1b_reaction_dict.txt", 70),
     ]
     for filename, min_reactions in cases:
         path = os.path.join(silk_project_path, "generated", filename)

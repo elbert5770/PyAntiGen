@@ -72,7 +72,7 @@ if __name__ == "__main__":
                         for sym in symbols:
                             params.append({'Parameter': sym, 'Value': val_str, 'Comment': comment})
         csv_file = os.path.basename(__file__).replace('.py', '_parameters.csv')
-        csv_path = os.path.join(project_root, 'antimony_models', f"Antimony_{csv_file}")
+        csv_path = os.path.join(project_root, 'antimony_models', csv_file)
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['Parameter', 'Value', 'Comment'])

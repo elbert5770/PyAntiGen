@@ -2,13 +2,13 @@
 
 ## SILK integration tests
 
-The tests in `test_silk_all_reactions.py` run scripts and assert on the generated `*_all_reactions.txt` files:
+The tests in `test_silk_all_reactions.py` run scripts and assert on the generated `*_reaction_dict.txt` files:
 
 | Script | Generated file | Min reactions |
 |--------|----------------|---------------|
-| `scripts/Elbert_2022_1a.py` | `generated/Elbert_2022_1a_all_reactions.txt` | 100 |
-| `scripts/Bloomingdale_2021_1a.py` | `generated/Bloomingdale_2021_1a_all_reactions.txt` | 25 |
-| `scripts/Lin_2022_1b.py` | `generated/Lin_2022_1b_all_reactions.txt` | 70 |
+| `scripts/Elbert_2022_1a.py` | `generated/Elbert_2022_1a_reaction_dict.txt` | 100 |
+| `scripts/Bloomingdale_2021_1a.py` | `generated/Bloomingdale_2021_1a_reaction_dict.txt` | 25 |
+| `scripts/Lin_2022_1b.py` | `generated/Lin_2022_1b_reaction_dict.txt` | 70 |
 
 ### Where the scripts come from
 
@@ -30,7 +30,7 @@ If SILK is not found, the tests are skipped.
 
 ### What is checked
 
-- Scripts run successfully and write `generated/<name>_all_reactions.txt`.
+- Scripts run successfully and write `generated/<name>_reaction_dict.txt`.
 - Each line parses as a reaction dict with keys: `Reaction_name`, `Reactants`, `Products`, `Rate_type`, `Rate_eqtn_prototype`.
 - `Rate_type` is one of: MA, RMA, UDF, BDF, custom, custom_conc_per_time, custom_amt_per_time.
 - Reaction count is at least the expected minimum.

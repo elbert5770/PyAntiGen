@@ -85,8 +85,8 @@ def create_project():
         print("  Created folder: .agents/skills/")
 
     # Create a boilerplate script
-    main_script_path = os.path.join(project_dir, "scripts", f"{project_dir}_main.py")
-    with open(main_script_path, "w") as f:
+    generate_script_path = os.path.join(project_dir, "scripts", f"{project_dir}_generate.py")
+    with open(generate_script_path, "w") as f:
         f.write(textwrap.dedent(f"""\
             \"\"\"
             Model Builder: {project_dir}
@@ -118,25 +118,25 @@ def create_project():
                 
                 print("\\nModel generated successfully.")
                 print("Next steps:")
-                print("  1. Optionally edit parameters in antimony_models/{project_dir}_main_parameters.csv")
+                print("  1. Optionally edit parameters in antimony_models/{project_dir}_parameters.csv")
                 print("  2. From this directory (scripts/), run the simulation:")
-                print(f"     python Antimony_{project_dir}_main.py")
+                print(f"     python {project_dir}_run.py")
         """))
-    print(f"  Created file: scripts/{project_dir}_main.py")
+    print(f"  Created file: scripts/{project_dir}_generate.py")
 
     # Create dummy parameter configuration
-    param_csv_path = os.path.join(project_dir, "antimony_models", f"{project_dir}_main_parameters.csv")
+    param_csv_path = os.path.join(project_dir, "antimony_models", f"{project_dir}_parameters.csv")
     with open(param_csv_path, "w") as f:
         f.write("Parameter,Value,Comment\n")
         f.write("k_A_to_B,0.1,Default rate constant for A to B\n")
         f.write("V_comp1,1.0,Default compartment volume\n")
         f.write("A_comp1,10.0,Initial amount of A\n")
         f.write("B_comp1,0.0,Initial amount of B\n")
-    print(f"  Created file: antimony_models/{project_dir}_main_parameters.csv")
+    print(f"  Created file: antimony_models/{project_dir}_parameters.csv")
 
     # Create Antimony simulation script
-    antimony_script_path = os.path.join(project_dir, "scripts", f"Antimony_{project_dir}_main.py")
-    with open(antimony_script_path, "w") as f:
+    run_script_path = os.path.join(project_dir, "scripts", f"{project_dir}_run.py")
+    with open(run_script_path, "w") as f:
         f.write(textwrap.dedent(f"""\
             import tellurium as te
             import numpy as np
@@ -149,11 +149,12 @@ def create_project():
                 current_dir = os.path.dirname(__file__)
                 plot_path = os.path.normpath(os.path.join(current_dir, '..', 'results'))
                 plot_name = os.path.join(plot_path, os.path.basename(__file__).replace('.py', '.png'))
-                reactions_file = os.path.basename(__file__).replace('.py', '_all_reactions.txt')
-                params_file = os.path.basename(__file__).replace('Antimony_', '').replace('.py', '_parameters.csv')
-                rules_file = os.path.basename(__file__).replace('.py', '_rules.txt')
+                project = os.path.basename(__file__).replace('_run.py', '')
+                reactions_file = project + '_reactions.txt'
+                params_file = project + '_parameters.csv'
+                rules_file = project + '_rules.txt'
                 
-                # Load model files
+                # Load model files (antimony_models and SBML_models use project name only, no Antimony_ prefix)
                 model_path = os.path.normpath(os.path.join(current_dir, '..', 'antimony_models', reactions_file))
                 param_path = os.path.normpath(os.path.join(current_dir, '..', 'antimony_models', params_file))
                 rules_path = os.path.normpath(os.path.join(current_dir, '..', 'antimony_models', rules_file))
@@ -203,8 +204,8 @@ def create_project():
                     print(full_model_text)
                     return
 
-                # Export SBML
-                sbml_filename = os.path.basename(__file__).replace('.py','.xml')
+                # Export SBML (no Antimony_ prefix)
+                sbml_filename = project + '.xml'
                 sbml_path = os.path.normpath(os.path.join(current_dir, '..', 'SBML_models', sbml_filename))
                 os.makedirs(os.path.dirname(sbml_path), exist_ok=True)
                 sbml_content = r.getSBML()
@@ -238,7 +239,7 @@ def create_project():
             if __name__ == "__main__":
                 run_simulation()
         """))
-    print(f"  Created file: scripts/Antimony_{project_dir}_main.py")
+    print(f"  Created file: scripts/{project_dir}_run.py")
 
     print("\nProject scaffolded successfully!")
     print("Note: Because PyAntiGen is installed in your Python environment,")

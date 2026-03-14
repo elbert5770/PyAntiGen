@@ -35,7 +35,7 @@ MyNewModel/
 ├── .agents/
 │   └── skills/          (agent skills, e.g. module generation, ODE conversion)
 ├── scripts/
-│   └── MyNewModel_main.py
+│   └── MyNewModel_generate.py
 ├── modules/
 │   └── __init__.py
 ├── data/
@@ -48,13 +48,13 @@ MyNewModel/
 Navigate to `MyNewModel/scripts/` and run:
 
 ```bash
-python MyNewModel_main.py
+python MyNewModel_generate.py
 ```
 
-This generates the model and writes the Antimony script to `antimony_models/`. To run the simulation, first edit parameters if desired in `antimony_models/MyNewModel_main_parameters.csv`, then from `scripts/` run:
+This generates the model and writes the Antimony script to `antimony_models/`. To run the simulation, first edit parameters if desired in `antimony_models/MyNewModel_parameters.csv`, then from `scripts/` run:
 
 ```bash
-python Antimony_MyNewModel_main.py
+python MyNewModel_run.py
 ```
 
 Keeping the simulation step separate gives you time to adjust parameters and inspect the generated files before running.

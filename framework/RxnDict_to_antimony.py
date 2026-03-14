@@ -530,13 +530,13 @@ if __name__ == "__main__":
         exit()
     else:
         name = sys.argv[1]
-    rxn_filename = f"generated/{name}_all_reactions.txt"
+    rxn_filename = f"generated/{name}_reaction_dict.txt"
     print(rxn_filename)
     # Generate Antimony script from text file
     complete_script, species, parameters, unique_compartments, errors = generate_antimony_from_txt(rxn_filename, name)
     
     # Write complete script to file with name
-    antimony_filename = f"antimony_models/Antimony_{name}_all_reactions.txt"
+    antimony_filename = f"antimony_models/{name}_reactions.txt"
     with open(antimony_filename, "w") as f:
         f.write(complete_script)
     

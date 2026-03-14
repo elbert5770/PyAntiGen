@@ -23,7 +23,7 @@ def convert_to_antimony(model_path, name, rules_path, output_dir=None):
     complete_script, species, parameters, unique_compartments, errors = generate_antimony_from_txt(model_path, name)
     
     # Write complete script to file
-    antimony_filename = os.path.join(output_dir, 'antimony_models', f'Antimony_{name}_all_reactions.txt')
+    antimony_filename = os.path.join(output_dir, 'antimony_models', f'{name}_reactions.txt')
     os.makedirs(os.path.dirname(antimony_filename), exist_ok=True)
     with open(antimony_filename, "w", encoding="utf-8") as f:
         f.write(complete_script)
@@ -54,7 +54,7 @@ def convert_to_antimony(model_path, name, rules_path, output_dir=None):
         with open(rules_path, "r", encoding="utf-8") as f:
             rules_content = f.read()
             
-        rules_output_path = os.path.join(output_dir, 'antimony_models', f'Antimony_{name}_rules.txt')
+        rules_output_path = os.path.join(output_dir, 'antimony_models', f'{name}_rules.txt')
         with open(rules_output_path, "w", encoding="utf-8") as f:
             f.write(rules_content)
         print(f"  - Rules file written to '{rules_output_path}'")

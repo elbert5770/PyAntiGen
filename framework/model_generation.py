@@ -29,7 +29,7 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
     print("Wrote to", rules_path)
     
     # Output reactions
-    filename = os.path.basename(calling_file_path).replace('.py', '_all_reactions.txt')
+    filename = os.path.basename(calling_file_path).replace('.py', '_reaction_dict.txt')
     model_path = os.path.join(script_dir, '..', 'generated', filename)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     with open(model_path, "w", encoding="utf-8") as f:
