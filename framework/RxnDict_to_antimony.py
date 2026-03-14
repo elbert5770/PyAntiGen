@@ -1,6 +1,14 @@
+"""
+Convert reaction dictionaries to Antimony format.
+Reactants/products may be list of strings or bracket string (e.g. '[A, B]' or '[A] + [B]').
+Compartment can be explicit per reaction (compartment= / compartment_reverse=) or inferred from species suffix.
+Rate units and volume scaling: see framework.rate_laws.
+"""
 import json
 import re
 import sys
+
+from framework.models import normalize_species_list, parse_species_list
 
 def extract_species_and_parameters_from_reactions(reaction_string):
     """
@@ -80,141 +88,123 @@ def write_list_to_file(items, filename):
         for item in items:
             f.write(f"{item}\n")
 
-def generate_species_declarations(species_list):
+def _infer_compartment_from_species(species_name: str) -> str:
+    """Infer compartment from species name suffix (last segment after underscore)."""
+    if '_' in species_name:
+        return species_name.split('_')[-1]
+    return species_name
+
+
+def generate_species_declarations(species_list, species_compartment_map=None):
     """
-    Generate species declarations in the format 'species species_X in compartment X'
-    where X is the text after the final '_' in the species name.
+    Generate species declarations in the format 'substanceOnly species X in compartment'.
+    Uses explicit species_compartment_map when provided; otherwise infers compartment
+    from the last segment after underscore (so compartment names must not contain underscores).
     
     Args:
         species_list (list): List of species names
+        species_compartment_map (dict, optional): Map species_name -> compartment name
         
     Returns:
         str: Formatted species declarations
     """
     declarations = []
     for species in species_list:
-        # Find the last underscore and get the compartment
-        if '_' in species:
-            compartment = species.split('_')[-1]
-            declarations.append(f"substanceOnly species {species} in {compartment}")
-        else:
-            # If no underscore, use the species name as compartment
-            declarations.append(f"substanceOnly species {species} in {species}")
-    
+        compartment = (
+            species_compartment_map.get(species)
+            if species_compartment_map is not None
+            else None
+        ) or _infer_compartment_from_species(species)
+        declarations.append(f"substanceOnly species {species} in {compartment}")
     return '\n'.join(declarations)
 
 def collect_unique_compartments_from_reactions(reactions):
     """
-    Collect all unique compartment names from the reactions.
+    Collect all unique compartment names and build a species->compartment registry.
+    Uses explicit 'compartment' / 'compartment_reverse' on each reaction when present;
+    otherwise infers compartment from species name suffix (last segment after '_').
     
     Args:
         reactions (list): List of reaction dictionaries
         
     Returns:
-        set: A set containing all unique compartment names.
+        tuple: (unique_compartments set, errors list, species_compartment_map dict)
     """
     unique_compartments = set()
     errors = []
+    species_compartment_map = {}
     
     for i, reaction in enumerate(reactions):
         reaction_name = reaction.get("Reaction_name", f"Reaction_{i}")
-        # Extract compartments from reactants and products
-        reactants_str = reaction.get("Reactants", "")
-        products_str = reaction.get("Products", "")
+        explicit_comp = reaction.get("compartment")
+        explicit_comp_reverse = reaction.get("compartment_reverse")
+        reactants = normalize_species_list(reaction.get("Reactants", ""))
+        products = normalize_species_list(reaction.get("Products", ""))
         
-        # Parse reactants
-        if reactants_str and reactants_str != "[0]":
-            reactants_str = reactants_str.strip('[]')
-            if reactants_str:
-                reactants = [item.strip() for item in reactants_str.split(',')]
-                for reactant in reactants:
-                    if '_' in reactant:
-                        compartment = reactant.split('_')[-1]
-                        # Check for malformed compartment names
-                        if compartment.startswith('[') or compartment.endswith(']') or "'" in compartment:
-                            error_msg = f"ERROR: Malformed compartment name '{compartment}' in reactant '{reactant}' in reaction '{reaction_name}'"
-                            errors.append(error_msg)
-                        else:
-                            unique_compartments.add(compartment)
+        for reactant in reactants:
+            comp = explicit_comp if explicit_comp is not None else _infer_compartment_from_species(reactant)
+            if comp.startswith('[') or comp.endswith(']') or "'" in comp:
+                errors.append(
+                    f"ERROR: Malformed compartment name '{comp}' in reactant '{reactant}' in reaction '{reaction_name}'"
+                )
+            else:
+                unique_compartments.add(comp)
+                species_compartment_map[reactant] = comp
         
-        # Parse products
-        if products_str and products_str != "[0]":
-            products_str = products_str.strip('[]')
-            if products_str:
-                products = [item.strip() for item in products_str.split(',')]
-                for product in products:
-                    if '_' in product:
-                        compartment = product.split('_')[-1]
-                        # Check for malformed compartment names
-                        if compartment.startswith('[') or compartment.endswith(']') or "'" in compartment:
-                            error_msg = f"ERROR: Malformed compartment name '{compartment}' in product '{product}' in reaction '{reaction_name}'"
-                            errors.append(error_msg)
-                        else:
-                            unique_compartments.add(compartment)
+        for product in products:
+            comp = explicit_comp_reverse if explicit_comp_reverse is not None else _infer_compartment_from_species(product)
+            if comp.startswith('[') or comp.endswith(']') or "'" in comp:
+                errors.append(
+                    f"ERROR: Malformed compartment name '{comp}' in product '{product}' in reaction '{reaction_name}'"
+                )
+            else:
+                unique_compartments.add(comp)
+                species_compartment_map[product] = comp
     
-    return unique_compartments, errors
+    return unique_compartments, errors, species_compartment_map
+
+def _parse_rate_proto(rate_proto, rate_type):
+    """Parse Rate_eqtn_prototype into a list of one or two rate expression strings."""
+    if rate_proto is None:
+        return []
+    if isinstance(rate_proto, list):
+        return [str(x).strip() for x in rate_proto if str(x).strip()]
+    s = str(rate_proto).strip()
+    if not s:
+        return []
+    if s.startswith('[') and s.endswith(']'):
+        return [x.strip() for x in s[1:-1].split(',') if x.strip()]
+    return [s]
+
 
 def generate_single_reaction_from_dict(reaction_dict):
     """
     Generate a single reaction string from a reaction dictionary.
-    
-    Args:
-        reaction_dict (dict): The reaction dictionary
-        
-    Returns:
-        str: The generated reaction string
+    Reactants/Products may be list of strings or bracket string (e.g. '[A, B]' or '[A] + [B]').
+    Uses explicit 'compartment' / 'compartment_reverse' when present.
     """
-    reactants_str = reaction_dict["Reactants"]
-    products_str = reaction_dict["Products"]
-    rate_proto_str = reaction_dict["Rate_eqtn_prototype"]
-    rate_type = reaction_dict["Rate_type"]
+    reactants = normalize_species_list(reaction_dict.get("Reactants", ""))
+    products = normalize_species_list(reaction_dict.get("Products", ""))
+    rate_proto = reaction_dict.get("Rate_eqtn_prototype")
+    rate_type = reaction_dict.get("Rate_type", "")
     
-    # Extract compartment from reactants or products
-    compartment = None
-    compartment_reverse = None
-    if reactants_str and reactants_str != "[0]":
-        reactants_str_clean = reactants_str.strip('[]')
-        if reactants_str_clean:
-            first_reactant = reactants_str_clean.split(',')[0].strip()
-            if '_' in first_reactant:
-                compartment = first_reactant.split('_')[-1]
-                # Check for malformed compartment names
-                if compartment.startswith('[') or compartment.endswith(']') or "'" in compartment:
-                    compartment = None
-    if products_str and products_str != "[0]":
-        products_str_clean = products_str.strip('[]')
-        if products_str_clean:
-            first_product = products_str_clean.split(',')[0].strip()
-            if '_' in first_product:
-                compartment_reverse = first_product.split('_')[-1]
-                # Check for malformed compartment names
-                if compartment_reverse.startswith('[') or compartment_reverse.endswith(']') or "'" in compartment_reverse:
-                    compartment_reverse = None
-    
-    if reactants_str == "0" or reactants_str == "[0]":
-        reactants = []
-    else:
-        reactants_str = reactants_str.strip('[]')
-        if reactants_str:
-            reactants = [item.strip() for item in reactants_str.split(',')]
-        else:
-            reactants = []
+    # Explicit compartment from reaction dict; else infer from first species
+    compartment = reaction_dict.get("compartment")
+    compartment_reverse = reaction_dict.get("compartment_reverse")
+    if compartment is None and reactants:
+        compartment = _infer_compartment_from_species(reactants[0])
+        if compartment and (compartment.startswith('[') or compartment.endswith(']') or "'" in compartment):
+            compartment = None
+    if compartment_reverse is None and products:
+        compartment_reverse = _infer_compartment_from_species(products[0])
+        if compartment_reverse and (compartment_reverse.startswith('[') or compartment_reverse.endswith(']') or "'" in compartment_reverse):
+            compartment_reverse = None
 
-    if products_str == "0" or products_str == "[0]":
-        products = []
-    else:
-        # Products can be a single item or a list
-        prod_cleaned = products_str.strip('[]')
-        if prod_cleaned:
-            products = [item.strip() for item in prod_cleaned.split(',')]
-        else:
-            products = []
-
+    rate_constants = _parse_rate_proto(rate_proto, rate_type)
     reaction_string = ""
 
     if rate_type == "RMA":
         # RMA (reversible mass action) needs two rate constants
-        rate_constants = [item.strip() for item in rate_proto_str.strip('[]').split(',')]
         if len(rate_constants) < 2:
             raise ValueError(f"RMA reaction '{reaction_dict.get('Reaction_name', 'UNKNOWN')}' requires two rate constants in Rate_eqtn_prototype, got: '{reaction_dict['Rate_eqtn_prototype']}'")
         # Forward
@@ -241,7 +231,6 @@ def generate_single_reaction_from_dict(reaction_dict):
         reaction_string += f"{reactants_rev_str} -> {products_rev_str}; {rate_rev}\n"
     elif rate_type == "BDF":
         # BDF (bidirectional flow) uses the same rate constant for both directions
-        rate_constants = [item.strip() for item in rate_proto_str.strip('[]').split(',')]
         if len(rate_constants) < 1:
             raise ValueError(f"BDF reaction '{reaction_dict.get('Reaction_name', 'UNKNOWN')}' requires at least one rate constant in Rate_eqtn_prototype, got: '{reaction_dict['Rate_eqtn_prototype']}'")
         # Forward
@@ -262,14 +251,13 @@ def generate_single_reaction_from_dict(reaction_dict):
         reaction_string += f"{reactants_rev_str} -> {products_rev_str}; {rate_rev}\n"
     elif rate_type == "MA" or rate_type == "UDF":
         # UDF is treated the same as MA (unidirectional flow)
-        rate_constants = [item.strip() for item in rate_proto_str.strip('[]').split(',')]
-        # Forward
+        rate0 = (rate_constants[0] if rate_constants else "") or str(rate_proto or "").strip()
         reactants_fwd_str = " + ".join(reactants)
         products_fwd_str = " + ".join(products)
         if reactants:
-            rate_fwd = f"{rate_constants[0]} * {' * '.join(reactants)}"
+            rate_fwd = f"{rate0} * {' * '.join(reactants)}"
         else:
-            rate_fwd = rate_constants[0]  # Zero-order reaction
+            rate_fwd = rate0  # Zero-order reaction
         # Multiply by compartment volume for MA/RMA/custom_conc_per_time
         if rate_type == "MA" and compartment:
             rate_fwd = f"{rate_fwd} * V_{compartment}"
@@ -280,9 +268,7 @@ def generate_single_reaction_from_dict(reaction_dict):
     elif rate_type == "custom_conc_per_time":
         reactants_side = " + ".join(reactants)
         products_side = " + ".join(products) if products else ""
-        
-        rate_eqtn = rate_proto_str
-        # if it was a list-like string, take the content.
+        rate_eqtn = (rate_constants[0] if rate_constants else "") or str(rate_proto or "").strip()
         if rate_eqtn.startswith('[') and rate_eqtn.endswith(']'):
             rate_eqtn = rate_eqtn.strip('[]')
         
@@ -295,9 +281,7 @@ def generate_single_reaction_from_dict(reaction_dict):
     elif rate_type == "custom_amt_per_time":
         reactants_side = " + ".join(reactants)
         products_side = " + ".join(products) if products else ""
-        
-        rate_eqtn = rate_proto_str
-        # if it was a list-like string, take the content.
+        rate_eqtn = (rate_constants[0] if rate_constants else "") or str(rate_proto or "").strip()
         if rate_eqtn.startswith('[') and rate_eqtn.endswith(']'):
             rate_eqtn = rate_eqtn.strip('[]')
         
@@ -308,9 +292,7 @@ def generate_single_reaction_from_dict(reaction_dict):
     elif rate_type == "custom":
         reactants_side = " + ".join(reactants)
         products_side = " + ".join(products) if products else ""
-        
-        rate_eqtn = rate_proto_str
-        # if it was a list-like string, take the content.
+        rate_eqtn = (rate_constants[0] if rate_constants else "") or str(rate_proto or "").strip()
         if rate_eqtn.startswith('[') and rate_eqtn.endswith(']'):
             rate_eqtn = rate_eqtn.strip('[]')
         
@@ -320,26 +302,26 @@ def generate_single_reaction_from_dict(reaction_dict):
     
     return reaction_string
 
-def convert_species_to_concentrations(reaction_string, species_list):
+def convert_species_to_concentrations(reaction_string, species_list, species_compartment_map=None):
     """
     Convert species in rate equations from amounts to concentrations by dividing by compartment volumes.
-    This is needed for antimony solver where species names refer to amounts but rate equations need concentrations.
+    Uses explicit species_compartment_map when provided; otherwise infers from species name suffix.
     
     Args:
         reaction_string (str): The reaction string with species as amounts
         species_list (list): List of species names
+        species_compartment_map (dict, optional): Map species_name -> compartment name
         
     Returns:
         str: Modified reaction string with species converted to concentrations in rate equations
     """
-    # Create a mapping of species to their compartments
     species_to_compartment = {}
     for species in species_list:
-        if '_' in species:
-            compartment = species.split('_')[-1]
-            species_to_compartment[species] = compartment
+        if species_compartment_map is not None and species in species_compartment_map:
+            species_to_compartment[species] = species_compartment_map[species]
+        elif '_' in species:
+            species_to_compartment[species] = species.split('_')[-1]
         else:
-            # If no underscore, use the species name as compartment
             species_to_compartment[species] = species
     
     # Process each line
@@ -494,8 +476,8 @@ def generate_antimony_from_txt(txt_file_path, name):
     # Read reactions from text file
     reactions = read_reactions_from_txt(txt_file_path)
     
-    # Collect unique compartments and check for errors
-    unique_compartments, compartment_errors = collect_unique_compartments_from_reactions(reactions)
+    # Collect unique compartments, errors, and explicit species->compartment registry
+    unique_compartments, compartment_errors, species_compartment_map = collect_unique_compartments_from_reactions(reactions)
     
     # Generate reactions
     reaction_string = ""
@@ -513,7 +495,7 @@ def generate_antimony_from_txt(txt_file_path, name):
     parameters = sorted(list(set(parameters)))
     
     # Convert species in rate equations to concentrations for antimony solver
-    reactions_antimony = convert_species_to_concentrations(reaction_string, species)
+    reactions_antimony = convert_species_to_concentrations(reaction_string, species, species_compartment_map)
     
     # Add reaction names to the reaction string (after all processing)
     reactions_antimony = add_reaction_names_to_string(reactions_antimony, reactions)
@@ -526,8 +508,8 @@ def generate_antimony_from_txt(txt_file_path, name):
         complete_script += f"compartment {compartment} = V_{compartment}\n"
     complete_script += "\n"  # Add blank line after compartments
     
-    # Add species declarations
-    species_declarations = generate_species_declarations(species)
+    # Add species declarations (use explicit compartment map when available)
+    species_declarations = generate_species_declarations(species, species_compartment_map)
     complete_script += species_declarations
     complete_script += "\n\n"  # Add blank lines after species
     

@@ -1,0 +1,141 @@
+compartment BrainISF = V_BrainISF
+compartment CSF = V_CSF
+compartment IV = V_IV
+compartment Peripheral = V_Peripheral
+compartment Plasma = V_Plasma
+
+substanceOnly species AB42_BrainISF in BrainISF
+substanceOnly species AB42_CSF in CSF
+substanceOnly species AB42_Oligomer_BrainISF in BrainISF
+substanceOnly species AB42_Oligomer_CSF in CSF
+substanceOnly species AB42_Oligomer_Plasma in Plasma
+substanceOnly species AB42_Oligomer__Antibody_BrainISF in BrainISF
+substanceOnly species AB42_Oligomer__Antibody_CSF in CSF
+substanceOnly species AB42_Oligomer__Antibody_Plasma in Plasma
+substanceOnly species AB42_Oligomer__Antibody__FcR_BrainISF in BrainISF
+substanceOnly species AB42_Plaque_BrainISF in BrainISF
+substanceOnly species AB42_Plaque__Antibody_BrainISF in BrainISF
+substanceOnly species AB42_Plaque__Antibody__FcR_BrainISF in BrainISF
+substanceOnly species AB42_Plasma in Plasma
+substanceOnly species AB42__Antibody_BrainISF in BrainISF
+substanceOnly species AB42__Antibody_CSF in CSF
+substanceOnly species AB42__Antibody_Plasma in Plasma
+substanceOnly species APP_BrainISF in BrainISF
+substanceOnly species APP_Plasma in Plasma
+substanceOnly species APP__BACE_BrainISF in BrainISF
+substanceOnly species APP__BACE_Plasma in Plasma
+substanceOnly species Antibody_BrainISF in BrainISF
+substanceOnly species Antibody_CSF in CSF
+substanceOnly species Antibody_IV in IV
+substanceOnly species Antibody_Peripheral in Peripheral
+substanceOnly species Antibody_Plasma in Plasma
+substanceOnly species BACE_BrainISF in BrainISF
+substanceOnly species BACE_Plasma in Plasma
+substanceOnly species CTFbeta_BrainISF in BrainISF
+substanceOnly species CTFbeta_Plasma in Plasma
+substanceOnly species CTFbeta__GammaSecretase_BrainISF in BrainISF
+substanceOnly species CTFbeta__GammaSecretase_Plasma in Plasma
+substanceOnly species FcR_BrainISF in BrainISF
+substanceOnly species GammaSecretase_BrainISF in BrainISF
+substanceOnly species GammaSecretase_Plasma in Plasma
+substanceOnly species SolubleBACE_BrainISF in BrainISF
+substanceOnly species SolubleBACE_CSF in CSF
+substanceOnly species SolubleBACE_Plasma in Plasma
+
+Flow_IV_mAb_ : Antibody_IV -> Antibody_Plasma; kinfusion * (Antibody_IV/V_IV) * V_IV
+Clear_mAb_Plasma : Antibody_Plasma ->; kclearmAb * (Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_12_mAb_ : Antibody_Plasma -> Antibody_Peripheral; k12mAb * (Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_21_mAb_ : Antibody_Peripheral -> Antibody_Plasma; k21mAb * (Antibody_Peripheral/V_Peripheral) * V_Peripheral
+Flow_13_mAb_ : Antibody_Plasma -> Antibody_CSF; k13mAb * (Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_31_mAb_ : Antibody_CSF -> Antibody_Plasma; k31mAb * (Antibody_CSF/V_CSF) * V_CSF
+Flow_14_mAb_ : Antibody_Plasma -> Antibody_BrainISF; k14mAb * (Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_41_mAb_ : Antibody_BrainISF -> Antibody_Plasma; k41mAb * (Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Flow_43_mAb_ : Antibody_BrainISF -> Antibody_CSF; k43mAb * (Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Synth_APP_Plasma : -> APP_Plasma; ksynthAPP_plasma
+Clear_APP_Plasma : APP_Plasma ->; kclearAPP * (APP_Plasma/V_Plasma) * V_Plasma
+Synth_BACE_Plasma : -> BACE_Plasma; ksynthBACE_plasma
+Clear_BACE_Plasma : BACE_Plasma ->; kclearBACE * (BACE_Plasma/V_Plasma) * V_Plasma
+Synth_GammaSecretase_Plasma : -> GammaSecretase_Plasma; ksynthGamma_plasma
+Clear_GammaSecretase_Plasma : GammaSecretase_Plasma ->; kclearGamma * (GammaSecretase_Plasma/V_Plasma) * V_Plasma
+Cleave_BACE_Plasma : BACE_Plasma -> SolubleBACE_Plasma; kcleave * (BACE_Plasma/V_Plasma) * V_Plasma
+Bind_APP_BACE_Plasma_fwd : APP_Plasma + BACE_Plasma -> APP__BACE_Plasma; konPP * (APP_Plasma/V_Plasma) * (BACE_Plasma/V_Plasma) * V_Plasma
+Bind_APP_BACE_Plasma_rev : APP__BACE_Plasma -> APP_Plasma + BACE_Plasma; koffBACE * (APP__BACE_Plasma/V_Plasma) * V_Plasma
+Cat_APP_BACE_Plasma : APP__BACE_Plasma -> CTFbeta_Plasma + BACE_Plasma; kcatBACE * (APP__BACE_Plasma/V_Plasma) * V_Plasma
+Bind_CTFb_Gamma_Plasma_fwd : CTFbeta_Plasma + GammaSecretase_Plasma -> CTFbeta__GammaSecretase_Plasma; konPP * (CTFbeta_Plasma/V_Plasma) * (GammaSecretase_Plasma/V_Plasma) * V_Plasma
+Bind_CTFb_Gamma_Plasma_rev : CTFbeta__GammaSecretase_Plasma -> CTFbeta_Plasma + GammaSecretase_Plasma; koffGamma * (CTFbeta__GammaSecretase_Plasma/V_Plasma) * V_Plasma
+Cat_CTFb_Gamma_Plasma : CTFbeta__GammaSecretase_Plasma -> AB42_Plasma + GammaSecretase_Plasma; kcatGamma * (CTFbeta__GammaSecretase_Plasma/V_Plasma) * V_Plasma
+Synth_APP_BrainISF : -> APP_BrainISF; ksynthAPP_bisf
+Clear_APP_BrainISF : APP_BrainISF ->; kclearAPP * (APP_BrainISF/V_BrainISF) * V_BrainISF
+Synth_BACE_BrainISF : -> BACE_BrainISF; ksynthBACE_bisf
+Clear_BACE_BrainISF : BACE_BrainISF ->; kclearBACE * (BACE_BrainISF/V_BrainISF) * V_BrainISF
+Synth_GammaSecretase_BrainISF : -> GammaSecretase_BrainISF; ksynthGamma_bisf
+Clear_GammaSecretase_BrainISF : GammaSecretase_BrainISF ->; kclearGamma * (GammaSecretase_BrainISF/V_BrainISF) * V_BrainISF
+Cleave_BACE_BrainISF : BACE_BrainISF -> SolubleBACE_BrainISF; kcleave * (BACE_BrainISF/V_BrainISF) * V_BrainISF
+Bind_APP_BACE_BrainISF_fwd : APP_BrainISF + BACE_BrainISF -> APP__BACE_BrainISF; konPP * (APP_BrainISF/V_BrainISF) * (BACE_BrainISF/V_BrainISF) * V_BrainISF
+Bind_APP_BACE_BrainISF_rev : APP__BACE_BrainISF -> APP_BrainISF + BACE_BrainISF; koffBACE * (APP__BACE_BrainISF/V_BrainISF) * V_BrainISF
+Cat_APP_BACE_BrainISF : APP__BACE_BrainISF -> CTFbeta_BrainISF + BACE_BrainISF; kcatBACE * (APP__BACE_BrainISF/V_BrainISF) * V_BrainISF
+Bind_CTFb_Gamma_BrainISF_fwd : CTFbeta_BrainISF + GammaSecretase_BrainISF -> CTFbeta__GammaSecretase_BrainISF; konPP * (CTFbeta_BrainISF/V_BrainISF) * (GammaSecretase_BrainISF/V_BrainISF) * V_BrainISF
+Bind_CTFb_Gamma_BrainISF_rev : CTFbeta__GammaSecretase_BrainISF -> CTFbeta_BrainISF + GammaSecretase_BrainISF; koffGamma * (CTFbeta__GammaSecretase_BrainISF/V_BrainISF) * V_BrainISF
+Cat_CTFb_Gamma_BrainISF : CTFbeta__GammaSecretase_BrainISF -> AB42_BrainISF + GammaSecretase_BrainISF; kcatGamma * (CTFbeta__GammaSecretase_BrainISF/V_BrainISF) * V_BrainISF
+Agg_M2G_G2M_Abeta_Plasma_fwd : AB42_Plasma -> AB42_Oligomer_Plasma; kM2G * (AB42_Plasma/V_Plasma) * V_Plasma
+Agg_M2G_G2M_Abeta_Plasma_rev : AB42_Oligomer_Plasma -> AB42_Plasma; kG2M_plasma * (AB42_Oligomer_Plasma/V_Plasma) * V_Plasma
+Clear_Abeta_Plasma : AB42_Plasma ->; kclearAbeta_plasma * (AB42_Plasma/V_Plasma) * V_Plasma
+Clear_Aolig_Plasma : AB42_Oligomer_Plasma ->; kclearAolig_plasma * (AB42_Oligomer_Plasma/V_Plasma) * V_Plasma
+Agg_M2G_G2M_Abeta_CSF_fwd : AB42_CSF -> AB42_Oligomer_CSF; kM2G * (AB42_CSF/V_CSF) * V_CSF
+Agg_M2G_G2M_Abeta_CSF_rev : AB42_Oligomer_CSF -> AB42_CSF; kG2M_csf * (AB42_Oligomer_CSF/V_CSF) * V_CSF
+Agg_M2G_G2M_Abeta_BrainISF_fwd : AB42_BrainISF -> AB42_Oligomer_BrainISF; kM2G * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+Agg_M2G_G2M_Abeta_BrainISF_rev : AB42_Oligomer_BrainISF -> AB42_BrainISF; kG2M_bisf * (AB42_Oligomer_BrainISF/V_BrainISF) * V_BrainISF
+Clear_Abeta_BrainISF : AB42_BrainISF ->; kclearAbeta_bisf * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+Clear_Aolig_BrainISF : AB42_Oligomer_BrainISF ->; kclearAolig_bisf * (AB42_Oligomer_BrainISF/V_BrainISF) * V_BrainISF
+Agg_G2P_P2G_Abeta_BrainISF_fwd : AB42_Oligomer_BrainISF -> AB42_Plaque_BrainISF; kG2P * (AB42_Oligomer_BrainISF/V_BrainISF) * V_BrainISF
+Agg_G2P_P2G_Abeta_BrainISF_rev : AB42_Plaque_BrainISF -> AB42_Oligomer_BrainISF; kP2G_bisf * (AB42_Plaque_BrainISF/V_BrainISF) * V_BrainISF
+Clear_Aplaq_BrainISF : AB42_Plaque_BrainISF ->; kclearAplaque_bisf * (AB42_Plaque_BrainISF/V_BrainISF) * V_BrainISF
+Flow_13_Abeta_ : AB42_Plasma -> AB42_CSF; k13Abeta * (AB42_Plasma/V_Plasma) * V_Plasma
+Flow_31_Abeta_ : AB42_CSF -> AB42_Plasma; k31Abeta * (AB42_CSF/V_CSF) * V_CSF
+Flow_14_Abeta_ : AB42_Plasma -> AB42_BrainISF; k14Abeta * (AB42_Plasma/V_Plasma) * V_Plasma
+Flow_41_Abeta_ : AB42_BrainISF -> AB42_Plasma; k41Abeta * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+Flow_43_Abeta_ : AB42_BrainISF -> AB42_CSF; k43Abeta * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+Flow_13_Aolig_ : AB42_Oligomer_Plasma -> AB42_Oligomer_CSF; k13Aolig * (AB42_Oligomer_Plasma/V_Plasma) * V_Plasma
+Flow_31_Aolig_ : AB42_Oligomer_CSF -> AB42_Oligomer_Plasma; k31Aolig * (AB42_Oligomer_CSF/V_CSF) * V_CSF
+Flow_14_Aolig_ : AB42_Oligomer_Plasma -> AB42_Oligomer_BrainISF; k14Aolig * (AB42_Oligomer_Plasma/V_Plasma) * V_Plasma
+Flow_41_Aolig_ : AB42_Oligomer_BrainISF -> AB42_Oligomer_Plasma; k41Aolig * (AB42_Oligomer_BrainISF/V_BrainISF) * V_BrainISF
+Flow_43_Aolig_ : AB42_Oligomer_BrainISF -> AB42_Oligomer_CSF; k43Aolig * (AB42_Oligomer_BrainISF/V_BrainISF) * V_BrainISF
+Flow_13_BACEs_ : SolubleBACE_Plasma -> SolubleBACE_CSF; k13BACE * (SolubleBACE_Plasma/V_Plasma) * V_Plasma
+Flow_31_BACEs_ : SolubleBACE_CSF -> SolubleBACE_Plasma; k31BACE * (SolubleBACE_CSF/V_CSF) * V_CSF
+Flow_14_BACEs_ : SolubleBACE_Plasma -> SolubleBACE_BrainISF; k14BACE * (SolubleBACE_Plasma/V_Plasma) * V_Plasma
+Flow_41_BACEs_ : SolubleBACE_BrainISF -> SolubleBACE_Plasma; k41BACE * (SolubleBACE_BrainISF/V_BrainISF) * V_BrainISF
+Flow_43_BACEs_ : SolubleBACE_BrainISF -> SolubleBACE_CSF; k43BACE * (SolubleBACE_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Abeta_Plasma_fwd : Antibody_Plasma + AB42_Plasma -> AB42__Antibody_Plasma; konPP * (Antibody_Plasma/V_Plasma) * (AB42_Plasma/V_Plasma) * V_Plasma
+Bind_mAb_Abeta_Plasma_rev : AB42__Antibody_Plasma -> Antibody_Plasma + AB42_Plasma; kmAb0 * (AB42__Antibody_Plasma/V_Plasma) * V_Plasma
+Bind_mAb_Aolig_Plasma_fwd : Antibody_Plasma + AB42_Oligomer_Plasma -> AB42_Oligomer__Antibody_Plasma; konPP * (Antibody_Plasma/V_Plasma) * (AB42_Oligomer_Plasma/V_Plasma) * V_Plasma
+Bind_mAb_Aolig_Plasma_rev : AB42_Oligomer__Antibody_Plasma -> Antibody_Plasma + AB42_Oligomer_Plasma; kmAb1 * (AB42_Oligomer__Antibody_Plasma/V_Plasma) * V_Plasma
+Clear_mAb_Abeta_Plasma : AB42__Antibody_Plasma ->; kclearmAb * (AB42__Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_13_mAb_Abeta_ : AB42__Antibody_Plasma -> AB42__Antibody_CSF; k13mAb * (AB42__Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_14_mAb_Abeta_ : AB42__Antibody_Plasma -> AB42__Antibody_BrainISF; k14mAb * (AB42__Antibody_Plasma/V_Plasma) * V_Plasma
+Clear_mAb_Aolig_Plasma : AB42_Oligomer__Antibody_Plasma ->; kclearmAb * (AB42_Oligomer__Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_13_mAb_Aolig_ : AB42_Oligomer__Antibody_Plasma -> AB42_Oligomer__Antibody_CSF; k13mAb * (AB42_Oligomer__Antibody_Plasma/V_Plasma) * V_Plasma
+Flow_14_mAb_Aolig_ : AB42_Oligomer__Antibody_Plasma -> AB42_Oligomer__Antibody_BrainISF; k14mix * (AB42_Oligomer__Antibody_Plasma/V_Plasma) * V_Plasma
+Bind_mAb_Abeta_CSF_fwd : Antibody_CSF + AB42_CSF -> AB42__Antibody_CSF; konPP * (Antibody_CSF/V_CSF) * (AB42_CSF/V_CSF) * V_CSF
+Bind_mAb_Abeta_CSF_rev : AB42__Antibody_CSF -> Antibody_CSF + AB42_CSF; kmAb0 * (AB42__Antibody_CSF/V_CSF) * V_CSF
+Bind_mAb_Aolig_CSF_fwd : Antibody_CSF + AB42_Oligomer_CSF -> AB42_Oligomer__Antibody_CSF; konPP * (Antibody_CSF/V_CSF) * (AB42_Oligomer_CSF/V_CSF) * V_CSF
+Bind_mAb_Aolig_CSF_rev : AB42_Oligomer__Antibody_CSF -> Antibody_CSF + AB42_Oligomer_CSF; kmAb1 * (AB42_Oligomer__Antibody_CSF/V_CSF) * V_CSF
+Flow_31_mAb_Abeta_ : AB42__Antibody_CSF -> AB42__Antibody_Plasma; k31mAb * (AB42__Antibody_CSF/V_CSF) * V_CSF
+Flow_31_mAb_Aolig_ : AB42_Oligomer__Antibody_CSF -> AB42_Oligomer__Antibody_Plasma; k31mAb * (AB42_Oligomer__Antibody_CSF/V_CSF) * V_CSF
+Bind_mAb_Abeta_BrainISF_fwd : Antibody_BrainISF + AB42_BrainISF -> AB42__Antibody_BrainISF; konPP * (Antibody_BrainISF/V_BrainISF) * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Abeta_BrainISF_rev : AB42__Antibody_BrainISF -> Antibody_BrainISF + AB42_BrainISF; kmAb0 * (AB42__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aolig_BrainISF_fwd : Antibody_BrainISF + AB42_Oligomer_BrainISF -> AB42_Oligomer__Antibody_BrainISF; konPP * (Antibody_BrainISF/V_BrainISF) * (AB42_Oligomer_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aolig_BrainISF_rev : AB42_Oligomer__Antibody_BrainISF -> Antibody_BrainISF + AB42_Oligomer_BrainISF; kmAb1 * (AB42_Oligomer__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Flow_41_mAb_Abeta_ : AB42__Antibody_BrainISF -> AB42__Antibody_Plasma; k41mAb * (AB42__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Flow_43_mAb_Abeta_ : AB42__Antibody_BrainISF -> AB42__Antibody_CSF; k43mAb * (AB42__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Flow_41_mAb_Aolig_ : AB42_Oligomer__Antibody_BrainISF -> AB42_Oligomer__Antibody_Plasma; k41mix * (AB42_Oligomer__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Flow_43_mAb_Aolig_ : AB42_Oligomer__Antibody_BrainISF -> AB42_Oligomer__Antibody_CSF; k43mix * (AB42_Oligomer__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aplaq_BrainISF_fwd : Antibody_BrainISF + AB42_Plaque_BrainISF -> AB42_Plaque__Antibody_BrainISF; konPD * (Antibody_BrainISF/V_BrainISF) * (AB42_Plaque_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aplaq_BrainISF_rev : AB42_Plaque__Antibody_BrainISF -> Antibody_BrainISF + AB42_Plaque_BrainISF; kmAb2 * (AB42_Plaque__Antibody_BrainISF/V_BrainISF) * V_BrainISF
+Synth_FcR_BrainISF : -> FcR_BrainISF; ksynthFcR_bisf
+Clear_FcR_BrainISF : FcR_BrainISF ->; kclearFcR * (FcR_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aolig_FcR_BrainISF_fwd : AB42_Oligomer__Antibody_BrainISF + FcR_BrainISF -> AB42_Oligomer__Antibody__FcR_BrainISF; konPF * (AB42_Oligomer__Antibody_BrainISF/V_BrainISF) * (FcR_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aolig_FcR_BrainISF_rev : AB42_Oligomer__Antibody__FcR_BrainISF -> AB42_Oligomer__Antibody_BrainISF + FcR_BrainISF; koffPF * (AB42_Oligomer__Antibody__FcR_BrainISF/V_BrainISF) * V_BrainISF
+Catalysis_ADCP_Aolig_BrainISF : AB42_Oligomer__Antibody__FcR_BrainISF -> FcR_BrainISF; kcatADCP * (AB42_Oligomer__Antibody__FcR_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aplaq_FcR_BrainISF_fwd : AB42_Plaque__Antibody_BrainISF + FcR_BrainISF -> AB42_Plaque__Antibody__FcR_BrainISF; konPF * (AB42_Plaque__Antibody_BrainISF/V_BrainISF) * (FcR_BrainISF/V_BrainISF) * V_BrainISF
+Bind_mAb_Aplaq_FcR_BrainISF_rev : AB42_Plaque__Antibody__FcR_BrainISF -> AB42_Plaque__Antibody_BrainISF + FcR_BrainISF; koffPF * (AB42_Plaque__Antibody__FcR_BrainISF/V_BrainISF) * V_BrainISF
+Catalysis_ADCP_Aplaq_BrainISF : AB42_Plaque__Antibody__FcR_BrainISF -> FcR_BrainISF; kcatADCP * (AB42_Plaque__Antibody__FcR_BrainISF/V_BrainISF) * V_BrainISF

@@ -10,10 +10,27 @@ class PyAntiGen:
         self.rules = []
         self.counter = 0
 
-    def add_reaction(self, name, reactants, products, rate_type, rate_eqtn):
+    def add_reaction(
+        self,
+        name,
+        reactants,
+        products,
+        rate_type,
+        rate_eqtn,
+        compartment=None,
+        compartment_reverse=None,
+    ):
         from framework.reaction_creation import reaction_creation
         self.counter, self.reactions = reaction_creation(
-            self.reactions, self.counter, name, reactants, products, rate_type, rate_eqtn
+            self.reactions,
+            self.counter,
+            name,
+            reactants,
+            products,
+            rate_type,
+            rate_eqtn,
+            compartment=compartment,
+            compartment_reverse=compartment_reverse,
         )
 
     def add_rule(self, rule):

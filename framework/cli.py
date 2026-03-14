@@ -1,5 +1,6 @@
 import os
 import argparse
+import shutil
 import textwrap
 
 def create_project():
@@ -13,7 +14,7 @@ def create_project():
         print(f"Error: Directory '{project_dir}' already exists.")
         return
 
-    # Directories to scaffold
+    # Directories to scaffold (top-level .agents for Cursor/agent skills)
     directories = [
         "scripts",
         "modules",
@@ -22,7 +23,9 @@ def create_project():
         "antimony_models",
         "generated",
         "results",
-        "SBML_models"
+        "SBML_models",
+        ".agents",
+        ".agents/skills",
     ]
 
     print(f"Creating PyAntiGen project '{project_dir}'...")
@@ -62,6 +65,24 @@ def create_project():
                             self.add_reaction(Reaction_name, Reactants, Products, Rate_type, Rate_eqtn_prototype)
                 """))
         print(f"  Created folder: {d}/")
+
+    # Copy framework's .agents/skills into project top-level .agents (so agents run in project context)
+    framework_dir = os.path.dirname(os.path.abspath(__file__))
+    framework_agents = os.path.join(framework_dir, ".agents")
+    project_agents_skills = os.path.join(project_dir, ".agents", "skills")
+    if os.path.isdir(framework_agents):
+        src_skills = os.path.join(framework_agents, "skills")
+        if os.path.isdir(src_skills):
+            for name in os.listdir(src_skills):
+                src_sub = os.path.join(src_skills, name)
+                if os.path.isdir(src_sub):
+                    dst_sub = os.path.join(project_agents_skills, name)
+                    shutil.copytree(src_sub, dst_sub)
+                    print(f"  Copied .agents/skills/{name}/")
+        else:
+            print("  Created folder: .agents/skills/ (no template skills in this install)")
+    else:
+        print("  Created folder: .agents/skills/")
 
     # Create a boilerplate script
     main_script_path = os.path.join(project_dir, "scripts", f"{project_dir}_main.py")

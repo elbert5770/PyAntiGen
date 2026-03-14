@@ -1,0 +1,8 @@
+# Only ship the installable package and minimal support files.
+# Exclude tests and dev artifacts from the source distribution
+# so they are not downloaded when users pip install.
+include README.md
+prune tests
+prune .git
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc *

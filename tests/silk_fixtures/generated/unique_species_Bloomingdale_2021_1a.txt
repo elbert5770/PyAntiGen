@@ -1,0 +1,16 @@
+Antibody_BBB
+Antibody_BCSFB
+Antibody_BrainISF
+Antibody_BrainVascular
+Antibody_CSF
+Antibody_Lymph
+Antibody_Plasma
+Antibody_TissueEndosomal
+Antibody_TissueISF
+Antibody_TissueVascular
+Antibody__FcRn_BBB
+Antibody__FcRn_BCSFB
+Antibody__FcRn_TissueEndosomal
+FcRn_BBB
+FcRn_BCSFB
+FcRn_TissueEndosomal

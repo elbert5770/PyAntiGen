@@ -1,0 +1,112 @@
+{'Reaction_name': 'APPSynthesis_BrainISF', 'Reactants': '[0]', 'Products': '[APP_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_APP*(1-(f_13C6Leu))'}
+{'Reaction_name': 'C83Synthesis_BrainISF', 'Reactants': '[APP_BrainISF]', 'Products': '[C83_BrainISF, sAPPa_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_APP_C83/Km_APP_C83)/(1+(APP_BrainISF + APP_13C6Leu_BrainISF)/Km_APP_C83+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_C83)'}
+{'Reaction_name': 'C99Synthesis_BrainISF', 'Reactants': '[APP_BrainISF]', 'Products': '[C99_BrainISF, sAPPb_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_APP_C99/Km_APP_C99)/(1+(APP_BrainISF + APP_13C6Leu_BrainISF)/Km_APP_C99)'}
+{'Reaction_name': 'C99toC83_BrainISF', 'Reactants': '[C99_BrainISF]', 'Products': '[C83_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_C99_C83/Km_C99_C83)/(1+(APP_BrainISF + APP_13C6Leu_BrainISF)/Km_APP_C83+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_C83)'}
+{'Reaction_name': 'C83toP3_BrainISF', 'Reactants': '[C83_BrainISF]', 'Products': '[p3_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_C83_p3/Km_C83_p3)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'APPSynthesis_13C6Leu_BrainISF', 'Reactants': '[0]', 'Products': '[APP_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_APP*f_13C6Leu'}
+{'Reaction_name': 'C83Synthesis_13C6Leu_BrainISF', 'Reactants': '[APP_13C6Leu_BrainISF]', 'Products': '[C83_13C6Leu_BrainISF, sAPPa_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_APP_C83/Km_APP_C83)/(1+(APP_BrainISF + APP_13C6Leu_BrainISF)/Km_APP_C83+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_C83)'}
+{'Reaction_name': 'C99Synthesis_13C6Leu_BrainISF', 'Reactants': '[APP_13C6Leu_BrainISF]', 'Products': '[C99_13C6Leu_BrainISF, sAPPb_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_APP_C99/Km_APP_C99)/(1+(APP_BrainISF + APP_13C6Leu_BrainISF)/Km_APP_C99)'}
+{'Reaction_name': 'C99toC83_13C6Leu_BrainISF', 'Reactants': '[C99_13C6Leu_BrainISF]', 'Products': '[C83_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_C99_C83/Km_C99_C83)/(1+(APP_BrainISF + APP_13C6Leu_BrainISF)/Km_APP_C83+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_C83)'}
+{'Reaction_name': 'C83toP3_13C6Leu_BrainISF', 'Reactants': '[C83_13C6Leu_BrainISF]', 'Products': '[p3_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(Vm_C83_p3/Km_C83_p3)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_CV_SAS', 'Reactants': '[AB38_CV]', 'Products': '[AB38_SAS]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SAS_Lymph', 'Reactants': '[AB38_SAS]', 'Products': '[AB38_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_CV_SP1', 'Reactants': '[AB38_CV]', 'Products': '[AB38_SP1]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SP1_Lymph', 'Reactants': '[AB38_SP1]', 'Products': '[AB38_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SP1_SP2', 'Reactants': '[AB38_SP1]', 'Products': '[AB38_SP2]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((2/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SP2_Lymph', 'Reactants': '[AB38_SP2]', 'Products': '[AB38_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SP2_SP3', 'Reactants': '[AB38_SP2]', 'Products': '[AB38_SP3]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((1/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SP3_Lymph', 'Reactants': '[AB38_SP3]', 'Products': '[AB38_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB38_SP3_LumbarDrain', 'Reactants': '[AB38_SP3]', 'Products': '[AB38_LumbarDrain]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_LP + Q_refill)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_CV_SAS', 'Reactants': '[AB38_13C6Leu_CV]', 'Products': '[AB38_13C6Leu_SAS]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SAS_Lymph', 'Reactants': '[AB38_13C6Leu_SAS]', 'Products': '[AB38_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_CV_SP1', 'Reactants': '[AB38_13C6Leu_CV]', 'Products': '[AB38_13C6Leu_SP1]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SP1_Lymph', 'Reactants': '[AB38_13C6Leu_SP1]', 'Products': '[AB38_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SP1_SP2', 'Reactants': '[AB38_13C6Leu_SP1]', 'Products': '[AB38_13C6Leu_SP2]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((2/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SP2_Lymph', 'Reactants': '[AB38_13C6Leu_SP2]', 'Products': '[AB38_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SP2_SP3', 'Reactants': '[AB38_13C6Leu_SP2]', 'Products': '[AB38_13C6Leu_SP3]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((1/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SP3_Lymph', 'Reactants': '[AB38_13C6Leu_SP3]', 'Products': '[AB38_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB38_13C6Leu_SP3_LumbarDrain', 'Reactants': '[AB38_13C6Leu_SP3]', 'Products': '[AB38_13C6Leu_LumbarDrain]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_LP + Q_refill)'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_SAS_BrainISF', 'Reactants': '[AB38_SAS]', 'Products': '[AB38_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_glymph'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_CV_SAS', 'Reactants': '[AB38_CV]', 'Products': '[AB38_SAS]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_CV_SP1', 'Reactants': '[AB38_CV]', 'Products': '[AB38_SP1]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_SP1_SP2', 'Reactants': '[AB38_SP1]', 'Products': '[AB38_SP2]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_SP2_SP3', 'Reactants': '[AB38_SP2]', 'Products': '[AB38_SP3]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_13C6Leu_SAS_BrainISF', 'Reactants': '[AB38_13C6Leu_SAS]', 'Products': '[AB38_13C6Leu_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_glymph'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_13C6Leu_CV_SAS', 'Reactants': '[AB38_13C6Leu_CV]', 'Products': '[AB38_13C6Leu_SAS]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_13C6Leu_CV_SP1', 'Reactants': '[AB38_13C6Leu_CV]', 'Products': '[AB38_13C6Leu_SP1]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_13C6Leu_SP1_SP2', 'Reactants': '[AB38_13C6Leu_SP1]', 'Products': '[AB38_13C6Leu_SP2]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB38_13C6Leu_SP2_SP3', 'Reactants': '[AB38_13C6Leu_SP2]', 'Products': '[AB38_13C6Leu_SP3]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'AB38Synthesis_BrainISF', 'Reactants': '[C99_BrainISF]', 'Products': '[AB38_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(k_gammasec_AB38/Km_C99_Abeta)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'AB38Degradation_BrainISF', 'Reactants': '[AB38_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_BPD_AB38'}
+{'Reaction_name': 'AB38Exchange_BrainISF', 'Reactants': '[AB38_BrainISF]', 'Products': '[AB38_Exchange]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[k_ex_AB38,k_ret_AB38]'}
+{'Reaction_name': 'AB38Synthesis_13C6Leu_BrainISF', 'Reactants': '[C99_13C6Leu_BrainISF]', 'Products': '[AB38_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(k_gammasec_AB38/Km_C99_Abeta)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'AB38Degradation_13C6Leu_BrainISF', 'Reactants': '[AB38_13C6Leu_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_BPD_AB38'}
+{'Reaction_name': 'AB38Exchange_13C6Leu_BrainISF', 'Reactants': '[AB38_13C6Leu_BrainISF]', 'Products': '[AB38_13C6Leu_Exchange]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[k_ex_AB38,k_ret_AB38]'}
+{'Reaction_name': 'FlowWithinTissue_AB40_CV_SAS', 'Reactants': '[AB40_CV]', 'Products': '[AB40_SAS]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SAS_Lymph', 'Reactants': '[AB40_SAS]', 'Products': '[AB40_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_CV_SP1', 'Reactants': '[AB40_CV]', 'Products': '[AB40_SP1]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SP1_Lymph', 'Reactants': '[AB40_SP1]', 'Products': '[AB40_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SP1_SP2', 'Reactants': '[AB40_SP1]', 'Products': '[AB40_SP2]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((2/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SP2_Lymph', 'Reactants': '[AB40_SP2]', 'Products': '[AB40_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SP2_SP3', 'Reactants': '[AB40_SP2]', 'Products': '[AB40_SP3]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((1/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SP3_Lymph', 'Reactants': '[AB40_SP3]', 'Products': '[AB40_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB40_SP3_LumbarDrain', 'Reactants': '[AB40_SP3]', 'Products': '[AB40_LumbarDrain]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_LP + Q_refill)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_CV_SAS', 'Reactants': '[AB40_13C6Leu_CV]', 'Products': '[AB40_13C6Leu_SAS]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SAS_Lymph', 'Reactants': '[AB40_13C6Leu_SAS]', 'Products': '[AB40_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_CV_SP1', 'Reactants': '[AB40_13C6Leu_CV]', 'Products': '[AB40_13C6Leu_SP1]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SP1_Lymph', 'Reactants': '[AB40_13C6Leu_SP1]', 'Products': '[AB40_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SP1_SP2', 'Reactants': '[AB40_13C6Leu_SP1]', 'Products': '[AB40_13C6Leu_SP2]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((2/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SP2_Lymph', 'Reactants': '[AB40_13C6Leu_SP2]', 'Products': '[AB40_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SP2_SP3', 'Reactants': '[AB40_13C6Leu_SP2]', 'Products': '[AB40_13C6Leu_SP3]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((1/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SP3_Lymph', 'Reactants': '[AB40_13C6Leu_SP3]', 'Products': '[AB40_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB40_13C6Leu_SP3_LumbarDrain', 'Reactants': '[AB40_13C6Leu_SP3]', 'Products': '[AB40_13C6Leu_LumbarDrain]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_LP + Q_refill)'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_SAS_BrainISF', 'Reactants': '[AB40_SAS]', 'Products': '[AB40_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_glymph'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_CV_SAS', 'Reactants': '[AB40_CV]', 'Products': '[AB40_SAS]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_CV_SP1', 'Reactants': '[AB40_CV]', 'Products': '[AB40_SP1]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_SP1_SP2', 'Reactants': '[AB40_SP1]', 'Products': '[AB40_SP2]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_SP2_SP3', 'Reactants': '[AB40_SP2]', 'Products': '[AB40_SP3]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_13C6Leu_SAS_BrainISF', 'Reactants': '[AB40_13C6Leu_SAS]', 'Products': '[AB40_13C6Leu_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_glymph'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_13C6Leu_CV_SAS', 'Reactants': '[AB40_13C6Leu_CV]', 'Products': '[AB40_13C6Leu_SAS]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_13C6Leu_CV_SP1', 'Reactants': '[AB40_13C6Leu_CV]', 'Products': '[AB40_13C6Leu_SP1]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_13C6Leu_SP1_SP2', 'Reactants': '[AB40_13C6Leu_SP1]', 'Products': '[AB40_13C6Leu_SP2]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB40_13C6Leu_SP2_SP3', 'Reactants': '[AB40_13C6Leu_SP2]', 'Products': '[AB40_13C6Leu_SP3]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'AB40Synthesis_BrainISF', 'Reactants': '[C99_BrainISF]', 'Products': '[AB40_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(k_gammasec_AB40/Km_C99_Abeta)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'AB40Degradation_BrainISF', 'Reactants': '[AB40_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_BPD_AB40'}
+{'Reaction_name': 'AB40Exchange_BrainISF', 'Reactants': '[AB40_BrainISF]', 'Products': '[AB40_Exchange]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[k_ex_AB40,k_ret_AB40]'}
+{'Reaction_name': 'AB40Synthesis_13C6Leu_BrainISF', 'Reactants': '[C99_13C6Leu_BrainISF]', 'Products': '[AB40_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(k_gammasec_AB40/Km_C99_Abeta)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'AB40Degradation_13C6Leu_BrainISF', 'Reactants': '[AB40_13C6Leu_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_BPD_AB40'}
+{'Reaction_name': 'AB40Exchange_13C6Leu_BrainISF', 'Reactants': '[AB40_13C6Leu_BrainISF]', 'Products': '[AB40_13C6Leu_Exchange]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[k_ex_AB40,k_ret_AB40]'}
+{'Reaction_name': 'FlowWithinTissue_AB42_CV_SAS', 'Reactants': '[AB42_CV]', 'Products': '[AB42_SAS]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SAS_Lymph', 'Reactants': '[AB42_SAS]', 'Products': '[AB42_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_CV_SP1', 'Reactants': '[AB42_CV]', 'Products': '[AB42_SP1]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SP1_Lymph', 'Reactants': '[AB42_SP1]', 'Products': '[AB42_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SP1_SP2', 'Reactants': '[AB42_SP1]', 'Products': '[AB42_SP2]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((2/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SP2_Lymph', 'Reactants': '[AB42_SP2]', 'Products': '[AB42_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SP2_SP3', 'Reactants': '[AB42_SP2]', 'Products': '[AB42_SP3]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((1/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SP3_Lymph', 'Reactants': '[AB42_SP3]', 'Products': '[AB42_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB42_SP3_LumbarDrain', 'Reactants': '[AB42_SP3]', 'Products': '[AB42_LumbarDrain]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_LP + Q_refill)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_CV_SAS', 'Reactants': '[AB42_13C6Leu_CV]', 'Products': '[AB42_13C6Leu_SAS]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SAS_Lymph', 'Reactants': '[AB42_13C6Leu_SAS]', 'Products': '[AB42_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_CSF - Q_SN - Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_CV_SP1', 'Reactants': '[AB42_13C6Leu_CV]', 'Products': '[AB42_13C6Leu_SP1]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SP1_Lymph', 'Reactants': '[AB42_13C6Leu_SP1]', 'Products': '[AB42_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SP1_SP2', 'Reactants': '[AB42_13C6Leu_SP1]', 'Products': '[AB42_13C6Leu_SP2]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((2/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SP2_Lymph', 'Reactants': '[AB42_13C6Leu_SP2]', 'Products': '[AB42_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SP2_SP3', 'Reactants': '[AB42_13C6Leu_SP2]', 'Products': '[AB42_13C6Leu_SP3]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '((1/3) * Q_SN + Q_LP)'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SP3_Lymph', 'Reactants': '[AB42_13C6Leu_SP3]', 'Products': '[AB42_13C6Leu_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1/3) * Q_SN'}
+{'Reaction_name': 'FlowWithinTissue_AB42_13C6Leu_SP3_LumbarDrain', 'Reactants': '[AB42_13C6Leu_SP3]', 'Products': '[AB42_13C6Leu_LumbarDrain]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(Q_LP + Q_refill)'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_SAS_BrainISF', 'Reactants': '[AB42_SAS]', 'Products': '[AB42_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_glymph'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_CV_SAS', 'Reactants': '[AB42_CV]', 'Products': '[AB42_SAS]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_CV_SP1', 'Reactants': '[AB42_CV]', 'Products': '[AB42_SP1]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_SP1_SP2', 'Reactants': '[AB42_SP1]', 'Products': '[AB42_SP2]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_SP2_SP3', 'Reactants': '[AB42_SP2]', 'Products': '[AB42_SP3]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_13C6Leu_SAS_BrainISF', 'Reactants': '[AB42_13C6Leu_SAS]', 'Products': '[AB42_13C6Leu_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_glymph'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_13C6Leu_CV_SAS', 'Reactants': '[AB42_13C6Leu_CV]', 'Products': '[AB42_13C6Leu_SAS]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_13C6Leu_CV_SP1', 'Reactants': '[AB42_13C6Leu_CV]', 'Products': '[AB42_13C6Leu_SP1]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_13C6Leu_SP1_SP2', 'Reactants': '[AB42_13C6Leu_SP1]', 'Products': '[AB42_13C6Leu_SP2]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_AB42_13C6Leu_SP2_SP3', 'Reactants': '[AB42_13C6Leu_SP2]', 'Products': '[AB42_13C6Leu_SP3]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'Q_osc'}
+{'Reaction_name': 'AB42Synthesis_BrainISF', 'Reactants': '[C99_BrainISF]', 'Products': '[AB42_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(k_gammasec_AB42/Km_C99_Abeta)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'AB42Degradation_BrainISF', 'Reactants': '[AB42_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_BPD_AB42'}
+{'Reaction_name': 'AB42Exchange_BrainISF', 'Reactants': '[AB42_BrainISF]', 'Products': '[AB42_Exchange]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[k_ex_AB42,k_ret_AB42]'}
+{'Reaction_name': 'AB42Synthesis_13C6Leu_BrainISF', 'Reactants': '[C99_13C6Leu_BrainISF]', 'Products': '[AB42_13C6Leu_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': '(k_gammasec_AB42/Km_C99_Abeta)/(1+(C83_BrainISF + C83_13C6Leu_BrainISF)/Km_C83_p3+(C99_BrainISF + C99_13C6Leu_BrainISF)/Km_C99_Abeta)'}
+{'Reaction_name': 'AB42Degradation_13C6Leu_BrainISF', 'Reactants': '[AB42_13C6Leu_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k_BPD_AB42'}
+{'Reaction_name': 'AB42Exchange_13C6Leu_BrainISF', 'Reactants': '[AB42_13C6Leu_BrainISF]', 'Products': '[AB42_13C6Leu_Exchange]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[k_ex_AB42,k_ret_AB42]'}

@@ -16,6 +16,23 @@ class PyAntiGenModule:
         """Override this in subclasses to define reactions."""
         raise NotImplementedError("Modules must implement a build() method.")
 
-    def add_reaction(self, name, reactants, products, rate_type, rate_eqtn):
+    def add_reaction(
+        self,
+        name,
+        reactants,
+        products,
+        rate_type,
+        rate_eqtn,
+        compartment=None,
+        compartment_reverse=None,
+    ):
         """Helper to add reactions directly into the parent model."""
-        self.model.add_reaction(name, reactants, products, rate_type, rate_eqtn)
+        self.model.add_reaction(
+            name,
+            reactants,
+            products,
+            rate_type,
+            rate_eqtn,
+            compartment=compartment,
+            compartment_reverse=compartment_reverse,
+        )

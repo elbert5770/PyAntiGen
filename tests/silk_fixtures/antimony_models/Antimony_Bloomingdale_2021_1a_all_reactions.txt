@@ -1,0 +1,62 @@
+compartment BBB = V_BBB
+compartment BCSFB = V_BCSFB
+compartment BrainISF = V_BrainISF
+compartment BrainVascular = V_BrainVascular
+compartment CSF = V_CSF
+compartment Lymph = V_Lymph
+compartment Plasma = V_Plasma
+compartment TissueEndosomal = V_TissueEndosomal
+compartment TissueISF = V_TissueISF
+compartment TissueVascular = V_TissueVascular
+
+substanceOnly species Antibody_BBB in BBB
+substanceOnly species Antibody_BCSFB in BCSFB
+substanceOnly species Antibody_BrainISF in BrainISF
+substanceOnly species Antibody_BrainVascular in BrainVascular
+substanceOnly species Antibody_CSF in CSF
+substanceOnly species Antibody_Lymph in Lymph
+substanceOnly species Antibody_Plasma in Plasma
+substanceOnly species Antibody_TissueEndosomal in TissueEndosomal
+substanceOnly species Antibody_TissueISF in TissueISF
+substanceOnly species Antibody_TissueVascular in TissueVascular
+substanceOnly species Antibody__FcRn_BBB in BBB
+substanceOnly species Antibody__FcRn_BCSFB in BCSFB
+substanceOnly species Antibody__FcRn_TissueEndosomal in TissueEndosomal
+substanceOnly species FcRn_BBB in BBB
+substanceOnly species FcRn_BCSFB in BCSFB
+substanceOnly species FcRn_TissueEndosomal in TissueEndosomal
+
+FlowWithinTissue_Antibody_BrainVascular_BrainISF : Antibody_BrainVascular -> Antibody_BrainISF; (1 - RC_BBB) * QB_ECF * (Antibody_BrainVascular/V_BrainVascular)
+FlowWithinTissue_Antibody_BrainISF_Lymph : Antibody_BrainISF -> Antibody_Lymph; (1 - RC_BrainISF) * QB_ECF * (Antibody_BrainISF/V_BrainISF)
+FlowWithinTissue_Antibody_BrainVascular_CSF : Antibody_BrainVascular -> Antibody_CSF; (1 - RC_BCSFB) * QB_CSF * (Antibody_BrainVascular/V_BrainVascular)
+FlowWithinTissue_Antibody_CSF_Lymph : Antibody_CSF -> Antibody_Lymph; (1 - RC_CSF) * QB_ECF * (Antibody_CSF/V_CSF)
+FlowWithinTissue_Antibody_BrainVascular_BBB : Antibody_BrainVascular -> Antibody_BBB; CLup_BBB * (Antibody_BrainVascular/V_BrainVascular)
+FlowWithinTissue_Antibody_BrainISF_BBB : Antibody_BrainISF -> Antibody_BBB; CLup_BBB * (Antibody_BrainISF/V_BrainISF)
+FlowWithinTissue_Antibody_BrainVascular_BCSFB : Antibody_BrainVascular -> Antibody_BCSFB; CLup_BCSFB * (Antibody_BrainVascular/V_BrainVascular)
+FlowWithinTissue_Antibody_CSF_BCSFB : Antibody_CSF -> Antibody_BCSFB; CLup_BCSFB * (Antibody_CSF/V_CSF)
+BidirectionalFlowWithinTissue_Antibody_CSF_BrainISF_fwd : Antibody_CSF -> Antibody_BrainISF; QB_ECF * (Antibody_CSF/V_CSF)
+BidirectionalFlowWithinTissue_Antibody_CSF_BrainISF_rev : Antibody_BrainISF -> Antibody_CSF; QB_ECF * (Antibody_BrainISF/V_BrainISF)
+FlowWithinTissue_Antibody_TissueVascular_TissueISF : Antibody_TissueVascular -> Antibody_TissueISF; (1 - RC_TissueVascular) * LT * (Antibody_TissueVascular/V_TissueVascular)
+FlowWithinTissue_Antibody_TissueISF_Lymph : Antibody_TissueISF -> Antibody_Lymph; (1 - RC_TissueLymph) * LT * (Antibody_TissueISF/V_TissueISF)
+FlowWithinTissue_Antibody_Plasma_TissueVascular : Antibody_Plasma -> Antibody_TissueVascular; QT * (Antibody_Plasma/V_Plasma)
+FlowWithinTissue_Antibody_TissueVascular_Plasma : Antibody_TissueVascular -> Antibody_Plasma; (QT - LT) * (Antibody_TissueVascular/V_TissueVascular)
+FlowWithinTissue_Antibody_Lymph_Plasma : Antibody_Lymph -> Antibody_Plasma; (LB + LT) * (Antibody_Lymph/V_Lymph)
+FlowWithinTissue_Antibody_Plasma_BrainVascular : Antibody_Plasma -> Antibody_BrainVascular; QB * (Antibody_Plasma/V_Plasma)
+FlowWithinTissue_Antibody_BrainVascular_Plasma : Antibody_BrainVascular -> Antibody_Plasma; (QB - LB) * (Antibody_BrainVascular/V_BrainVascular)
+FlowWithinTissue_Antibody_TissueVascular_TissueEndosomal : Antibody_TissueVascular -> Antibody_TissueEndosomal; CLup_Tissue * (Antibody_TissueVascular/V_TissueVascular)
+FlowWithinTissue_Antibody_TissueISF_TissueEndosomal : Antibody_TissueISF -> Antibody_TissueEndosomal; CLup_Tissue * (Antibody_TissueISF/V_TissueISF)
+Recycle_FcRn_Antibody_BBB_BrainISF : Antibody__FcRn_BBB -> Antibody_BrainISF + FcRn_BBB; (1 - FR_B) * CLup_BBB * (Antibody__FcRn_BBB/V_BBB)
+Recycle_FcRn_Antibody_BBB_BrainVascular : Antibody__FcRn_BBB -> Antibody_BrainVascular + FcRn_BBB; FR_B * CLup_BBB * (Antibody__FcRn_BBB/V_BBB)
+Recycle_FcRn_Antibody_BCSFB_BrainISF : Antibody__FcRn_BCSFB -> Antibody_BrainISF + FcRn_BCSFB; (1 - FR_B) * CLup_BCSFB * (Antibody__FcRn_BCSFB/V_BCSFB)
+Recycle_FcRn_Antibody_BCSFB_BrainVascular : Antibody__FcRn_BCSFB -> Antibody_BrainVascular + FcRn_BCSFB; FR_B * CLup_BCSFB * (Antibody__FcRn_BCSFB/V_BCSFB)
+Recycle_FcRn_Antibody_TissueEndosomal_TissueISF : Antibody__FcRn_TissueEndosomal -> Antibody_TissueISF + FcRn_TissueEndosomal; (1 - FR) * CLup_Tissue * (Antibody__FcRn_TissueEndosomal/V_TissueEndosomal)
+Recycle_FcRn_Antibody_TissueEndosomal_TissueVascular : Antibody__FcRn_TissueEndosomal -> Antibody_TissueVascular + FcRn_TissueEndosomal; FR * CLup_Tissue * (Antibody__FcRn_TissueEndosomal/V_TissueEndosomal)
+DegradationWithinEndosome_Antibody_TissueEndosomal : Antibody_TissueEndosomal ->; Kdeg * (Antibody_TissueEndosomal/V_TissueEndosomal) * V_TissueEndosomal
+BindingToFcRn_Antibody_TissueEndosomal_fwd : Antibody_TissueEndosomal + FcRn_TissueEndosomal -> Antibody__FcRn_TissueEndosomal; Kon_FcRn * (Antibody_TissueEndosomal/V_TissueEndosomal) * (FcRn_TissueEndosomal/V_TissueEndosomal) * V_TissueEndosomal
+BindingToFcRn_Antibody_TissueEndosomal_rev : Antibody__FcRn_TissueEndosomal -> Antibody_TissueEndosomal + FcRn_TissueEndosomal; Koff_FcRn * (Antibody__FcRn_TissueEndosomal/V_TissueEndosomal) * V_TissueEndosomal
+DegradationWithinEndosome_Antibody_BBB : Antibody_BBB ->; Kdeg * (Antibody_BBB/V_BBB) * V_BBB
+BindingToFcRn_Antibody_BBB_fwd : Antibody_BBB + FcRn_BBB -> Antibody__FcRn_BBB; Kon_FcRn * (Antibody_BBB/V_BBB) * (FcRn_BBB/V_BBB) * V_BBB
+BindingToFcRn_Antibody_BBB_rev : Antibody__FcRn_BBB -> Antibody_BBB + FcRn_BBB; Koff_FcRn * (Antibody__FcRn_BBB/V_BBB) * V_BBB
+DegradationWithinEndosome_Antibody_BCSFB : Antibody_BCSFB ->; Kdeg * (Antibody_BCSFB/V_BCSFB) * V_BCSFB
+BindingToFcRn_Antibody_BCSFB_fwd : Antibody_BCSFB + FcRn_BCSFB -> Antibody__FcRn_BCSFB; Kon_FcRn * (Antibody_BCSFB/V_BCSFB) * (FcRn_BCSFB/V_BCSFB) * V_BCSFB
+BindingToFcRn_Antibody_BCSFB_rev : Antibody__FcRn_BCSFB -> Antibody_BCSFB + FcRn_BCSFB; Koff_FcRn * (Antibody__FcRn_BCSFB/V_BCSFB) * V_BCSFB

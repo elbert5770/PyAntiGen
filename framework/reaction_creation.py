@@ -1,42 +1,43 @@
-def reaction_creation(all_reactions, counter, Reaction_name, Reactants, Products, Rate_type, Rate_eqtn_prototype):
-    """Helper function to create and add reactions to the all_reactions list"""
-    
-    
-    # Valid Rate_type values from RxnDict_to_antimony.py
-    valid_rate_types = {"RMA", "BDF", "MA", "UDF", "custom_conc_per_time", "custom_amt_per_time", "custom"}
-    
-    # Check for missing elements and warn
-    missing_elements = []
-    if Reaction_name is None or Reaction_name == "":
-        missing_elements.append("Reaction_name")
-        Reaction_name = "NA"
-    if Reactants is None:
-        missing_elements.append("Reactants")
-    if Products is None:
-        missing_elements.append("Products")
-    if Rate_type is None or Rate_type == "":
-        missing_elements.append("Rate_type")
-    if Rate_eqtn_prototype is None or Rate_eqtn_prototype == "":
-        missing_elements.append("Rate_eqtn_prototype")
-    
-    # Warn about missing elements
-    if missing_elements:
-        warnings.warn(f"Missing elements in reaction creation: {', '.join(missing_elements)}. Reaction_name set to 'NA' if it was missing.", UserWarning)
-    
-    # Check for valid Rate_type
-    if Rate_type is not None and Rate_type != "" and Rate_type not in valid_rate_types:
-        warnings.warn(f"Invalid Rate_type '{Rate_type}' provided. Valid types are: {', '.join(sorted(valid_rate_types))}", UserWarning)
-    
-    # Remove spaces from Reaction_name
-    Reaction_name = Reaction_name.replace(" ", "")
-    
-    if Rate_type == "RMA" or Rate_type == "BDF":
+from framework.models import (
+    reaction_from_args,
+    VALID_RATE_TYPES,
+    RATE_TYPES_TWO_CONSTANTS,
+)
+
+
+def reaction_creation(
+    all_reactions,
+    counter,
+    Reaction_name,
+    Reactants,
+    Products,
+    Rate_type,
+    Rate_eqtn_prototype,
+    compartment=None,
+    compartment_reverse=None,
+):
+    """
+    Create and append a validated reaction to all_reactions.
+    Accepts reactants/products as either list of strings or bracket string (e.g. "[A, B]").
+    Validates required fields and rate type at call time; raises on invalid input.
+    """
+    try:
+        reaction = reaction_from_args(
+            name=Reaction_name,
+            reactants=Reactants,
+            products=Products,
+            rate_type=Rate_type,
+            rate_eqtn=Rate_eqtn_prototype,
+            compartment=compartment,
+            compartment_reverse=compartment_reverse,
+        )
+    except ValueError as e:
+        raise ValueError(f"add_reaction validation failed: {e}") from e
+
+    if reaction.Rate_type in RATE_TYPES_TWO_CONSTANTS:
         counter += 2
     else:
         counter += 1
-    Reaction_dict = {"Reaction_name": Reaction_name,"Reactants": Reactants,"Products": Products,"Rate_type": Rate_type,"Rate_eqtn_prototype": Rate_eqtn_prototype,}
-    
-    all_reactions.append(Reaction_dict)
-    
 
+    all_reactions.append(reaction.to_dict())
     return counter, all_reactions

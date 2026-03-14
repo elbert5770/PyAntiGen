@@ -1,0 +1,80 @@
+{'Reaction_name': 'Flow_IV_mAb_', 'Reactants': '[Antibody_IV]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kinfusion'}
+{'Reaction_name': 'Clear_mAb_Plasma', 'Reactants': '[Antibody_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearmAb'}
+{'Reaction_name': 'Flow_12_mAb_', 'Reactants': '[Antibody_Plasma]', 'Products': '[Antibody_Peripheral]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k12mAb'}
+{'Reaction_name': 'Flow_21_mAb_', 'Reactants': '[Antibody_Peripheral]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k21mAb'}
+{'Reaction_name': 'Flow_13_mAb_', 'Reactants': '[Antibody_Plasma]', 'Products': '[Antibody_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k13mAb'}
+{'Reaction_name': 'Flow_31_mAb_', 'Reactants': '[Antibody_CSF]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k31mAb'}
+{'Reaction_name': 'Flow_14_mAb_', 'Reactants': '[Antibody_Plasma]', 'Products': '[Antibody_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k14mAb'}
+{'Reaction_name': 'Flow_41_mAb_', 'Reactants': '[Antibody_BrainISF]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k41mAb'}
+{'Reaction_name': 'Flow_43_mAb_', 'Reactants': '[Antibody_BrainISF]', 'Products': '[Antibody_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k43mAb'}
+{'Reaction_name': 'Synth_APP_Plasma', 'Reactants': '[0]', 'Products': '[APP_Plasma]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthAPP_plasma'}
+{'Reaction_name': 'Clear_APP_Plasma', 'Reactants': '[APP_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAPP'}
+{'Reaction_name': 'Synth_BACE_Plasma', 'Reactants': '[0]', 'Products': '[BACE_Plasma]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthBACE_plasma'}
+{'Reaction_name': 'Clear_BACE_Plasma', 'Reactants': '[BACE_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearBACE'}
+{'Reaction_name': 'Synth_GammaSecretase_Plasma', 'Reactants': '[0]', 'Products': '[GammaSecretase_Plasma]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthGamma_plasma'}
+{'Reaction_name': 'Clear_GammaSecretase_Plasma', 'Reactants': '[GammaSecretase_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearGamma'}
+{'Reaction_name': 'Cleave_BACE_Plasma', 'Reactants': '[BACE_Plasma]', 'Products': '[SolubleBACE_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcleave'}
+{'Reaction_name': 'Bind_APP_BACE_Plasma', 'Reactants': '[APP_Plasma, BACE_Plasma]', 'Products': '[APP__BACE_Plasma]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, koffBACE]'}
+{'Reaction_name': 'Cat_APP_BACE_Plasma', 'Reactants': '[APP__BACE_Plasma]', 'Products': '[CTFbeta_Plasma, BACE_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcatBACE'}
+{'Reaction_name': 'Bind_CTFb_Gamma_Plasma', 'Reactants': '[CTFbeta_Plasma, GammaSecretase_Plasma]', 'Products': '[CTFbeta__GammaSecretase_Plasma]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, koffGamma]'}
+{'Reaction_name': 'Cat_CTFb_Gamma_Plasma', 'Reactants': '[CTFbeta__GammaSecretase_Plasma]', 'Products': '[AB42_Plasma, GammaSecretase_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcatGamma'}
+{'Reaction_name': 'Synth_APP_BrainISF', 'Reactants': '[0]', 'Products': '[APP_BrainISF]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthAPP_bisf'}
+{'Reaction_name': 'Clear_APP_BrainISF', 'Reactants': '[APP_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAPP'}
+{'Reaction_name': 'Synth_BACE_BrainISF', 'Reactants': '[0]', 'Products': '[BACE_BrainISF]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthBACE_bisf'}
+{'Reaction_name': 'Clear_BACE_BrainISF', 'Reactants': '[BACE_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearBACE'}
+{'Reaction_name': 'Synth_GammaSecretase_BrainISF', 'Reactants': '[0]', 'Products': '[GammaSecretase_BrainISF]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthGamma_bisf'}
+{'Reaction_name': 'Clear_GammaSecretase_BrainISF', 'Reactants': '[GammaSecretase_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearGamma'}
+{'Reaction_name': 'Cleave_BACE_BrainISF', 'Reactants': '[BACE_BrainISF]', 'Products': '[SolubleBACE_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcleave'}
+{'Reaction_name': 'Bind_APP_BACE_BrainISF', 'Reactants': '[APP_BrainISF, BACE_BrainISF]', 'Products': '[APP__BACE_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, koffBACE]'}
+{'Reaction_name': 'Cat_APP_BACE_BrainISF', 'Reactants': '[APP__BACE_BrainISF]', 'Products': '[CTFbeta_BrainISF, BACE_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcatBACE'}
+{'Reaction_name': 'Bind_CTFb_Gamma_BrainISF', 'Reactants': '[CTFbeta_BrainISF, GammaSecretase_BrainISF]', 'Products': '[CTFbeta__GammaSecretase_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, koffGamma]'}
+{'Reaction_name': 'Cat_CTFb_Gamma_BrainISF', 'Reactants': '[CTFbeta__GammaSecretase_BrainISF]', 'Products': '[AB42_BrainISF, GammaSecretase_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcatGamma'}
+{'Reaction_name': 'Agg_M2G_G2M_Abeta_Plasma', 'Reactants': '[AB42_Plasma]', 'Products': '[AB42_Oligomer_Plasma]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[kM2G, kG2M_plasma]'}
+{'Reaction_name': 'Clear_Abeta_Plasma', 'Reactants': '[AB42_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAbeta_plasma'}
+{'Reaction_name': 'Clear_Aolig_Plasma', 'Reactants': '[AB42_Oligomer_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAolig_plasma'}
+{'Reaction_name': 'Agg_M2G_G2M_Abeta_CSF', 'Reactants': '[AB42_CSF]', 'Products': '[AB42_Oligomer_CSF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[kM2G, kG2M_csf]'}
+{'Reaction_name': 'Agg_M2G_G2M_Abeta_BrainISF', 'Reactants': '[AB42_BrainISF]', 'Products': '[AB42_Oligomer_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[kM2G, kG2M_bisf]'}
+{'Reaction_name': 'Clear_Abeta_BrainISF', 'Reactants': '[AB42_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAbeta_bisf'}
+{'Reaction_name': 'Clear_Aolig_BrainISF', 'Reactants': '[AB42_Oligomer_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAolig_bisf'}
+{'Reaction_name': 'Agg_G2P_P2G_Abeta_BrainISF', 'Reactants': '[AB42_Oligomer_BrainISF]', 'Products': '[AB42_Plaque_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[kG2P, kP2G_bisf]'}
+{'Reaction_name': 'Clear_Aplaq_BrainISF', 'Reactants': '[AB42_Plaque_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearAplaque_bisf'}
+{'Reaction_name': 'Flow_13_Abeta_', 'Reactants': '[AB42_Plasma]', 'Products': '[AB42_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k13Abeta'}
+{'Reaction_name': 'Flow_31_Abeta_', 'Reactants': '[AB42_CSF]', 'Products': '[AB42_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k31Abeta'}
+{'Reaction_name': 'Flow_14_Abeta_', 'Reactants': '[AB42_Plasma]', 'Products': '[AB42_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k14Abeta'}
+{'Reaction_name': 'Flow_41_Abeta_', 'Reactants': '[AB42_BrainISF]', 'Products': '[AB42_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k41Abeta'}
+{'Reaction_name': 'Flow_43_Abeta_', 'Reactants': '[AB42_BrainISF]', 'Products': '[AB42_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k43Abeta'}
+{'Reaction_name': 'Flow_13_Aolig_', 'Reactants': '[AB42_Oligomer_Plasma]', 'Products': '[AB42_Oligomer_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k13Aolig'}
+{'Reaction_name': 'Flow_31_Aolig_', 'Reactants': '[AB42_Oligomer_CSF]', 'Products': '[AB42_Oligomer_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k31Aolig'}
+{'Reaction_name': 'Flow_14_Aolig_', 'Reactants': '[AB42_Oligomer_Plasma]', 'Products': '[AB42_Oligomer_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k14Aolig'}
+{'Reaction_name': 'Flow_41_Aolig_', 'Reactants': '[AB42_Oligomer_BrainISF]', 'Products': '[AB42_Oligomer_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k41Aolig'}
+{'Reaction_name': 'Flow_43_Aolig_', 'Reactants': '[AB42_Oligomer_BrainISF]', 'Products': '[AB42_Oligomer_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k43Aolig'}
+{'Reaction_name': 'Flow_13_BACEs_', 'Reactants': '[SolubleBACE_Plasma]', 'Products': '[SolubleBACE_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k13BACE'}
+{'Reaction_name': 'Flow_31_BACEs_', 'Reactants': '[SolubleBACE_CSF]', 'Products': '[SolubleBACE_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k31BACE'}
+{'Reaction_name': 'Flow_14_BACEs_', 'Reactants': '[SolubleBACE_Plasma]', 'Products': '[SolubleBACE_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k14BACE'}
+{'Reaction_name': 'Flow_41_BACEs_', 'Reactants': '[SolubleBACE_BrainISF]', 'Products': '[SolubleBACE_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k41BACE'}
+{'Reaction_name': 'Flow_43_BACEs_', 'Reactants': '[SolubleBACE_BrainISF]', 'Products': '[SolubleBACE_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k43BACE'}
+{'Reaction_name': 'Bind_mAb_Abeta_Plasma', 'Reactants': '[Antibody_Plasma, AB42_Plasma]', 'Products': '[AB42__Antibody_Plasma]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, kmAb0]'}
+{'Reaction_name': 'Bind_mAb_Aolig_Plasma', 'Reactants': '[Antibody_Plasma, AB42_Oligomer_Plasma]', 'Products': '[AB42_Oligomer__Antibody_Plasma]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, kmAb1]'}
+{'Reaction_name': 'Clear_mAb_Abeta_Plasma', 'Reactants': '[AB42__Antibody_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearmAb'}
+{'Reaction_name': 'Flow_13_mAb_Abeta_', 'Reactants': '[AB42__Antibody_Plasma]', 'Products': '[AB42__Antibody_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k13mAb'}
+{'Reaction_name': 'Flow_14_mAb_Abeta_', 'Reactants': '[AB42__Antibody_Plasma]', 'Products': '[AB42__Antibody_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k14mAb'}
+{'Reaction_name': 'Clear_mAb_Aolig_Plasma', 'Reactants': '[AB42_Oligomer__Antibody_Plasma]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearmAb'}
+{'Reaction_name': 'Flow_13_mAb_Aolig_', 'Reactants': '[AB42_Oligomer__Antibody_Plasma]', 'Products': '[AB42_Oligomer__Antibody_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k13mAb'}
+{'Reaction_name': 'Flow_14_mAb_Aolig_', 'Reactants': '[AB42_Oligomer__Antibody_Plasma]', 'Products': '[AB42_Oligomer__Antibody_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k14mix'}
+{'Reaction_name': 'Bind_mAb_Abeta_CSF', 'Reactants': '[Antibody_CSF, AB42_CSF]', 'Products': '[AB42__Antibody_CSF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, kmAb0]'}
+{'Reaction_name': 'Bind_mAb_Aolig_CSF', 'Reactants': '[Antibody_CSF, AB42_Oligomer_CSF]', 'Products': '[AB42_Oligomer__Antibody_CSF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, kmAb1]'}
+{'Reaction_name': 'Flow_31_mAb_Abeta_', 'Reactants': '[AB42__Antibody_CSF]', 'Products': '[AB42__Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k31mAb'}
+{'Reaction_name': 'Flow_31_mAb_Aolig_', 'Reactants': '[AB42_Oligomer__Antibody_CSF]', 'Products': '[AB42_Oligomer__Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k31mAb'}
+{'Reaction_name': 'Bind_mAb_Abeta_BrainISF', 'Reactants': '[Antibody_BrainISF, AB42_BrainISF]', 'Products': '[AB42__Antibody_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, kmAb0]'}
+{'Reaction_name': 'Bind_mAb_Aolig_BrainISF', 'Reactants': '[Antibody_BrainISF, AB42_Oligomer_BrainISF]', 'Products': '[AB42_Oligomer__Antibody_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPP, kmAb1]'}
+{'Reaction_name': 'Flow_41_mAb_Abeta_', 'Reactants': '[AB42__Antibody_BrainISF]', 'Products': '[AB42__Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k41mAb'}
+{'Reaction_name': 'Flow_43_mAb_Abeta_', 'Reactants': '[AB42__Antibody_BrainISF]', 'Products': '[AB42__Antibody_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k43mAb'}
+{'Reaction_name': 'Flow_41_mAb_Aolig_', 'Reactants': '[AB42_Oligomer__Antibody_BrainISF]', 'Products': '[AB42_Oligomer__Antibody_Plasma]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k41mix'}
+{'Reaction_name': 'Flow_43_mAb_Aolig_', 'Reactants': '[AB42_Oligomer__Antibody_BrainISF]', 'Products': '[AB42_Oligomer__Antibody_CSF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'k43mix'}
+{'Reaction_name': 'Bind_mAb_Aplaq_BrainISF', 'Reactants': '[Antibody_BrainISF, AB42_Plaque_BrainISF]', 'Products': '[AB42_Plaque__Antibody_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPD, kmAb2]'}
+{'Reaction_name': 'Synth_FcR_BrainISF', 'Reactants': '[0]', 'Products': '[FcR_BrainISF]', 'Rate_type': 'custom', 'Rate_eqtn_prototype': 'ksynthFcR_bisf'}
+{'Reaction_name': 'Clear_FcR_BrainISF', 'Reactants': '[FcR_BrainISF]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kclearFcR'}
+{'Reaction_name': 'Bind_mAb_Aolig_FcR_BrainISF', 'Reactants': '[AB42_Oligomer__Antibody_BrainISF, FcR_BrainISF]', 'Products': '[AB42_Oligomer__Antibody__FcR_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPF, koffPF]'}
+{'Reaction_name': 'Catalysis_ADCP_Aolig_BrainISF', 'Reactants': '[AB42_Oligomer__Antibody__FcR_BrainISF]', 'Products': '[FcR_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcatADCP'}
+{'Reaction_name': 'Bind_mAb_Aplaq_FcR_BrainISF', 'Reactants': '[AB42_Plaque__Antibody_BrainISF, FcR_BrainISF]', 'Products': '[AB42_Plaque__Antibody__FcR_BrainISF]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[konPF, koffPF]'}
+{'Reaction_name': 'Catalysis_ADCP_Aplaq_BrainISF', 'Reactants': '[AB42_Plaque__Antibody__FcR_BrainISF]', 'Products': '[FcR_BrainISF]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'kcatADCP'}

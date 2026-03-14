@@ -1,0 +1,225 @@
+compartment BrainISF = V_BrainISF
+compartment CV = V_CV
+compartment Exchange = V_Exchange
+compartment LumbarDrain = V_LumbarDrain
+compartment Lymph = V_Lymph
+compartment SAS = V_SAS
+compartment SP1 = V_SP1
+compartment SP2 = V_SP2
+compartment SP3 = V_SP3
+
+substanceOnly species AB38_13C6Leu_BrainISF in BrainISF
+substanceOnly species AB38_13C6Leu_CV in CV
+substanceOnly species AB38_13C6Leu_Exchange in Exchange
+substanceOnly species AB38_13C6Leu_LumbarDrain in LumbarDrain
+substanceOnly species AB38_13C6Leu_Lymph in Lymph
+substanceOnly species AB38_13C6Leu_SAS in SAS
+substanceOnly species AB38_13C6Leu_SP1 in SP1
+substanceOnly species AB38_13C6Leu_SP2 in SP2
+substanceOnly species AB38_13C6Leu_SP3 in SP3
+substanceOnly species AB38_BrainISF in BrainISF
+substanceOnly species AB38_CV in CV
+substanceOnly species AB38_Exchange in Exchange
+substanceOnly species AB38_LumbarDrain in LumbarDrain
+substanceOnly species AB38_Lymph in Lymph
+substanceOnly species AB38_SAS in SAS
+substanceOnly species AB38_SP1 in SP1
+substanceOnly species AB38_SP2 in SP2
+substanceOnly species AB38_SP3 in SP3
+substanceOnly species AB40_13C6Leu_BrainISF in BrainISF
+substanceOnly species AB40_13C6Leu_CV in CV
+substanceOnly species AB40_13C6Leu_Exchange in Exchange
+substanceOnly species AB40_13C6Leu_LumbarDrain in LumbarDrain
+substanceOnly species AB40_13C6Leu_Lymph in Lymph
+substanceOnly species AB40_13C6Leu_SAS in SAS
+substanceOnly species AB40_13C6Leu_SP1 in SP1
+substanceOnly species AB40_13C6Leu_SP2 in SP2
+substanceOnly species AB40_13C6Leu_SP3 in SP3
+substanceOnly species AB40_BrainISF in BrainISF
+substanceOnly species AB40_CV in CV
+substanceOnly species AB40_Exchange in Exchange
+substanceOnly species AB40_LumbarDrain in LumbarDrain
+substanceOnly species AB40_Lymph in Lymph
+substanceOnly species AB40_SAS in SAS
+substanceOnly species AB40_SP1 in SP1
+substanceOnly species AB40_SP2 in SP2
+substanceOnly species AB40_SP3 in SP3
+substanceOnly species AB42_13C6Leu_BrainISF in BrainISF
+substanceOnly species AB42_13C6Leu_CV in CV
+substanceOnly species AB42_13C6Leu_Exchange in Exchange
+substanceOnly species AB42_13C6Leu_LumbarDrain in LumbarDrain
+substanceOnly species AB42_13C6Leu_Lymph in Lymph
+substanceOnly species AB42_13C6Leu_SAS in SAS
+substanceOnly species AB42_13C6Leu_SP1 in SP1
+substanceOnly species AB42_13C6Leu_SP2 in SP2
+substanceOnly species AB42_13C6Leu_SP3 in SP3
+substanceOnly species AB42_BrainISF in BrainISF
+substanceOnly species AB42_CV in CV
+substanceOnly species AB42_Exchange in Exchange
+substanceOnly species AB42_LumbarDrain in LumbarDrain
+substanceOnly species AB42_Lymph in Lymph
+substanceOnly species AB42_SAS in SAS
+substanceOnly species AB42_SP1 in SP1
+substanceOnly species AB42_SP2 in SP2
+substanceOnly species AB42_SP3 in SP3
+substanceOnly species APP_13C6Leu_BrainISF in BrainISF
+substanceOnly species APP_BrainISF in BrainISF
+substanceOnly species C83_13C6Leu_BrainISF in BrainISF
+substanceOnly species C83_BrainISF in BrainISF
+substanceOnly species C99_13C6Leu_BrainISF in BrainISF
+substanceOnly species C99_BrainISF in BrainISF
+substanceOnly species p3_13C6Leu_BrainISF in BrainISF
+substanceOnly species p3_BrainISF in BrainISF
+substanceOnly species sAPPa_13C6Leu_BrainISF in BrainISF
+substanceOnly species sAPPa_BrainISF in BrainISF
+substanceOnly species sAPPb_13C6Leu_BrainISF in BrainISF
+substanceOnly species sAPPb_BrainISF in BrainISF
+
+APPSynthesis_BrainISF : -> APP_BrainISF; k_APP*(1-(f_13C6Leu)) * V_BrainISF
+C83Synthesis_BrainISF : APP_BrainISF -> C83_BrainISF + sAPPa_BrainISF; (Vm_APP_C83/Km_APP_C83)/(1+((APP_BrainISF/V_BrainISF) + (APP_13C6Leu_BrainISF/V_BrainISF))/Km_APP_C83+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_C83) * (APP_BrainISF/V_BrainISF) * V_BrainISF
+C99Synthesis_BrainISF : APP_BrainISF -> C99_BrainISF + sAPPb_BrainISF; (Vm_APP_C99/Km_APP_C99)/(1+((APP_BrainISF/V_BrainISF) + (APP_13C6Leu_BrainISF/V_BrainISF))/Km_APP_C99) * (APP_BrainISF/V_BrainISF) * V_BrainISF
+C99toC83_BrainISF : C99_BrainISF -> C83_BrainISF; (Vm_C99_C83/Km_C99_C83)/(1+((APP_BrainISF/V_BrainISF) + (APP_13C6Leu_BrainISF/V_BrainISF))/Km_APP_C83+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_C83) * (C99_BrainISF/V_BrainISF) * V_BrainISF
+C83toP3_BrainISF : C83_BrainISF -> p3_BrainISF; (Vm_C83_p3/Km_C83_p3)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C83_BrainISF/V_BrainISF) * V_BrainISF
+APPSynthesis_13C6Leu_BrainISF : -> APP_13C6Leu_BrainISF; k_APP*f_13C6Leu * V_BrainISF
+C83Synthesis_13C6Leu_BrainISF : APP_13C6Leu_BrainISF -> C83_13C6Leu_BrainISF + sAPPa_13C6Leu_BrainISF; (Vm_APP_C83/Km_APP_C83)/(1+((APP_BrainISF/V_BrainISF) + (APP_13C6Leu_BrainISF/V_BrainISF))/Km_APP_C83+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_C83) * (APP_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+C99Synthesis_13C6Leu_BrainISF : APP_13C6Leu_BrainISF -> C99_13C6Leu_BrainISF + sAPPb_13C6Leu_BrainISF; (Vm_APP_C99/Km_APP_C99)/(1+((APP_BrainISF/V_BrainISF) + (APP_13C6Leu_BrainISF/V_BrainISF))/Km_APP_C99) * (APP_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+C99toC83_13C6Leu_BrainISF : C99_13C6Leu_BrainISF -> C83_13C6Leu_BrainISF; (Vm_C99_C83/Km_C99_C83)/(1+((APP_BrainISF/V_BrainISF) + (APP_13C6Leu_BrainISF/V_BrainISF))/Km_APP_C83+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_C83) * (C99_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+C83toP3_13C6Leu_BrainISF : C83_13C6Leu_BrainISF -> p3_13C6Leu_BrainISF; (Vm_C83_p3/Km_C83_p3)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C83_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+FlowWithinTissue_AB38_CV_SAS : AB38_CV -> AB38_SAS; (Q_CSF - Q_SN - Q_LP) * (AB38_CV/V_CV)
+FlowWithinTissue_AB38_SAS_Lymph : AB38_SAS -> AB38_Lymph; (Q_CSF - Q_SN - Q_LP) * (AB38_SAS/V_SAS)
+FlowWithinTissue_AB38_CV_SP1 : AB38_CV -> AB38_SP1; (Q_SN + Q_LP) * (AB38_CV/V_CV)
+FlowWithinTissue_AB38_SP1_Lymph : AB38_SP1 -> AB38_Lymph; (1/3) * Q_SN * (AB38_SP1/V_SP1)
+FlowWithinTissue_AB38_SP1_SP2 : AB38_SP1 -> AB38_SP2; ((2/3) * Q_SN + Q_LP) * (AB38_SP1/V_SP1)
+FlowWithinTissue_AB38_SP2_Lymph : AB38_SP2 -> AB38_Lymph; (1/3) * Q_SN * (AB38_SP2/V_SP2)
+FlowWithinTissue_AB38_SP2_SP3 : AB38_SP2 -> AB38_SP3; ((1/3) * Q_SN + Q_LP) * (AB38_SP2/V_SP2)
+FlowWithinTissue_AB38_SP3_Lymph : AB38_SP3 -> AB38_Lymph; (1/3) * Q_SN * (AB38_SP3/V_SP3)
+FlowWithinTissue_AB38_SP3_LumbarDrain : AB38_SP3 -> AB38_LumbarDrain; (Q_LP + Q_refill) * (AB38_SP3/V_SP3)
+FlowWithinTissue_AB38_13C6Leu_CV_SAS : AB38_13C6Leu_CV -> AB38_13C6Leu_SAS; (Q_CSF - Q_SN - Q_LP) * (AB38_13C6Leu_CV/V_CV)
+FlowWithinTissue_AB38_13C6Leu_SAS_Lymph : AB38_13C6Leu_SAS -> AB38_13C6Leu_Lymph; (Q_CSF - Q_SN - Q_LP) * (AB38_13C6Leu_SAS/V_SAS)
+FlowWithinTissue_AB38_13C6Leu_CV_SP1 : AB38_13C6Leu_CV -> AB38_13C6Leu_SP1; (Q_SN + Q_LP) * (AB38_13C6Leu_CV/V_CV)
+FlowWithinTissue_AB38_13C6Leu_SP1_Lymph : AB38_13C6Leu_SP1 -> AB38_13C6Leu_Lymph; (1/3) * Q_SN * (AB38_13C6Leu_SP1/V_SP1)
+FlowWithinTissue_AB38_13C6Leu_SP1_SP2 : AB38_13C6Leu_SP1 -> AB38_13C6Leu_SP2; ((2/3) * Q_SN + Q_LP) * (AB38_13C6Leu_SP1/V_SP1)
+FlowWithinTissue_AB38_13C6Leu_SP2_Lymph : AB38_13C6Leu_SP2 -> AB38_13C6Leu_Lymph; (1/3) * Q_SN * (AB38_13C6Leu_SP2/V_SP2)
+FlowWithinTissue_AB38_13C6Leu_SP2_SP3 : AB38_13C6Leu_SP2 -> AB38_13C6Leu_SP3; ((1/3) * Q_SN + Q_LP) * (AB38_13C6Leu_SP2/V_SP2)
+FlowWithinTissue_AB38_13C6Leu_SP3_Lymph : AB38_13C6Leu_SP3 -> AB38_13C6Leu_Lymph; (1/3) * Q_SN * (AB38_13C6Leu_SP3/V_SP3)
+FlowWithinTissue_AB38_13C6Leu_SP3_LumbarDrain : AB38_13C6Leu_SP3 -> AB38_13C6Leu_LumbarDrain; (Q_LP + Q_refill) * (AB38_13C6Leu_SP3/V_SP3)
+BidirectionalFlowWithinTissue_AB38_SAS_BrainISF_fwd : AB38_SAS -> AB38_BrainISF; Q_glymph * (AB38_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB38_SAS_BrainISF_rev : AB38_BrainISF -> AB38_SAS; Q_glymph * (AB38_BrainISF/V_BrainISF)
+BidirectionalFlowWithinTissue_AB38_CV_SAS_fwd : AB38_CV -> AB38_SAS; Q_osc * (AB38_CV/V_CV)
+BidirectionalFlowWithinTissue_AB38_CV_SAS_rev : AB38_SAS -> AB38_CV; Q_osc * (AB38_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB38_CV_SP1_fwd : AB38_CV -> AB38_SP1; Q_osc * (AB38_CV/V_CV)
+BidirectionalFlowWithinTissue_AB38_CV_SP1_rev : AB38_SP1 -> AB38_CV; Q_osc * (AB38_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB38_SP1_SP2_fwd : AB38_SP1 -> AB38_SP2; Q_osc * (AB38_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB38_SP1_SP2_rev : AB38_SP2 -> AB38_SP1; Q_osc * (AB38_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB38_SP2_SP3_fwd : AB38_SP2 -> AB38_SP3; Q_osc * (AB38_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB38_SP2_SP3_rev : AB38_SP3 -> AB38_SP2; Q_osc * (AB38_SP3/V_SP3)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_SAS_BrainISF_fwd : AB38_13C6Leu_SAS -> AB38_13C6Leu_BrainISF; Q_glymph * (AB38_13C6Leu_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_SAS_BrainISF_rev : AB38_13C6Leu_BrainISF -> AB38_13C6Leu_SAS; Q_glymph * (AB38_13C6Leu_BrainISF/V_BrainISF)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_CV_SAS_fwd : AB38_13C6Leu_CV -> AB38_13C6Leu_SAS; Q_osc * (AB38_13C6Leu_CV/V_CV)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_CV_SAS_rev : AB38_13C6Leu_SAS -> AB38_13C6Leu_CV; Q_osc * (AB38_13C6Leu_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_CV_SP1_fwd : AB38_13C6Leu_CV -> AB38_13C6Leu_SP1; Q_osc * (AB38_13C6Leu_CV/V_CV)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_CV_SP1_rev : AB38_13C6Leu_SP1 -> AB38_13C6Leu_CV; Q_osc * (AB38_13C6Leu_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_SP1_SP2_fwd : AB38_13C6Leu_SP1 -> AB38_13C6Leu_SP2; Q_osc * (AB38_13C6Leu_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_SP1_SP2_rev : AB38_13C6Leu_SP2 -> AB38_13C6Leu_SP1; Q_osc * (AB38_13C6Leu_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_SP2_SP3_fwd : AB38_13C6Leu_SP2 -> AB38_13C6Leu_SP3; Q_osc * (AB38_13C6Leu_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB38_13C6Leu_SP2_SP3_rev : AB38_13C6Leu_SP3 -> AB38_13C6Leu_SP2; Q_osc * (AB38_13C6Leu_SP3/V_SP3)
+AB38Synthesis_BrainISF : C99_BrainISF -> AB38_BrainISF; (k_gammasec_AB38/Km_C99_Abeta)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C99_BrainISF/V_BrainISF) * V_BrainISF
+AB38Degradation_BrainISF : AB38_BrainISF ->; k_BPD_AB38 * (AB38_BrainISF/V_BrainISF) * V_BrainISF
+AB38Exchange_BrainISF_fwd : AB38_BrainISF -> AB38_Exchange; k_ex_AB38 * (AB38_BrainISF/V_BrainISF) * V_BrainISF
+AB38Exchange_BrainISF_rev : AB38_Exchange -> AB38_BrainISF; k_ret_AB38 * (AB38_Exchange/V_Exchange) * V_Exchange
+AB38Synthesis_13C6Leu_BrainISF : C99_13C6Leu_BrainISF -> AB38_13C6Leu_BrainISF; (k_gammasec_AB38/Km_C99_Abeta)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C99_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB38Degradation_13C6Leu_BrainISF : AB38_13C6Leu_BrainISF ->; k_BPD_AB38 * (AB38_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB38Exchange_13C6Leu_BrainISF_fwd : AB38_13C6Leu_BrainISF -> AB38_13C6Leu_Exchange; k_ex_AB38 * (AB38_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB38Exchange_13C6Leu_BrainISF_rev : AB38_13C6Leu_Exchange -> AB38_13C6Leu_BrainISF; k_ret_AB38 * (AB38_13C6Leu_Exchange/V_Exchange) * V_Exchange
+FlowWithinTissue_AB40_CV_SAS : AB40_CV -> AB40_SAS; (Q_CSF - Q_SN - Q_LP) * (AB40_CV/V_CV)
+FlowWithinTissue_AB40_SAS_Lymph : AB40_SAS -> AB40_Lymph; (Q_CSF - Q_SN - Q_LP) * (AB40_SAS/V_SAS)
+FlowWithinTissue_AB40_CV_SP1 : AB40_CV -> AB40_SP1; (Q_SN + Q_LP) * (AB40_CV/V_CV)
+FlowWithinTissue_AB40_SP1_Lymph : AB40_SP1 -> AB40_Lymph; (1/3) * Q_SN * (AB40_SP1/V_SP1)
+FlowWithinTissue_AB40_SP1_SP2 : AB40_SP1 -> AB40_SP2; ((2/3) * Q_SN + Q_LP) * (AB40_SP1/V_SP1)
+FlowWithinTissue_AB40_SP2_Lymph : AB40_SP2 -> AB40_Lymph; (1/3) * Q_SN * (AB40_SP2/V_SP2)
+FlowWithinTissue_AB40_SP2_SP3 : AB40_SP2 -> AB40_SP3; ((1/3) * Q_SN + Q_LP) * (AB40_SP2/V_SP2)
+FlowWithinTissue_AB40_SP3_Lymph : AB40_SP3 -> AB40_Lymph; (1/3) * Q_SN * (AB40_SP3/V_SP3)
+FlowWithinTissue_AB40_SP3_LumbarDrain : AB40_SP3 -> AB40_LumbarDrain; (Q_LP + Q_refill) * (AB40_SP3/V_SP3)
+FlowWithinTissue_AB40_13C6Leu_CV_SAS : AB40_13C6Leu_CV -> AB40_13C6Leu_SAS; (Q_CSF - Q_SN - Q_LP) * (AB40_13C6Leu_CV/V_CV)
+FlowWithinTissue_AB40_13C6Leu_SAS_Lymph : AB40_13C6Leu_SAS -> AB40_13C6Leu_Lymph; (Q_CSF - Q_SN - Q_LP) * (AB40_13C6Leu_SAS/V_SAS)
+FlowWithinTissue_AB40_13C6Leu_CV_SP1 : AB40_13C6Leu_CV -> AB40_13C6Leu_SP1; (Q_SN + Q_LP) * (AB40_13C6Leu_CV/V_CV)
+FlowWithinTissue_AB40_13C6Leu_SP1_Lymph : AB40_13C6Leu_SP1 -> AB40_13C6Leu_Lymph; (1/3) * Q_SN * (AB40_13C6Leu_SP1/V_SP1)
+FlowWithinTissue_AB40_13C6Leu_SP1_SP2 : AB40_13C6Leu_SP1 -> AB40_13C6Leu_SP2; ((2/3) * Q_SN + Q_LP) * (AB40_13C6Leu_SP1/V_SP1)
+FlowWithinTissue_AB40_13C6Leu_SP2_Lymph : AB40_13C6Leu_SP2 -> AB40_13C6Leu_Lymph; (1/3) * Q_SN * (AB40_13C6Leu_SP2/V_SP2)
+FlowWithinTissue_AB40_13C6Leu_SP2_SP3 : AB40_13C6Leu_SP2 -> AB40_13C6Leu_SP3; ((1/3) * Q_SN + Q_LP) * (AB40_13C6Leu_SP2/V_SP2)
+FlowWithinTissue_AB40_13C6Leu_SP3_Lymph : AB40_13C6Leu_SP3 -> AB40_13C6Leu_Lymph; (1/3) * Q_SN * (AB40_13C6Leu_SP3/V_SP3)
+FlowWithinTissue_AB40_13C6Leu_SP3_LumbarDrain : AB40_13C6Leu_SP3 -> AB40_13C6Leu_LumbarDrain; (Q_LP + Q_refill) * (AB40_13C6Leu_SP3/V_SP3)
+BidirectionalFlowWithinTissue_AB40_SAS_BrainISF_fwd : AB40_SAS -> AB40_BrainISF; Q_glymph * (AB40_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB40_SAS_BrainISF_rev : AB40_BrainISF -> AB40_SAS; Q_glymph * (AB40_BrainISF/V_BrainISF)
+BidirectionalFlowWithinTissue_AB40_CV_SAS_fwd : AB40_CV -> AB40_SAS; Q_osc * (AB40_CV/V_CV)
+BidirectionalFlowWithinTissue_AB40_CV_SAS_rev : AB40_SAS -> AB40_CV; Q_osc * (AB40_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB40_CV_SP1_fwd : AB40_CV -> AB40_SP1; Q_osc * (AB40_CV/V_CV)
+BidirectionalFlowWithinTissue_AB40_CV_SP1_rev : AB40_SP1 -> AB40_CV; Q_osc * (AB40_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB40_SP1_SP2_fwd : AB40_SP1 -> AB40_SP2; Q_osc * (AB40_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB40_SP1_SP2_rev : AB40_SP2 -> AB40_SP1; Q_osc * (AB40_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB40_SP2_SP3_fwd : AB40_SP2 -> AB40_SP3; Q_osc * (AB40_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB40_SP2_SP3_rev : AB40_SP3 -> AB40_SP2; Q_osc * (AB40_SP3/V_SP3)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_SAS_BrainISF_fwd : AB40_13C6Leu_SAS -> AB40_13C6Leu_BrainISF; Q_glymph * (AB40_13C6Leu_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_SAS_BrainISF_rev : AB40_13C6Leu_BrainISF -> AB40_13C6Leu_SAS; Q_glymph * (AB40_13C6Leu_BrainISF/V_BrainISF)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_CV_SAS_fwd : AB40_13C6Leu_CV -> AB40_13C6Leu_SAS; Q_osc * (AB40_13C6Leu_CV/V_CV)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_CV_SAS_rev : AB40_13C6Leu_SAS -> AB40_13C6Leu_CV; Q_osc * (AB40_13C6Leu_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_CV_SP1_fwd : AB40_13C6Leu_CV -> AB40_13C6Leu_SP1; Q_osc * (AB40_13C6Leu_CV/V_CV)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_CV_SP1_rev : AB40_13C6Leu_SP1 -> AB40_13C6Leu_CV; Q_osc * (AB40_13C6Leu_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_SP1_SP2_fwd : AB40_13C6Leu_SP1 -> AB40_13C6Leu_SP2; Q_osc * (AB40_13C6Leu_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_SP1_SP2_rev : AB40_13C6Leu_SP2 -> AB40_13C6Leu_SP1; Q_osc * (AB40_13C6Leu_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_SP2_SP3_fwd : AB40_13C6Leu_SP2 -> AB40_13C6Leu_SP3; Q_osc * (AB40_13C6Leu_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB40_13C6Leu_SP2_SP3_rev : AB40_13C6Leu_SP3 -> AB40_13C6Leu_SP2; Q_osc * (AB40_13C6Leu_SP3/V_SP3)
+AB40Synthesis_BrainISF : C99_BrainISF -> AB40_BrainISF; (k_gammasec_AB40/Km_C99_Abeta)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C99_BrainISF/V_BrainISF) * V_BrainISF
+AB40Degradation_BrainISF : AB40_BrainISF ->; k_BPD_AB40 * (AB40_BrainISF/V_BrainISF) * V_BrainISF
+AB40Exchange_BrainISF_fwd : AB40_BrainISF -> AB40_Exchange; k_ex_AB40 * (AB40_BrainISF/V_BrainISF) * V_BrainISF
+AB40Exchange_BrainISF_rev : AB40_Exchange -> AB40_BrainISF; k_ret_AB40 * (AB40_Exchange/V_Exchange) * V_Exchange
+AB40Synthesis_13C6Leu_BrainISF : C99_13C6Leu_BrainISF -> AB40_13C6Leu_BrainISF; (k_gammasec_AB40/Km_C99_Abeta)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C99_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB40Degradation_13C6Leu_BrainISF : AB40_13C6Leu_BrainISF ->; k_BPD_AB40 * (AB40_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB40Exchange_13C6Leu_BrainISF_fwd : AB40_13C6Leu_BrainISF -> AB40_13C6Leu_Exchange; k_ex_AB40 * (AB40_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB40Exchange_13C6Leu_BrainISF_rev : AB40_13C6Leu_Exchange -> AB40_13C6Leu_BrainISF; k_ret_AB40 * (AB40_13C6Leu_Exchange/V_Exchange) * V_Exchange
+FlowWithinTissue_AB42_CV_SAS : AB42_CV -> AB42_SAS; (Q_CSF - Q_SN - Q_LP) * (AB42_CV/V_CV)
+FlowWithinTissue_AB42_SAS_Lymph : AB42_SAS -> AB42_Lymph; (Q_CSF - Q_SN - Q_LP) * (AB42_SAS/V_SAS)
+FlowWithinTissue_AB42_CV_SP1 : AB42_CV -> AB42_SP1; (Q_SN + Q_LP) * (AB42_CV/V_CV)
+FlowWithinTissue_AB42_SP1_Lymph : AB42_SP1 -> AB42_Lymph; (1/3) * Q_SN * (AB42_SP1/V_SP1)
+FlowWithinTissue_AB42_SP1_SP2 : AB42_SP1 -> AB42_SP2; ((2/3) * Q_SN + Q_LP) * (AB42_SP1/V_SP1)
+FlowWithinTissue_AB42_SP2_Lymph : AB42_SP2 -> AB42_Lymph; (1/3) * Q_SN * (AB42_SP2/V_SP2)
+FlowWithinTissue_AB42_SP2_SP3 : AB42_SP2 -> AB42_SP3; ((1/3) * Q_SN + Q_LP) * (AB42_SP2/V_SP2)
+FlowWithinTissue_AB42_SP3_Lymph : AB42_SP3 -> AB42_Lymph; (1/3) * Q_SN * (AB42_SP3/V_SP3)
+FlowWithinTissue_AB42_SP3_LumbarDrain : AB42_SP3 -> AB42_LumbarDrain; (Q_LP + Q_refill) * (AB42_SP3/V_SP3)
+FlowWithinTissue_AB42_13C6Leu_CV_SAS : AB42_13C6Leu_CV -> AB42_13C6Leu_SAS; (Q_CSF - Q_SN - Q_LP) * (AB42_13C6Leu_CV/V_CV)
+FlowWithinTissue_AB42_13C6Leu_SAS_Lymph : AB42_13C6Leu_SAS -> AB42_13C6Leu_Lymph; (Q_CSF - Q_SN - Q_LP) * (AB42_13C6Leu_SAS/V_SAS)
+FlowWithinTissue_AB42_13C6Leu_CV_SP1 : AB42_13C6Leu_CV -> AB42_13C6Leu_SP1; (Q_SN + Q_LP) * (AB42_13C6Leu_CV/V_CV)
+FlowWithinTissue_AB42_13C6Leu_SP1_Lymph : AB42_13C6Leu_SP1 -> AB42_13C6Leu_Lymph; (1/3) * Q_SN * (AB42_13C6Leu_SP1/V_SP1)
+FlowWithinTissue_AB42_13C6Leu_SP1_SP2 : AB42_13C6Leu_SP1 -> AB42_13C6Leu_SP2; ((2/3) * Q_SN + Q_LP) * (AB42_13C6Leu_SP1/V_SP1)
+FlowWithinTissue_AB42_13C6Leu_SP2_Lymph : AB42_13C6Leu_SP2 -> AB42_13C6Leu_Lymph; (1/3) * Q_SN * (AB42_13C6Leu_SP2/V_SP2)
+FlowWithinTissue_AB42_13C6Leu_SP2_SP3 : AB42_13C6Leu_SP2 -> AB42_13C6Leu_SP3; ((1/3) * Q_SN + Q_LP) * (AB42_13C6Leu_SP2/V_SP2)
+FlowWithinTissue_AB42_13C6Leu_SP3_Lymph : AB42_13C6Leu_SP3 -> AB42_13C6Leu_Lymph; (1/3) * Q_SN * (AB42_13C6Leu_SP3/V_SP3)
+FlowWithinTissue_AB42_13C6Leu_SP3_LumbarDrain : AB42_13C6Leu_SP3 -> AB42_13C6Leu_LumbarDrain; (Q_LP + Q_refill) * (AB42_13C6Leu_SP3/V_SP3)
+BidirectionalFlowWithinTissue_AB42_SAS_BrainISF_fwd : AB42_SAS -> AB42_BrainISF; Q_glymph * (AB42_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB42_SAS_BrainISF_rev : AB42_BrainISF -> AB42_SAS; Q_glymph * (AB42_BrainISF/V_BrainISF)
+BidirectionalFlowWithinTissue_AB42_CV_SAS_fwd : AB42_CV -> AB42_SAS; Q_osc * (AB42_CV/V_CV)
+BidirectionalFlowWithinTissue_AB42_CV_SAS_rev : AB42_SAS -> AB42_CV; Q_osc * (AB42_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB42_CV_SP1_fwd : AB42_CV -> AB42_SP1; Q_osc * (AB42_CV/V_CV)
+BidirectionalFlowWithinTissue_AB42_CV_SP1_rev : AB42_SP1 -> AB42_CV; Q_osc * (AB42_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB42_SP1_SP2_fwd : AB42_SP1 -> AB42_SP2; Q_osc * (AB42_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB42_SP1_SP2_rev : AB42_SP2 -> AB42_SP1; Q_osc * (AB42_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB42_SP2_SP3_fwd : AB42_SP2 -> AB42_SP3; Q_osc * (AB42_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB42_SP2_SP3_rev : AB42_SP3 -> AB42_SP2; Q_osc * (AB42_SP3/V_SP3)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_SAS_BrainISF_fwd : AB42_13C6Leu_SAS -> AB42_13C6Leu_BrainISF; Q_glymph * (AB42_13C6Leu_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_SAS_BrainISF_rev : AB42_13C6Leu_BrainISF -> AB42_13C6Leu_SAS; Q_glymph * (AB42_13C6Leu_BrainISF/V_BrainISF)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_CV_SAS_fwd : AB42_13C6Leu_CV -> AB42_13C6Leu_SAS; Q_osc * (AB42_13C6Leu_CV/V_CV)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_CV_SAS_rev : AB42_13C6Leu_SAS -> AB42_13C6Leu_CV; Q_osc * (AB42_13C6Leu_SAS/V_SAS)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_CV_SP1_fwd : AB42_13C6Leu_CV -> AB42_13C6Leu_SP1; Q_osc * (AB42_13C6Leu_CV/V_CV)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_CV_SP1_rev : AB42_13C6Leu_SP1 -> AB42_13C6Leu_CV; Q_osc * (AB42_13C6Leu_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_SP1_SP2_fwd : AB42_13C6Leu_SP1 -> AB42_13C6Leu_SP2; Q_osc * (AB42_13C6Leu_SP1/V_SP1)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_SP1_SP2_rev : AB42_13C6Leu_SP2 -> AB42_13C6Leu_SP1; Q_osc * (AB42_13C6Leu_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_SP2_SP3_fwd : AB42_13C6Leu_SP2 -> AB42_13C6Leu_SP3; Q_osc * (AB42_13C6Leu_SP2/V_SP2)
+BidirectionalFlowWithinTissue_AB42_13C6Leu_SP2_SP3_rev : AB42_13C6Leu_SP3 -> AB42_13C6Leu_SP2; Q_osc * (AB42_13C6Leu_SP3/V_SP3)
+AB42Synthesis_BrainISF : C99_BrainISF -> AB42_BrainISF; (k_gammasec_AB42/Km_C99_Abeta)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C99_BrainISF/V_BrainISF) * V_BrainISF
+AB42Degradation_BrainISF : AB42_BrainISF ->; k_BPD_AB42 * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+AB42Exchange_BrainISF_fwd : AB42_BrainISF -> AB42_Exchange; k_ex_AB42 * (AB42_BrainISF/V_BrainISF) * V_BrainISF
+AB42Exchange_BrainISF_rev : AB42_Exchange -> AB42_BrainISF; k_ret_AB42 * (AB42_Exchange/V_Exchange) * V_Exchange
+AB42Synthesis_13C6Leu_BrainISF : C99_13C6Leu_BrainISF -> AB42_13C6Leu_BrainISF; (k_gammasec_AB42/Km_C99_Abeta)/(1+((C83_BrainISF/V_BrainISF) + (C83_13C6Leu_BrainISF/V_BrainISF))/Km_C83_p3+((C99_BrainISF/V_BrainISF) + (C99_13C6Leu_BrainISF/V_BrainISF))/Km_C99_Abeta) * (C99_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB42Degradation_13C6Leu_BrainISF : AB42_13C6Leu_BrainISF ->; k_BPD_AB42 * (AB42_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB42Exchange_13C6Leu_BrainISF_fwd : AB42_13C6Leu_BrainISF -> AB42_13C6Leu_Exchange; k_ex_AB42 * (AB42_13C6Leu_BrainISF/V_BrainISF) * V_BrainISF
+AB42Exchange_13C6Leu_BrainISF_rev : AB42_13C6Leu_Exchange -> AB42_13C6Leu_BrainISF; k_ret_AB42 * (AB42_13C6Leu_Exchange/V_Exchange) * V_Exchange

@@ -32,6 +32,8 @@ pyantigen-create MyNewModel
 This will automatically scaffold the following project directory:
 ```text
 MyNewModel/
+├── .agents/
+│   └── skills/          (agent skills, e.g. module generation, ODE conversion)
 ├── scripts/
 │   └── MyNewModel_main.py
 ├── modules/
