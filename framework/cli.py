@@ -127,11 +127,11 @@ def create_project():
     # Create dummy parameter configuration
     param_csv_path = os.path.join(project_dir, "antimony_models", f"{project_dir}_parameters.csv")
     with open(param_csv_path, "w") as f:
-        f.write("Parameter,Value,Comment\n")
-        f.write("k_A_to_B,0.1,Default rate constant for A to B\n")
-        f.write("V_comp1,1.0,Default compartment volume\n")
-        f.write("A_comp1,10.0,Initial amount of A\n")
-        f.write("B_comp1,0.0,Initial amount of B\n")
+        f.write("Parameter,Value,Units,Comment\n")
+        f.write("k_A_to_B,0.1,,Default rate constant for A to B\n")
+        f.write("V_comp1,1.0,,Default compartment volume\n")
+        f.write("A_comp1,10.0,,Initial amount of A\n")
+        f.write("B_comp1,0.0,,Initial amount of B\n")
     print(f"  Created file: antimony_models/{project_dir}_parameters.csv")
 
     # Create Antimony simulation script
@@ -142,59 +142,24 @@ def create_project():
             import numpy as np
             import matplotlib.pyplot as plt
             import os
-            import csv
             import time
+
+            # Model name (used for antimony_models filenames). Default: project name from this script.
+            # Change this if you create a new run script for a different model or variant.
+            MODEL_NAME = "{project_dir}"
 
             def run_simulation():
                 current_dir = os.path.dirname(__file__)
-                plot_path = os.path.normpath(os.path.join(current_dir, '..', 'results'))
+                project_root = os.path.normpath(os.path.join(current_dir, '..'))
+                plot_path = os.path.normpath(os.path.join(project_root, 'results'))
                 plot_name = os.path.join(plot_path, os.path.basename(__file__).replace('.py', '.png'))
-                project = os.path.basename(__file__).replace('_run.py', '')
-                reactions_file = project + '_reactions.txt'
-                params_file = project + '_parameters.csv'
-                rules_file = project + '_rules.txt'
-                
-                # Load model files (antimony_models and SBML_models use project name only, no Antimony_ prefix)
-                model_path = os.path.normpath(os.path.join(current_dir, '..', 'antimony_models', reactions_file))
-                param_path = os.path.normpath(os.path.join(current_dir, '..', 'antimony_models', params_file))
-                rules_path = os.path.normpath(os.path.join(current_dir, '..', 'antimony_models', rules_file))
-                
-                # Read the model files
-                try:
-                    with open(model_path, 'r') as f:
-                        model_reactions = f.read()
-                except FileNotFoundError:
-                    print(f"Could not find {{model_path}}. Make sure to generate the model first.")
+
+                from framework.antimony_utils import load_antimony_files
+                full_model_text = load_antimony_files(MODEL_NAME, project_root)
+                if not full_model_text.strip():
+                    print("No model content loaded. Ensure the model has been generated and files exist in antimony_models or generated.")
                     return
 
-                model_parameters_list = []
-                try:
-                    with open(param_path, 'r', newline='', encoding='utf-8-sig') as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            val = row['Value']
-                            try:
-                                float(val)
-                                line = f"{{row['Parameter']}} = {{val}}"
-                            except ValueError:
-                                line = f"{{row['Parameter']}} := {{val}}"
-                            if row.get('Comment'):
-                                line += f" # {{row['Comment']}}"
-                            model_parameters_list.append(line)
-                    model_parameters = '\\n'.join(model_parameters_list)
-                except FileNotFoundError:
-                    print(f"Could not find {{param_path}}. Using empty parameters.")
-                    model_parameters = ""
-                    
-                try:
-                    with open(rules_path, 'r') as f:
-                        model_rules = f.read()
-                except FileNotFoundError:
-                    model_rules = ""
-                
-                # Combine model components
-                full_model_text = model_reactions + '\\n' + model_parameters + '\\n' + model_rules
-                
                 print("Loading model into Tellurium...")
                 try:
                     r = te.loada(full_model_text)
@@ -205,8 +170,8 @@ def create_project():
                     return
 
                 # Export SBML (no Antimony_ prefix)
-                sbml_filename = project + '.xml'
-                sbml_path = os.path.normpath(os.path.join(current_dir, '..', 'SBML_models', sbml_filename))
+                sbml_filename = MODEL_NAME + '.xml'
+                sbml_path = os.path.normpath(os.path.join(project_root, 'SBML_models', sbml_filename))
                 os.makedirs(os.path.dirname(sbml_path), exist_ok=True)
                 sbml_content = r.getSBML()
                 with open(sbml_path, 'w') as f:
