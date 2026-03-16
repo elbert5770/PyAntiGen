@@ -134,13 +134,22 @@ def create_project():
         f.write("B_Comp1,0.0,,Initial amount of B\n")
     print("  Created file: antimony_models/Example/Example_InitialConditions.csv")
 
-    # Project-named folder: same structure as Example but Modules/ empty
+    # Project-named folder: same structure as Example with Example Modules copied in
     project_scripts_dir = os.path.join(project_dir, "scripts", project_dir)
     project_modules_dir = os.path.join(project_scripts_dir, "Modules")
     os.makedirs(project_scripts_dir, exist_ok=True)
     os.makedirs(project_modules_dir, exist_ok=True)
     print(f"  Created folder: scripts/{project_dir}/")
-    print(f"  Created folder: scripts/{project_dir}/Modules/ (empty)")
+    example_modules_src = os.path.join(example_template, "Modules")
+    if os.path.isdir(example_modules_src):
+        for name in os.listdir(example_modules_src):
+            src = os.path.join(example_modules_src, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(project_modules_dir, name))
+                print(f"  Copied scripts/{project_dir}/Modules/{name}")
+        print(f"  Created folder: scripts/{project_dir}/Modules/ (Example modules)")
+    else:
+        print(f"  Created folder: scripts/{project_dir}/Modules/ (empty, template not found)")
 
     project_antimony_dir = os.path.join(project_dir, "antimony_models", project_dir)
     project_generated_dir = os.path.join(project_dir, "generated", project_dir)
