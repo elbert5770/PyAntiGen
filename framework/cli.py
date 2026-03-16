@@ -58,9 +58,9 @@ def create_project():
                             Compartments = ['Comp1']
                             for Comp in Compartments:
                                 # Define reaction properties
-                                Reaction_name = f"Basic_A_to_B_{Comp}"
-                                Reactants = f"[A_{Comp}]"
-                                Products = f"[B_{Comp}]"
+                                Reaction_name = f"Basic_A_to_B_\{Comp}"
+                                Reactants = f"[A_\{Comp}]"
+                                Products = f"[B_\{Comp}]"
                                 Rate_type = "MA"
                                 Rate_eqtn_prototype = "k_A_to_B"
                             
