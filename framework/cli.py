@@ -43,7 +43,7 @@ def create_project():
             with open(os.path.join(path, "__init__.py"), "w") as f:
                 f.write("# Basic module\n")
             with open(os.path.join(path, "ma_reaction.py"), "w") as f:
-                f.write(textwrap.dedent("""\
+                f.write(textwrap.dedent(f"""\
                     \"\"\"
                     Basic module with a single MA reaction A -> B.
                     \"\"\"
@@ -55,12 +55,14 @@ def create_project():
                         Creates a simple MA reaction A -> B.
                         \"\"\"
                         def build(self):
-                            # Define reaction properties
-                            Reaction_name = "Basic_A_to_B"
-                            Reactants = "[A_Comp1]"
-                            Products = "[B_Comp1]"
-                            Rate_type = "MA"
-                            Rate_eqtn_prototype = "k_A_to_B"
+                            Compartments = ['Comp1']
+                            for Comp in Compartments:
+                                # Define reaction properties
+                                Reaction_name = f"Basic_A_to_B_{Comp}"
+                                Reactants = f"[A_{Comp}]"
+                                Products = f"[B_{Comp}]"
+                                Rate_type = "MA"
+                                Rate_eqtn_prototype = "k_A_to_B"
                             
                             # Add the reaction to the model
                             self.add_reaction(Reaction_name, Reactants, Products, Rate_type, Rate_eqtn_prototype)
