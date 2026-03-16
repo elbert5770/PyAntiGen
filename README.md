@@ -23,7 +23,7 @@ pip install -e .
 
 Because PyAntiGen is installed as a system-level Python package, you don't need a copy of the framework files in your working directory. 
 
-To start a brand new modeling workspace, just open a terminal where you want it to live and run:
+To start a brand new modeling workspace, just open a terminal and navigate to a folder where you want it to live (not PyAntiGen) and run:
 
 ```bash
 pyantigen-create MyNewModel
@@ -44,7 +44,7 @@ MyNewModel/
 │       ├── MyNewModel_generate.py
 │       ├── MyNewModel_run.py
 │       ├── MyNewModel_optimize.py
-│       └── Modules/     (empty)
+│       └── Modules/     (Data, AntimonyGen, Plots, Simulate, Optimize, Experiment, Events)
 ├── modules/
 │   └── __init__.py      (plus Basic/ for the example)
 ├── data/                (Example experiment CSVs copied for the example)
@@ -70,9 +70,15 @@ This generates the model and writes outputs to `antimony_models/Example/` and `g
 python Example_run.py
 ```
 
-For parameter fitting against data, run `python Example_optimize.py`. Your own model lives under `scripts/MyNewModel/` with the same script layout; add your code under `scripts/MyNewModel/Modules/` and use the generated `*_generate.py`, `*_run.py`, and `*_optimize.py` as templates.
+For parameter fitting against data, run:
 
-Keeping the simulation step separate gives you time to adjust parameters and inspect the generated files before running.
+```bash
+python Example_optimize.py
+```
+
+Your own model lives under `scripts/MyNewModel/` with the same files as the Example. Modify the code for your model in `scripts/MyNewModel/Modules/` and `scripts/MyNewModel/MyNewModel_generate.py`, `scripts/MyNewModel/MyNewModel_run.py`, and `scripts/MyNewModel/MyNewModel_optimize.py'. Your problem will also require new modules in folder 'modules'.
+
+Keeping the generation and simulation steps separate gives you time to adjust parameters and inspect the generated files before running.
 
 ### Running from an IDE (Cursor / VS Code)
 
