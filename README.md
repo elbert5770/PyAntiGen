@@ -35,23 +35,30 @@ MyNewModel/
 ├── .agents/
 │   └── skills/          (agent skills, e.g. module generation, ODE conversion)
 ├── scripts/
-│   └── Example/
-│       ├── Example_generate.py
-│       └── Example_run.py
+│   ├── Example/         (full example: generate, run, optimize + Modules/)
+│   │   ├── Example_generate.py
+│   │   ├── Example_run.py
+│   │   ├── Example_optimize.py
+│   │   └── Modules/     (Data, AntimonyGen, Plots, Simulate, Optimize, Experiment, Events)
+│   └── MyNewModel/      (same structure, Modules/ left empty for your code)
+│       ├── MyNewModel_generate.py
+│       ├── MyNewModel_run.py
+│       ├── MyNewModel_optimize.py
+│       └── Modules/     (empty)
 ├── modules/
-│   └── __init__.py
-├── data/
+│   └── __init__.py      (plus Basic/ for the example)
+├── data/                (Example experiment CSVs copied for the example)
 ├── antimony_models/
 │   └── Example/         (Example_parameters.csv, Example_InitialConditions.csv, etc.)
 ├── generated/
-│   └── Example/         (reaction dict, rules, unique_*, etc. after generate)
+│   └── Example/         (reaction dict, rules, etc. after generate)
 ├── results/
 │   └── Example/         (plots from Example_run.py)
 ├── SBML_models/
 └── pyantigen_settings.json   (e.g. archive_with_timestamp: false)
 ```
 
-All model-specific files are grouped under folders named by `MODEL_NAME` (here, `Example`). From `MyNewModel/scripts/Example/` run:
+All model-specific files are grouped under folders named by `MODEL_NAME` (e.g. `Example` or your project name). From `MyNewModel/scripts/Example/` run:
 
 ```bash
 python Example_generate.py
@@ -62,6 +69,8 @@ This generates the model and writes outputs to `antimony_models/Example/` and `g
 ```bash
 python Example_run.py
 ```
+
+For parameter fitting against data, run `python Example_optimize.py`. Your own model lives under `scripts/MyNewModel/` with the same script layout; add your code under `scripts/MyNewModel/Modules/` and use the generated `*_generate.py`, `*_run.py`, and `*_optimize.py` as templates.
 
 Keeping the simulation step separate gives you time to adjust parameters and inspect the generated files before running.
 

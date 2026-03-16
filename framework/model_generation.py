@@ -20,7 +20,8 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
     script_basename = os.path.basename(calling_file_path).replace('.py', '')
     model_name = script_basename[:-9] if script_basename.endswith('_generate') else script_basename
 
-    script_dir = os.path.dirname(calling_file_path)
+    # Resolve to absolute path so output_dir does not depend on cwd (fixes VSCode "Run Python File" where cwd can be script dir)
+    script_dir = os.path.abspath(os.path.dirname(os.path.normpath(calling_file_path)))
     # Project root: parent of "scripts", or two levels up when script is in scripts/Example/
     if os.path.basename(script_dir) == "scripts":
         output_dir = os.path.abspath(os.path.join(script_dir, ".."))

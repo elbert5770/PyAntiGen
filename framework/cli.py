@@ -57,8 +57,8 @@ def create_project():
                         def build(self):
                             # Define reaction properties
                             Reaction_name = "Basic_A_to_B"
-                            Reactants = "[A_comp1]"
-                            Products = "[B_comp1]"
+                            Reactants = "[A_Comp1]"
+                            Products = "[B_Comp1]"
                             Rate_type = "MA"
                             Rate_eqtn_prototype = "k_A_to_B"
                             
@@ -91,9 +91,28 @@ def create_project():
     else:
         print("  Created folder: .agents/skills/")
 
-    # Example scripts live in scripts/Example/ with MODEL_NAME = 'Example'
+    # Copy Example template exactly into scripts/Example/
+    template_dir = os.path.join(framework_dir, "template")
+    example_template = os.path.join(template_dir, "Example")
     example_scripts_dir = os.path.join(project_dir, "scripts", "Example")
-    os.makedirs(example_scripts_dir, exist_ok=True)
+    if os.path.isdir(example_template):
+        shutil.copytree(example_template, example_scripts_dir)
+        print("  Copied scripts/Example/ (from template)")
+    else:
+        os.makedirs(example_scripts_dir, exist_ok=True)
+        print("  Created folder: scripts/Example/ (template not found)")
+
+    # Copy Example data files into project data/
+    template_data = os.path.join(template_dir, "data")
+    project_data_dir = os.path.join(project_dir, "data")
+    if os.path.isdir(template_data):
+        for name in os.listdir(template_data):
+            src = os.path.join(template_data, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(project_data_dir, name))
+                print(f"  Copied data/{name}")
+
+    # Example model dirs and parameter/initial-condition CSVs (for generate output and run)
     example_antimony_dir = os.path.join(project_dir, "antimony_models", "Example")
     example_generated_dir = os.path.join(project_dir, "generated", "Example")
     example_results_dir = os.path.join(project_dir, "results", "Example")
@@ -101,119 +120,28 @@ def create_project():
     os.makedirs(example_generated_dir, exist_ok=True)
     os.makedirs(example_results_dir, exist_ok=True)
 
-    generate_script_path = os.path.join(example_scripts_dir, "Example_generate.py")
-    with open(generate_script_path, "w") as f:
-        f.write(textwrap.dedent("""\
-            \"\"\"
-            Example model builder. Outputs go to antimony_models/Example/ and generated/Example/.
-            \"\"\"
-            import os
-            import sys
-
-            MODEL_NAME = "Example"
-
-            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
-
-            from framework.pyantigen import PyAntiGen
-            from modules.Basic.ma_reaction import BasicMAReaction
-
-            if __name__ == "__main__":
-                Isotopes = ['']
-                model = PyAntiGen(name=MODEL_NAME, isotopes=Isotopes)
-                BasicMAReaction(model)
-
-                print(f"Reactions generated: {model.counter}")
-                print(f"Rules generated: {len(model.rules)}")
-                model.generate(__file__)
-                print("\\nModel generated successfully.")
-                print("Next steps:")
-                print(f"  1. Optionally edit parameters in antimony_models/{MODEL_NAME}/{MODEL_NAME}_parameters.csv")
-                print(f"  2. From scripts/{MODEL_NAME}/, run: python {MODEL_NAME}_run.py")
-        """))
-    print("  Created file: scripts/Example/Example_generate.py")
-
     param_csv_path = os.path.join(example_antimony_dir, "Example_parameters.csv")
     with open(param_csv_path, "w") as f:
         f.write("Parameter,Value,Units,Comment\n")
         f.write("k_A_to_B,0.1,,Default rate constant for A to B\n")
-        f.write("V_comp1,1.0,,Default compartment volume\n")
+        f.write("V_Comp1,1.0,,Default compartment volume\n")
     print("  Created file: antimony_models/Example/Example_parameters.csv")
 
     init_cond_path = os.path.join(example_antimony_dir, "Example_InitialConditions.csv")
     with open(init_cond_path, "w") as f:
         f.write("Species,InitialCondition,Units,Comment\n")
-        f.write("A_comp1,10.0,,Initial amount of A\n")
-        f.write("B_comp1,0.0,,Initial amount of B\n")
+        f.write("A_Comp1,0.0,,Initial amount of A\n")
+        f.write("B_Comp1,0.0,,Initial amount of B\n")
     print("  Created file: antimony_models/Example/Example_InitialConditions.csv")
 
-    run_script_path = os.path.join(example_scripts_dir, "Example_run.py")
-    with open(run_script_path, "w") as f:
-        f.write(textwrap.dedent("""\
-            import tellurium as te
-            import numpy as np
-            import matplotlib.pyplot as plt
-            import os
-            import time
-
-            MODEL_NAME = "Example"
-
-            def run_simulation():
-                current_dir = os.path.dirname(__file__)
-                if os.path.basename(current_dir) == "scripts":
-                    project_root = os.path.normpath(os.path.join(current_dir, ".."))
-                else:
-                    project_root = os.path.normpath(os.path.join(current_dir, "..", ".."))
-                plot_path = os.path.normpath(os.path.join(project_root, "results", MODEL_NAME))
-                os.makedirs(plot_path, exist_ok=True)
-                plot_name = os.path.join(plot_path, os.path.basename(__file__).replace(".py", ".png"))
-
-                from framework.antimony_utils import load_antimony_files, archive_antimony_snapshot
-                full_model_text = load_antimony_files(MODEL_NAME, project_root)
-                if not full_model_text.strip():
-                    print(f"No model content loaded. Generate the model first: python {MODEL_NAME}_generate.py")
-                    return
-
-                print("Loading model into Tellurium...")
-                try:
-                    r = te.loada(full_model_text)
-                except Exception as e:
-                    print(f"Error loading model: {e}")
-                    print("Model Text:")
-                    print(full_model_text)
-                    return
-
-                sbml_content = r.getSBML()
-                archive_dir = archive_antimony_snapshot(MODEL_NAME, project_root, sbml_content=sbml_content)
-                print(f"Archive and SBML written to: {archive_dir}")
-
-                r.setIntegrator("cvode")
-                print("Running simulation...")
-                t0 = time.perf_counter()
-                result = r.simulate(0, 100, 100)
-                elapsed = time.perf_counter() - t0
-                print(f"Simulation time: {elapsed:.3f} s")
-
-                plt.figure(figsize=(8, 6))
-                time_points = result[:, 0]
-                for i in range(1, result.shape[1]):
-                    plt.plot(time_points, result[:, i], label=result.colnames[i])
-                plt.xlabel("Time")
-                plt.ylabel("Concentration")
-                plt.title("Simulation Results")
-                plt.legend()
-                plt.savefig(plot_name)
-                print(f"Plot saved to: {plot_name}")
-                plt.show()
-
-            if __name__ == "__main__":
-                run_simulation()
-        """))
-    print("  Created file: scripts/Example/Example_run.py")
-
-    # Project-named folder with boilerplate generate/run (MODEL_NAME = project name, XXX placeholders)
+    # Project-named folder: same structure as Example but Modules/ empty
     project_scripts_dir = os.path.join(project_dir, "scripts", project_dir)
+    project_modules_dir = os.path.join(project_scripts_dir, "Modules")
     os.makedirs(project_scripts_dir, exist_ok=True)
+    os.makedirs(project_modules_dir, exist_ok=True)
+    print(f"  Created folder: scripts/{project_dir}/")
+    print(f"  Created folder: scripts/{project_dir}/Modules/ (empty)")
+
     project_antimony_dir = os.path.join(project_dir, "antimony_models", project_dir)
     project_generated_dir = os.path.join(project_dir, "generated", project_dir)
     project_results_dir = os.path.join(project_dir, "results", project_dir)
@@ -221,103 +149,15 @@ def create_project():
     os.makedirs(project_generated_dir, exist_ok=True)
     os.makedirs(project_results_dir, exist_ok=True)
 
-    project_generate_path = os.path.join(project_scripts_dir, f"{project_dir}_generate.py")
-    with open(project_generate_path, "w") as f:
-        f.write(textwrap.dedent(f"""\
-            \"\"\"
-            Model builder for {project_dir}. Outputs go to antimony_models/{project_dir}/ and generated/{project_dir}/.
-            \"\"\"
-            import os
-            import sys
-
-            MODEL_NAME = "{project_dir}"
-
-            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
-
-            from framework.pyantigen import PyAntiGen
-            # XXX: import your module(s)
-            # from modules.XXX import XXX
-
-            if __name__ == "__main__":
-                Isotopes = ['']
-                model = PyAntiGen(name=MODEL_NAME, isotopes=Isotopes)
-                # XXX: instantiate your module(s)
-                # XXX(model)
-
-                print(f"Reactions generated: {{model.counter}}")
-                print(f"Rules generated: {{len(model.rules)}}")
-                model.generate(__file__)
-                print("\\nModel generated successfully.")
-                print("Next steps:")
-                print(f"  1. Optionally edit parameters in antimony_models/{{MODEL_NAME}}/{{MODEL_NAME}}_parameters.csv")
-                print(f"  2. From scripts/{{MODEL_NAME}}/, run: python {{MODEL_NAME}}_run.py")
-        """))
-    print(f"  Created file: scripts/{project_dir}/{project_dir}_generate.py")
-
-    project_run_path = os.path.join(project_scripts_dir, f"{project_dir}_run.py")
-    with open(project_run_path, "w") as f:
-        f.write(textwrap.dedent(f"""\
-            import tellurium as te
-            import numpy as np
-            import matplotlib.pyplot as plt
-            import os
-            import time
-
-            MODEL_NAME = "{project_dir}"
-
-            def run_simulation():
-                current_dir = os.path.dirname(__file__)
-                if os.path.basename(current_dir) == "scripts":
-                    project_root = os.path.normpath(os.path.join(current_dir, ".."))
-                else:
-                    project_root = os.path.normpath(os.path.join(current_dir, "..", ".."))
-                plot_path = os.path.normpath(os.path.join(project_root, "results", MODEL_NAME))
-                os.makedirs(plot_path, exist_ok=True)
-                plot_name = os.path.join(plot_path, os.path.basename(__file__).replace(".py", ".png"))
-
-                from framework.antimony_utils import load_antimony_files, archive_antimony_snapshot
-                full_model_text = load_antimony_files(MODEL_NAME, project_root)
-                if not full_model_text.strip():
-                    print(f"No model content loaded. Generate the model first: python {{MODEL_NAME}}_generate.py")
-                    return
-
-                print("Loading model into Tellurium...")
-                try:
-                    r = te.loada(full_model_text)
-                except Exception as e:
-                    print(f"Error loading model: {{e}}")
-                    print("Model Text:")
-                    print(full_model_text)
-                    return
-
-                sbml_content = r.getSBML()
-                archive_dir = archive_antimony_snapshot(MODEL_NAME, project_root, sbml_content=sbml_content)
-                print(f"Archive and SBML written to: {{archive_dir}}")
-
-                r.setIntegrator("cvode")
-                print("Running simulation...")
-                t0 = time.perf_counter()
-                result = r.simulate(0, 100, 100)
-                elapsed = time.perf_counter() - t0
-                print(f"Simulation time: {{elapsed:.3f}} s")
-
-                plt.figure(figsize=(8, 6))
-                time_points = result[:, 0]
-                for i in range(1, result.shape[1]):
-                    plt.plot(time_points, result[:, i], label=result.colnames[i])
-                plt.xlabel("XXX")
-                plt.ylabel("XXX")
-                plt.title("XXX")
-                plt.legend()
-                plt.savefig(plot_name)
-                print(f"Plot saved to: {{plot_name}}")
-                plt.show()
-
-            if __name__ == "__main__":
-                run_simulation()
-        """))
-    print(f"  Created file: scripts/{project_dir}/{project_dir}_run.py")
+    # Copy Example scripts into project folder (MODEL_NAME derived from folder name at runtime)
+    if os.path.isdir(example_template):
+        for base in ("Example_generate", "Example_run", "Example_optimize"):
+            src = os.path.join(example_template, base + ".py")
+            if os.path.isfile(src):
+                dst_name = project_dir + base[7:]  # "Example_foo" -> "{project_dir}_foo"
+                dst = os.path.join(project_scripts_dir, dst_name + ".py")
+                shutil.copy2(src, dst)
+                print(f"  Created file: scripts/{project_dir}/{dst_name}.py")
 
     print("\nProject scaffolded successfully!")
     print("Note: Because PyAntiGen is installed in your Python environment,")

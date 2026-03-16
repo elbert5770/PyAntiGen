@@ -6,10 +6,19 @@ setup(
     description='A declarative framework for building compartmental Antimony models',
     author='Open Source Contributor',
     packages=find_packages(include=['framework*']),
+    package_data={
+        'framework': [
+            'template/Example/*.py',
+            'template/Example/Modules/*.py',
+            'template/data/*.csv',
+        ],
+    },
     install_requires=[
         'tellurium',
         'matplotlib',
-        'numpy'
+        'numpy',
+        'pandas',
+        'scipy',
     ],
     entry_points={
         'console_scripts': [
