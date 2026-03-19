@@ -72,13 +72,15 @@ def _csv_to_antimony_parameters(csv_path):
                 val = row.get("Value", "").strip()
                 units = row.get("Units", "").strip()
                 comment = row.get("Comment", "").strip()
-                try:
-                    float(val) if val else 0
+                if val == "var":
+                    line = f"var {param}"
+                else:
                     line = f"{param} = {val if val else '0'}"
-                except ValueError:
-                    line = f"{param} := {val}" if val else f"{param} := 0"
-                if units or comment:
-                    line += f" # {units} {comment}".strip()
+                
+                if units:
+                    line += f" // [{units}]"
+                if comment:
+                    line += f" # {comment}"
                 lines.append(line)
     except FileNotFoundError:
         pass
