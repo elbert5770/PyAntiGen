@@ -65,12 +65,13 @@ def set_parameters_from_dict(r, params):
     Apply parameter dict to Tellurium model r.
     params: dict mapping model parameter id -> value.
     Uses roadrunner form: r[name] = value.
+    Ignores parameters that fail to set (e.g., formula-only parameters like SF).
     """
     for name, value in params.items():
         try:
             r[name] = value
-        except Exception as e:
-            raise RuntimeError(f"Failed to set parameter '{name}': {e}") from e
+        except Exception:
+            pass
 
 
 def loss_function(
@@ -102,9 +103,14 @@ def loss_function(
         Scalar loss (float). Lower = better fit.
     """
     loss_config = loss_config or {}
-    observable = loss_config.get("observable", "[B_Comp1]")
-    data_column = loss_config.get("data_column", "B")
     time_column = loss_config.get("time_column", "time")
+    
+    observables_config = loss_config.get("observables", [])
+    if not observables_config:
+        raise ValueError(
+            "loss_config must provide an 'observables' list specifying how to map Tellurium output to data columns.\n"
+            "Example: loss_config={'observables': [{'observable': '[B_Comp1]', 'data_column': 'B'}], 'time_column': 'time'}"
+        )
 
     if isinstance(params, dict):
         param_dict = params
@@ -128,15 +134,56 @@ def loss_function(
     for item in results:
         result = item["result"]
         df = item["data"]
-        if time_column not in df.columns or data_column not in df.columns:
+        
+        # Build local dictionary for evaluating mathematical formulas
+        local_dict = {"np": np, "time": np.asarray(result["time"])}
+        if hasattr(result, "colnames"):
+            cols = result.colnames
+        elif hasattr(result, "dtype") and result.dtype.names:
+            cols = result.dtype.names
+        else:
+            cols = []
+            
+        for col in cols:
+            local_dict[col] = np.asarray(result[col])
+            # If it's a bracketed concentration, provide stripped version for easy eval
+            if col.startswith('[') and col.endswith(']'):
+                local_dict[col[1:-1]] = np.asarray(result[col])
+
+        # Expose all optimization parameters to the formula evaluation
+        local_dict.update(param_dict)
+
+        if time_column not in df.columns:
             continue
+        
         t_data = np.asarray(df[time_column])
-        y_data = np.asarray(df[data_column])
         t_sim = np.asarray(result["time"])
-        y_sim = np.asarray(result[observable])
-        # Interpolate simulation at data timepoints
-        y_pred = np.interp(t_data, t_sim, y_sim)
-        total_loss += np.sum((y_data - y_pred) ** 2)
+
+        for obs_cfg in observables_config:
+            obs = obs_cfg["observable"]
+            d_col = obs_cfg["data_column"]
+            
+            if d_col not in df.columns:
+                continue
+                
+            y_data = np.asarray(df[d_col])
+
+            # Evaluate the observable (string column, string formula, or callable)
+            try:
+                if callable(obs):
+                    y_sim = np.asarray(obs(result))
+                elif isinstance(obs, str) and obs in cols:
+                    y_sim = np.asarray(result[obs])
+                elif isinstance(obs, str):
+                    y_sim = np.asarray(eval(obs, {"__builtins__": {}}, local_dict))
+                else:
+                    raise ValueError(f"Invalid observable type: {type(obs)}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to evaluate observable '{obs}': {e}") from e
+
+            # Interpolate simulation at data timepoints
+            y_pred = np.interp(t_data, t_sim, y_sim)
+            total_loss += np.sum((y_data - y_pred) ** 2)
 
     return float(total_loss)
 

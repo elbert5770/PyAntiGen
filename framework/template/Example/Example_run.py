@@ -8,14 +8,15 @@ if _project_dir not in sys.path:
     sys.path.insert(0, _project_dir)
 MODEL_NAME = os.path.basename(_project_dir)
 
-from Modules.AntimonyGen import AntimonyGen, TelluriumGen
+from framework.AntimonyGen import AntimonyGen, TelluriumGen
 from Modules.Experiment import EXPERIMENTS
 from Modules.Plots import plot_results
 from Modules.Simulate import simulate
 
 
 def run_simulation():
-    model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME)
+    repo_root = os.path.normpath(os.path.join(_project_dir, ".."))
+    model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME, repo_root=repo_root)
     results = []
     for spec in EXPERIMENTS:
         events = spec["event_func"]()

@@ -5,10 +5,11 @@ import tellurium as te
 
 from framework.antimony_utils import load_antimony_files, archive_antimony_snapshot
 
-def AntimonyGen(MODEL_NAME):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    # From Model_Modules: ../../.. = repo root (contains data/, results/, generated/, antimony_models/)
-    repo_root = os.path.normpath(os.path.join(current_dir, "..", "..", ".."))
+def AntimonyGen(MODEL_NAME, repo_root=None):
+    if repo_root is None:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Fallback to current directory if not provided
+        repo_root = current_dir
     data_path = os.path.join(repo_root, "data")
     plot_path = os.path.normpath(os.path.join(repo_root, "results", MODEL_NAME))
 
