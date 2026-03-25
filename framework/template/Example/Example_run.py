@@ -15,7 +15,10 @@ from Modules.Simulate import simulate
 
 
 def run_simulation():
-    repo_root = os.path.normpath(os.path.join(_project_dir, ".."))
+    if os.path.basename(_project_dir) == "scripts":
+        repo_root = os.path.abspath(os.path.join(_project_dir, ".."))
+    else:
+        repo_root = os.path.abspath(os.path.join(_project_dir, "..", ".."))
     model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME, repo_root=repo_root)
     results = []
     for spec in EXPERIMENTS:

@@ -17,7 +17,10 @@ from Modules.Plots import plot_results
 
 
 def main():
-    repo_root = os.path.normpath(os.path.join(_project_dir, ".."))
+    if os.path.basename(_project_dir) == "scripts":
+        repo_root = os.path.abspath(os.path.join(_project_dir, ".."))
+    else:
+        repo_root = os.path.abspath(os.path.join(_project_dir, "..", ".."))
     model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME, repo_root=repo_root)
 
     # Define parameters to optimize (can be model parameters or formula variables like SF).

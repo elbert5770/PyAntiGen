@@ -5,7 +5,7 @@ Also provides run_all for running experiments (with optional parameter injection
 """
 
 import numpy as np
-from .AntimonyGen import TelluriumGen
+from framework.AntimonyGen import TelluriumGen
 from .Simulate import simulate
 
 
@@ -175,7 +175,12 @@ def loss_function(
                 elif isinstance(obs, str) and obs in cols:
                     y_sim = np.asarray(result[obs])
                 elif isinstance(obs, str):
-                    y_sim = np.asarray(eval(obs, {"__builtins__": {}}, local_dict))
+                    # Prevent brackets from being parsed as Python lists
+                    eval_obs = str(obs)
+                    for col in cols:
+                        if col.startswith('[') and col.endswith(']'):
+                            eval_obs = eval_obs.replace(col, col[1:-1])
+                    y_sim = np.asarray(eval(eval_obs, {"__builtins__": {}}, local_dict))
                 else:
                     raise ValueError(f"Invalid observable type: {type(obs)}")
             except Exception as e:
