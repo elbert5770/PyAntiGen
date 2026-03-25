@@ -11,7 +11,6 @@ if _project_dir not in sys.path:
 MODEL_NAME = os.path.basename(_project_dir)
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-#sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 from framework.pyantigen import PyAntiGen
 from modules.Basic.ma_reaction import BasicMAReaction

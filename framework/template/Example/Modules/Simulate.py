@@ -8,7 +8,7 @@ def simulate(r):
     r.integrator.variable_step_size = True
     print(r.integrator)
 
-    observed_species = ['time','[A_Comp1]','[B_Comp1]']
+    observed_species = ['time','[A_Comp1]','[B_Comp1]', 'pw_interp1', 'pw_interp2']
 
 
     print("Running simulation...")
@@ -20,6 +20,5 @@ def simulate(r):
     elapsed = time.perf_counter() - t0
     print(f"Simulation time: {elapsed:.3f} s")
     print(f"CVODE took {len(result1)} steps.")
-    print("k_A_to_B: ", r['k_A_to_B'], ", true value: 0.1")
 
     return result1

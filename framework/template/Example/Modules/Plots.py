@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import os
+import numpy as np
+
 
 
 def plot_results(plot_path, MODEL_NAME, results):
@@ -25,6 +27,13 @@ def plot_results(plot_path, MODEL_NAME, results):
         plt.plot(time_points, result["[B_Comp1]"], label=f"[B] {label}", color=color_B[i])
         if "time" in df.columns and "B" in df.columns:
             plt.scatter(df["time"], df["B"], color=color_B[i], s=30, zorder=5, label=f"Measured [B] {label}")
+            
+            # If the piecewise interpolation was simulated, plot it directly from the result
+            if label == "Experiment 1":
+                if "pw_interp1" in result.colnames:
+                    plt.plot(time_points, result["pw_interp1"], '--', color="cyan", alpha=0.7, label=f"Piecewise Linear", zorder=4)
+                if "pw_interp2" in result.colnames:
+                    plt.plot(time_points, result["pw_interp2"], '--', color="purple", alpha=0.7, label=f"Piecewise Spline", zorder=4)
     plt.xlabel("Time")
     plt.ylabel("Concentration")
     plt.title("Simulation Results for " + MODEL_NAME)
