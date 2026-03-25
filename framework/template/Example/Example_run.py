@@ -39,7 +39,7 @@ def run_simulation():
             pw_str1 = "pw_interp1 := 0.0"
             pw_str2 = "pw_interp2 := 0.0"
             
-        full_model_text = model_text + "\n" + events + "\n" + pw_str
+        full_model_text = model_text + "\n" + events + "\n" + pw_str1 + "\n" + pw_str2
         r = TelluriumGen(full_model_text, MODEL_NAME, repo_root)
         result = simulate(r)
         results.append({
