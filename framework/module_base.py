@@ -36,3 +36,7 @@ class PyAntiGenModule:
             compartment=compartment,
             compartment_reverse=compartment_reverse,
         )
+
+    def add_rule(self, rule):
+        """Helper to add rules directly into the parent model."""
+        self.model.add_rule(rule)
