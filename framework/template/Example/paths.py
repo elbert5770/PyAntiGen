@@ -18,3 +18,6 @@ if _project_dir.name == "scripts":
     REPO_ROOT = str(_project_dir.parent)
 else:
     REPO_ROOT = str(_project_dir.parents[1])
+
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
