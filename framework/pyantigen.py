@@ -36,13 +36,16 @@ class PyAntiGen:
     def add_rule(self, rule):
         self.rules.append(rule)
 
-    def generate(self, calling_file_path):
+    def generate(self, calling_file_path, model_name=None):
         """
         Generates the Antimony model. This wraps the existing model_generation logic.
         """
+        if model_name is None:
+            model_name = self.name
+            
         def build_reactions_wrapper(Isotopes):
             # The isotopes passed in here by generate_model are essentially self.isotopes
             # because we formatted them earlier. So we can just return our state.
             return self.reactions, self.rules
             
-        generate_model(build_reactions_wrapper, self.isotopes, calling_file_path)
+        generate_model(build_reactions_wrapper, self.isotopes, calling_file_path, model_name)

@@ -4,7 +4,7 @@ import sys
 from framework.antimony_utils import convert_to_antimony
 from framework.isotopomer_tools import ensure_isotopes_format
 
-def generate_model(build_reactions_func, Isotopes, calling_file_path):
+def generate_model(build_reactions_func, Isotopes, calling_file_path, model_name):
     """
     Generates an Antimony model using the provided reaction building function.
 
@@ -12,13 +12,10 @@ def generate_model(build_reactions_func, Isotopes, calling_file_path):
         build_reactions_func (callable): Function that takes Isotopes list and returns (all_reactions, rules).
         Isotopes (list): List of isotopes to include.
         calling_file_path (str): The __file__ path of the calling script, used to determine output filenames.
+        model_name (str): The name of the model to generate.
     """
     Isotopes = ensure_isotopes_format(Isotopes)
     all_reactions, rules = build_reactions_func(Isotopes)
-    
-    # Model name = project name: strip _generate from script name if present (e.g. MyNewModel_generate.py -> MyNewModel)
-    script_basename = os.path.basename(calling_file_path).replace('.py', '')
-    model_name = script_basename[:-9] if script_basename.endswith('_generate') else script_basename
 
     # Resolve to absolute path so output_dir does not depend on cwd (fixes VSCode "Run Python File" where cwd can be script dir)
     script_dir = os.path.abspath(os.path.dirname(os.path.normpath(calling_file_path)))

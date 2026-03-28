@@ -169,6 +169,13 @@ def create_project():
                 dst = os.path.join(project_scripts_dir, dst_name + ".py")
                 shutil.copy2(src, dst)
                 print(f"  Created file: scripts/{project_dir}/{dst_name}.py")
+        
+        # Also copy paths.py utility
+        paths_src = os.path.join(example_template, "paths.py")
+        if os.path.isfile(paths_src):
+            paths_dst = os.path.join(project_scripts_dir, "paths.py")
+            shutil.copy2(paths_src, paths_dst)
+            print(f"  Created file: scripts/{project_dir}/paths.py")
 
     print("\nProject scaffolded successfully!")
     print("Note: Because PyAntiGen is installed in your Python environment,")

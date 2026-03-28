@@ -5,10 +5,8 @@ tuned to minimize loss vs. data. Uses Modules.Experiment and Modules.Optimize.
 import os
 import sys
 
-_project_dir = os.path.dirname(os.path.abspath(__file__))
-if _project_dir not in sys.path:
-    sys.path.insert(0, _project_dir)
-MODEL_NAME = os.path.basename(_project_dir)
+import paths
+REPO_ROOT = paths.REPO_ROOT
 
 from framework.AntimonyGen import AntimonyGen
 from Modules.Experiment import EXPERIMENTS
@@ -16,12 +14,9 @@ from Modules.Optimize import run_all, run_optimization
 from Modules.Plots import plot_results
 
 
-def main():
-    if os.path.basename(_project_dir) == "scripts":
-        repo_root = os.path.abspath(os.path.join(_project_dir, ".."))
-    else:
-        repo_root = os.path.abspath(os.path.join(_project_dir, "..", ".."))
-    model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME, repo_root=repo_root)
+def main(settings=[]):
+    MODEL_NAME = paths.MODEL_NAME
+    model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
 
     # Define parameters to optimize (can be model parameters or formula variables like SF).
     # Replace with your model's parameter names and bounds.
@@ -59,4 +54,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    settings = []
+    main(settings=settings)
