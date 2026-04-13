@@ -40,7 +40,8 @@ def run_all(
     for spec in experiment_specs:
         event_func = spec["event_func"]
         load_data = spec["load_data"]
-        events = event_func()
+        df = load_data(data_path)
+        events = event_func(df)
         full_model_text = model_text + "\n" + events
         r = TelluriumGen(full_model_text, MODEL_NAME, repo_root)
 

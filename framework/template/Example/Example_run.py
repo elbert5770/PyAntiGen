@@ -18,17 +18,10 @@ def run_simulation(settings=[]):
     model_text, data_path, plot_path, repo_root = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
     results = []
     for spec in EXPERIMENTS:
-        events = spec["event_func"]()
         df = spec["load_data"](data_path)
-        
-        if "Experiment 1" in spec["label"]:
-            pw_str1 = generate_antimony_piecewise(df["time"], df["B"], data_name="pw_interp1", interpolation_type="linear")
-            pw_str2 = generate_antimony_piecewise(df["time"], df["B"], data_name="pw_interp2", interpolation_type="spline")
-        else:
-            pw_str1 = "pw_interp1 := 0.0"
-            pw_str2 = "pw_interp2 := 0.0"
+        events = spec["event_func"](df)
             
-        full_model_text = model_text + "\n" + events + "\n" + pw_str1 + "\n" + pw_str2
+        full_model_text = model_text + "\n" + events
         r = TelluriumGen(full_model_text, MODEL_NAME, repo_root)
         result = simulate(r)
         results.append({
