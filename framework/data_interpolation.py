@@ -40,7 +40,8 @@ def _generate_linear_piecewise(
     data: Union[List[float], np.ndarray],
     data_name: str = "data",
     time_var: str = "time",
-    default_after: Union[float, None] = None
+    default_before: Union[float, str] = 0.0,
+    default_after: Union[float, str, None] = None
 ) -> str:
     """
     Helper function to generate an Antimony piecewise function with linear interpolation.
@@ -65,6 +66,10 @@ def _generate_linear_piecewise(
     
     # Build piecewise conditions and expressions
     pieces = []
+    
+    # Handle times before first point
+    pieces.append(str(default_before) if isinstance(default_before, str) else format_number(default_before))
+    pieces.append(f"{time_var} < {format_number(times[0])}")
     
     # Generate linear interpolation for each interval
     for i in range(len(times) - 1):
@@ -98,8 +103,67 @@ def _generate_linear_piecewise(
         pieces.append(f"{time_var} < {format_number(t_next)}")
     
     # Handle times after last point
-    pieces.append(format_number(default_after))
+    pieces.append(str(default_after) if isinstance(default_after, str) else format_number(default_after))
     pieces.append(f"{time_var} > {format_number(times[-1])}")
+    
+    # Join pieces into Antimony piecewise function
+    piecewise_str = ", ".join(pieces)
+    result = f"{data_name} := piecewise({piecewise_str})"
+    
+    return result
+
+def _generate_linear_piecewise_symbolic(
+    times: List[str],
+    data: List[str],
+    data_name: str = "data",
+    time_var: str = "time",
+    default_before: str = "0.0",
+    default_after: Union[str, None] = None
+) -> str:
+    """
+    Helper function to generate an Antimony piecewise function with linear interpolation
+    using symbolic data values and symbolic times (strings).
+    """
+    # Validate inputs
+    if len(times) != len(data):
+        raise ValueError("times and data must have the same length")
+    if len(times) < 2:
+        raise ValueError("At least 2 points are required for interpolation")
+    
+    # Set default to the last data value for times after the last point
+    if default_after is None:
+        default_after = data[-1]
+    
+    # Build piecewise conditions and expressions
+    pieces = []
+    
+    times_str = [str(t) for t in times]
+    
+    # Handle times before first point
+    pieces.append(str(default_before))
+    pieces.append(f"{time_var} < {times_str[0]}")
+    
+    # Generate linear interpolation for each interval
+    for i in range(len(times_str) - 1):
+        t_i_str = times_str[i]
+        t_next_str = times_str[i + 1]
+        v_i_str = str(data[i])
+        v_next_str = str(data[i + 1])
+        
+        # Skip if times represent the exact same symbolic name
+        if t_next_str == t_i_str:
+            continue
+        
+        # Linear interpolation formula
+        dt_str = f"({t_next_str} - {t_i_str})"
+        interp_expr = f"({v_i_str} + ({v_next_str} - ({v_i_str})) * ({time_var} - {t_i_str}) / {dt_str})"
+        
+        pieces.append(interp_expr)
+        pieces.append(f"{time_var} < {t_next_str}")
+    
+    # Handle times after last point
+    pieces.append(str(default_after))
+    pieces.append(f"{time_var} > {times_str[-1]}")
     
     # Join pieces into Antimony piecewise function
     piecewise_str = ", ".join(pieces)
@@ -191,11 +255,13 @@ def _generate_spline_piecewise(
 
 
 def generate_antimony_piecewise(
-    times: Union[List[float], np.ndarray],
-    data: Union[List[float], np.ndarray],
+    times: Union[List[float], np.ndarray, List[str]],
+    data: Union[List[float], np.ndarray, List[str]],
     data_name: str = "data",
     time_var: str = "time",
     interpolation_type: str = "linear",
+    symbolic: bool = False,
+    time_tol: float = 1e-2,
     **kwargs
 ) -> str:
     """
@@ -213,9 +279,13 @@ def generate_antimony_piecewise(
         Name of the time variable in Antimony output (default: "time")
     interpolation_type : str
         "linear" or "spline" (default: "linear")
+    symbolic : bool
+        If True, treats time and data as strings for symbolic piecewise definition. (default: False)
+    time_tol : float
+        Tolerance for combining and averaging repeated time points (default: 1e-2)
     **kwargs
         Additional arguments passed to the specific interpolation function:
-        - For linear: default_after (float or None)
+        - For linear: default_before (float/str), default_after (float/str or None)
         - For spline: antimony_continuation (bool), monotone (bool)
         
     Returns
@@ -223,9 +293,46 @@ def generate_antimony_piecewise(
     str
         Antimony piecewise function definition
     """
+    if not symbolic:
+        times = np.asarray(times, dtype=float)
+        data = np.asarray(data, dtype=float)
+        
+        # Sort by time to ensure proper ordering
+        sort_idx = np.argsort(times)
+        times = times[sort_idx]
+        data = data[sort_idx]
+        
+        # Average repeated times within tolerance
+        unique_times = []
+        unique_data = []
+        
+        i = 0
+        while i < len(times):
+            current_time_sum = times[i]
+            current_data_sum = data[i]
+            count = 1
+            
+            j = i + 1
+            while j < len(times) and (times[j] - times[i]) <= time_tol:
+                current_time_sum += times[j]
+                current_data_sum += data[j]
+                count += 1
+                j += 1
+                
+            unique_times.append(current_time_sum / count)
+            unique_data.append(current_data_sum / count)
+            
+            i = j
+            
+        times = np.array(unique_times)
+        data = np.array(unique_data)
+
     if interpolation_type.lower() == "linear":
-        valid_kwargs = {k: v for k, v in kwargs.items() if k in ["default_after"]}
-        return _generate_linear_piecewise(times, data, data_name, time_var, **valid_kwargs)
+        valid_kwargs = {k: v for k, v in kwargs.items() if k in ["default_before", "default_after"]}
+        if symbolic:
+            return _generate_linear_piecewise_symbolic(times, data, data_name, time_var, **valid_kwargs)
+        else:
+            return _generate_linear_piecewise(times, data, data_name, time_var, **valid_kwargs)
     elif interpolation_type.lower() == "spline":
         valid_kwargs = {k: v for k, v in kwargs.items() if k in ["antimony_continuation", "monotone"]}
         return _generate_spline_piecewise(times, data, data_name, time_var, **valid_kwargs)
