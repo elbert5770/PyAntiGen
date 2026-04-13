@@ -12,7 +12,8 @@ def AntimonyGen(MODEL_NAME, repo_root=None):
         repo_root = current_dir
     data_path = os.path.join(repo_root, "data")
     plot_path = os.path.normpath(os.path.join(repo_root, "results", MODEL_NAME))
-
+    if not os.path.exists(plot_path):
+        os.makedirs(plot_path)
 
     
     
