@@ -56,17 +56,23 @@ def run_steady_state(model_text, paths, settings):
         print(s, rss.getValue(s))
 
 
-def run_simulation(model_text, paths, settings, experiment_dict):
+def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
 
     data_path = paths["data_path"]
     repo_root = paths["repo_root"]
     MODEL_NAME = paths["MODEL_NAME"]
+    print("run_simulation", MODEL_NAME)
     save_path = os.path.join(repo_root, "generated", MODEL_NAME, MODEL_NAME + "_events.txt")
 
     results_dict = {}
-    for exp_id, experiment in experiment_dict['experiment'].items():
-        df_dict = experiment["Data"](experiment, data_path)
-        events = experiment["Events"](experiment,df_dict)
+    experiment = EXPERIMENT_dict['EXPERIMENT']
+    for group in experiment.optimization_groups:
+        print(group)
+    
+    for label, treatment in experiment.treatments.items():
+        print("Label", label)
+        df_dict = treatment["Data"](treatment, data_path)
+        events = treatment["Events"](treatment,df_dict)
 
         with open(save_path, "w") as f:
             f.write(events)
@@ -74,32 +80,43 @@ def run_simulation(model_text, paths, settings, experiment_dict):
         full_model_text = model_text + "\n" + events
 
         r = TelluriumGen(full_model_text, paths)
-        solver_settings = experiment["Solver_settings"](experiment)
-        observed_species = experiment["Observed_species"](r)
+        # print("k_plaque1", r["k_plaque1"])
+        # print("k_oligo1_AB42", r['k_oligo1_AB42'])
+        # print("amyloid_positive", treatment["amyloid_positive"])
+        print("Antibody_IV_Dose", r["Antibody_IV_Dose"])
+        treatment["Update_parameters"](r, treatment)
+        print("Antibody_IV_Dose", r["Antibody_IV_Dose"])
+        # print("k_plaque1", r["k_plaque1"])
+        # print("k_oligo1_AB42", r['k_oligo1_AB42'])
+        # print("amyloid_positive", treatment["amyloid_positive"])
+        solver_settings = treatment["Solver_settings"](treatment)
+        observed_species = treatment["Observed_species"](r)
         results = simulate(r, solver_settings, observed_species)
-        results_dict[experiment.get("Label")] = {
+        
+
+        results_dict[label] = {
             "results": results,
+            "treatment": treatment,
             "data": df_dict,
             "observed_species": observed_species,
-            "experiment": experiment,
             "solver_settings": solver_settings,
             "events": events
         }
-    experiment_dict["plot"](paths,results_dict)
+    EXPERIMENT_dict["plot"](paths,results_dict)
     return results_dict
 
-def setup_simulation(settings, experiment_dict):
+def setup_simulation(settings, EXPERIMENT_dict):
     if settings.get("MODEL_NAME"):
         MODEL_NAME = settings["MODEL_NAME"]
     else:
         MODEL_NAME = AntiGen_paths.MODEL_NAME
-    print(MODEL_NAME)
+    print("setup_simulation", MODEL_NAME)
 
     model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
 
     if settings["run_steady_state_first"]:
         run_steady_state(model_text, paths, settings)
 
-    results_dict = run_simulation(model_text, paths, settings, experiment_dict)
+    results_dict = run_simulation(model_text, paths, settings, EXPERIMENT_dict)
 
 

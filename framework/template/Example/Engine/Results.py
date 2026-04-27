@@ -100,6 +100,30 @@ def log_optimization_results(
                     row[f"corr_{a}_{b}"] = float("nan")
 
     # ------------------------------------------------------------------ #
+    # Console summary                                                      #
+    # ------------------------------------------------------------------ #
+    nit  = opt.get("nit")
+    nfev = opt.get("nfev")
+    iter_str = (f"  Iterations: {nit}  |  Func evals: {nfev}"
+                if nit is not None else "")
+    print(f'\n{"=" * 80}')
+    print(f'OPTIMIZATION COMPLETE  [{experiment_id}]')
+    print(f'{"=" * 80}')
+    print(f'  Model:      {model_name}')
+    print(f'  Method:     {method}')
+    print(f'  Success:    {opt.get("success", False)}')
+    print(f'  Message:    {opt.get("message", "")}')
+    print(f'  Final loss: {float(opt.get("fun", float("nan"))):.6e}')
+    if iter_str:
+        print(iter_str)
+    if param_names and len(x_opt) == len(param_names):
+        print(f'\n  {"Parameter":<45} {"Value":>18}')
+        print(f'  {"-" * 63}')
+        for name, val in zip(param_names, x_opt):
+            print(f'  {name:<45} {float(val):>18.8e}')
+    print(f'{"=" * 80}\n')
+
+    # ------------------------------------------------------------------ #
     # Append to CSV.                                                       #
     # ------------------------------------------------------------------ #
     df_row = pd.DataFrame([row])
