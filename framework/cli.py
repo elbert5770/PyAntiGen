@@ -17,9 +17,9 @@ def create_project():
 
     # Directories to scaffold (top-level .agents for Cursor/agent skills)
     directories = [
-        "scripts",
-        "modules",
-        "modules/Basic",
+        "Projects",
+        "antimony_modules",
+        "antimony_modules/Basic",
         "data",
         "antimony_models",
         "generated",
@@ -35,11 +35,11 @@ def create_project():
     for d in directories:
         path = os.path.join(project_dir, d)
         os.makedirs(path, exist_ok=True)
-        # Create an __init__.py in modules so it's a python package
-        if d == "modules":
+        # Create an __init__.py in antimony_modules so it's a python package
+        if d == "antimony_modules":
             with open(os.path.join(path, "__init__.py"), "w") as f:
                 pass
-        elif d == "modules/Basic":
+        elif d == "antimony_modules/Basic":
             with open(os.path.join(path, "__init__.py"), "w") as f:
                 f.write("# Basic module\n")
             with open(os.path.join(path, "ma_reaction.py"), "w") as f:
@@ -93,16 +93,16 @@ def create_project():
     else:
         print("  Created folder: .agents/skills/")
 
-    # Copy Example template exactly into scripts/Example/
+    # Copy Example template exactly into Projects/Example/
     template_dir = os.path.join(framework_dir, "template")
     example_template = os.path.join(template_dir, "Example")
-    example_scripts_dir = os.path.join(project_dir, "scripts", "Example")
+    example_Projects_dir = os.path.join(project_dir, "Projects", "Example")
     if os.path.isdir(example_template):
-        shutil.copytree(example_template, example_scripts_dir)
-        print("  Copied scripts/Example/ (from template)")
+        shutil.copytree(example_template, example_Projects_dir)
+        print("  Copied Projects/Example/ (from template)")
     else:
-        os.makedirs(example_scripts_dir, exist_ok=True)
-        print("  Created folder: scripts/Example/ (template not found)")
+        os.makedirs(example_Projects_dir, exist_ok=True)
+        print("  Created folder: Projects/Example/ (template not found)")
 
     # Copy Example data files into project data/
     template_data = os.path.join(template_dir, "data")
@@ -136,22 +136,43 @@ def create_project():
         f.write("B_Comp1,0.0,,Initial amount of B\n")
     print("  Created file: antimony_models/Example/Example_InitialConditions.csv")
 
+    init_cond_path = os.path.join(example_antimony_dir, "Example_manual.txt")
+    with open(init_cond_path, "w") as f:
+        f.write("SF = 1.0\n")
+        f.write("predicted_A := A_Comp1/V_Comp1\n")
+        f.write("predicted_B := SF*B_Comp1/V_Comp1\n")
+    print("  Created file: antimony_models/Example/Example_manual.txt")
+
     # Project-named folder: same structure as Example with Example Modules copied in
-    project_scripts_dir = os.path.join(project_dir, "scripts", project_dir)
-    project_modules_dir = os.path.join(project_scripts_dir, "Modules")
-    os.makedirs(project_scripts_dir, exist_ok=True)
+    project_Projects_dir = os.path.join(project_dir, "Projects", project_dir)
+    project_modules_dir = os.path.join(project_Projects_dir, "Modules")
+    os.makedirs(project_Projects_dir, exist_ok=True)
     os.makedirs(project_modules_dir, exist_ok=True)
-    print(f"  Created folder: scripts/{project_dir}/")
+    print(f"  Created folder: Projects/{project_dir}/")
     example_modules_src = os.path.join(example_template, "Modules")
     if os.path.isdir(example_modules_src):
         for name in os.listdir(example_modules_src):
             src = os.path.join(example_modules_src, name)
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(project_modules_dir, name))
-                print(f"  Copied scripts/{project_dir}/Modules/{name}")
-        print(f"  Created folder: scripts/{project_dir}/Modules/ (Example modules)")
+                print(f"  Copied Projects/{project_dir}/Modules/{name}")
+        print(f"  Created folder: Projects/{project_dir}/Modules/ (Example modules)")
     else:
-        print(f"  Created folder: scripts/{project_dir}/Modules/ (empty, template not found)")
+        print(f"  Created folder: Projects/{project_dir}/Modules/ (empty, template not found)")
+
+    # Copy Example Engine into project folder
+    project_engine_dir = os.path.join(project_Projects_dir, "Engine")
+    os.makedirs(project_engine_dir, exist_ok=True)
+    example_engine_src = os.path.join(example_template, "Engine")
+    if os.path.isdir(example_engine_src):
+        for name in os.listdir(example_engine_src):
+            src = os.path.join(example_engine_src, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(project_engine_dir, name))
+                print(f"  Copied Projects/{project_dir}/Engine/{name}")
+        print(f"  Created folder: Projects/{project_dir}/Engine/ (Example engine)")
+    else:
+        print(f"  Created folder: Projects/{project_dir}/Engine/ (empty, template not found)")
 
     project_antimony_dir = os.path.join(project_dir, "antimony_models", project_dir)
     project_generated_dir = os.path.join(project_dir, "generated", project_dir)
@@ -160,22 +181,22 @@ def create_project():
     os.makedirs(project_generated_dir, exist_ok=True)
     os.makedirs(project_results_dir, exist_ok=True)
 
-    # Copy Example scripts into project folder (MODEL_NAME derived from folder name at runtime)
+    # Copy Example Projects into project folder (MODEL_NAME derived from folder name at runtime)
     if os.path.isdir(example_template):
-        for base in ("Example_generate", "Example_run", "Example_optimize"):
+        for base in ("Example_generate", "Example_run"):
             src = os.path.join(example_template, base + ".py")
             if os.path.isfile(src):
                 dst_name = project_dir + base[7:]  # "Example_foo" -> "{project_dir}_foo"
-                dst = os.path.join(project_scripts_dir, dst_name + ".py")
+                dst = os.path.join(project_Projects_dir, dst_name + ".py")
                 shutil.copy2(src, dst)
-                print(f"  Created file: scripts/{project_dir}/{dst_name}.py")
+                print(f"  Created file: Projects/{project_dir}/{dst_name}.py")
         
-        # Also copy paths.py utility
-        paths_src = os.path.join(example_template, "paths.py")
+        # Also copy AntiGen_paths.py utility
+        paths_src = os.path.join(example_template, "AntiGen_paths.py")
         if os.path.isfile(paths_src):
-            paths_dst = os.path.join(project_scripts_dir, "paths.py")
+            paths_dst = os.path.join(project_Projects_dir, "AntiGen_paths.py")
             shutil.copy2(paths_src, paths_dst)
-            print(f"  Created file: scripts/{project_dir}/paths.py")
+            print(f"  Created file: Projects/{project_dir}/AntiGen_paths.py")
 
     print("\nProject scaffolded successfully!")
     print("Note: Because PyAntiGen is installed in your Python environment,")

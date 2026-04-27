@@ -4,14 +4,14 @@ Example model builder. Outputs go to antimony_models/Example/ and generated/Exam
 import os
 import sys
 
-import paths
+import AntiGen_paths
 
 
 from framework.pyantigen import PyAntiGen
-from modules.Basic.ma_reaction import BasicMAReaction
+from antimony_modules.Basic.ma_reaction import BasicMAReaction
 
 def generate_antimony_model(Isotopes=['']):
-    MODEL_NAME = paths.MODEL_NAME
+    MODEL_NAME = AntiGen_paths.MODEL_NAME
     model = PyAntiGen(name=MODEL_NAME, isotopes=Isotopes)
     BasicMAReaction(model)
 

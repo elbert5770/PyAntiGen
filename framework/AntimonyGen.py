@@ -1,9 +1,9 @@
 import os
-import tellurium as te
+
 
 # from Model_Modules.Model_Events import generate_silk_events_from_data
 
-from framework.antimony_utils import load_antimony_files, archive_antimony_snapshot
+from framework.antimony_utils import load_antimony_files
 
 def AntimonyGen(MODEL_NAME, repo_root=None):
     if repo_root is None:
@@ -27,18 +27,22 @@ def AntimonyGen(MODEL_NAME, repo_root=None):
             f"No model content loaded. Generate the model first: python {MODEL_NAME}_generate.py"
         )
 
+    events_path = os.path.join(repo_root, "generated", MODEL_NAME, MODEL_NAME + "_events.txt")
     
+    models_path = os.path.join(repo_root, "antimony_models", MODEL_NAME, f"{MODEL_NAME}_InitialConditions.csv")
+
+    project_root = os.path.join(repo_root, "Projects", MODEL_NAME)
     
-    return model_text, data_path, plot_path, repo_root
+    paths = {
+        "MODEL_NAME": MODEL_NAME,
+        "data_path": data_path,
+        "plot_path": plot_path,
+        "repo_root": repo_root,
+        "events_path": events_path,
+        "models_path": models_path,
+        "project_root": project_root
+    }
+    
+    return model_text,paths
 
-def TelluriumGen(model_text, MODEL_NAME, repo_root):
-    print("Loading model into Tellurium...")
-    try:
-        r = te.loada(model_text)
-    except Exception as e:
-        raise RuntimeError(f"Error loading model: {e}") from e
 
-    sbml_content = r.getSBML()
-    archive_dir = archive_antimony_snapshot(MODEL_NAME, repo_root, sbml_content=sbml_content)
-    print(f"Archive and SBML written to: {archive_dir}")
-    return r

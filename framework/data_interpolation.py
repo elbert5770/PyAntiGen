@@ -104,7 +104,7 @@ def _generate_linear_piecewise(
     
     # Handle times after last point
     pieces.append(str(default_after) if isinstance(default_after, str) else format_number(default_after))
-    pieces.append(f"{time_var} > {format_number(times[-1])}")
+    pieces.append(f"{time_var} >= {format_number(times[-1])}")
     
     # Join pieces into Antimony piecewise function
     piecewise_str = ", ".join(pieces)

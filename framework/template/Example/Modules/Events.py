@@ -1,10 +1,11 @@
 from framework.data_interpolation import generate_antimony_piecewise
 
-def generate_events():
+def generate_no_events(experiment, df_dict):
     events = '' 
     return events
 
-def event1():
+def event1(experiment, df_dict):
+    df = df_dict["B data"]
     events = 'at (time >= 5): A_Comp1 = 10.0'
     pw_str1 = generate_antimony_piecewise(df["time"], df["B"], data_name="pw_interp1", interpolation_type="linear")
     events += "\n" + pw_str1
@@ -12,7 +13,7 @@ def event1():
     events += "\n" + pw_str2
     return events
 
-def event2():
+def event2(experiment, df_dict):
     events = 'at (time >= 10): A_Comp1 = 5.0'
     pw_str1 = "pw_interp1 := 0.0"
     pw_str2 = "pw_interp2 := 0.0"

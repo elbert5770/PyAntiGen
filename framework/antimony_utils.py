@@ -66,12 +66,12 @@ def _csv_to_antimony_parameters(csv_path):
         with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                param = row.get("Parameter", "").strip()
+                param = (row.get("Parameter") or "").strip()
                 if not param:
                     continue
-                val = row.get("Value", "").strip()
-                units = row.get("Units", "").strip()
-                comment = row.get("Comment", "").strip()
+                val = (row.get("Value") or "").strip()
+                units = (row.get("Units") or "").strip()
+                comment = (row.get("Comment") or "").strip()
                 if val == "var":
                     line = f"var {param}"
                 else:
@@ -94,12 +94,12 @@ def _csv_to_antimony_initial_conditions(csv_path):
         with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                species = row.get("Species", "").strip()
+                species = (row.get("Species") or "").strip()
                 if not species:
                     continue
-                ic = row.get("InitialCondition", "").strip() or "0"
-                units = row.get("Units", "").strip()
-                comment = row.get("Comment", "").strip()
+                ic = (row.get("InitialCondition") or "").strip() or "0"
+                units = (row.get("Units") or "").strip()
+                comment = (row.get("Comment") or "").strip()
                 line = f"{species} = {ic}"
                 if units or comment:
                     line += f" # {units} {comment}".strip()
