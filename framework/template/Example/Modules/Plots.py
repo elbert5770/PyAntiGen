@@ -18,8 +18,8 @@ def plot_results(paths, results_dict):
     MODEL_NAME = paths["MODEL_NAME"]
     repo_root = paths["repo_root"]
     n = max(len(results_dict), 1)
-    color_A = ["blue","green"]
-    color_B = ["red","orange"]
+    color_A = ["blue","green","cyan","black"]
+    color_B = ["red","orange","purple","brown"]
     fig = plt.figure(figsize=(10, 10))
     gs  = gridspec.GridSpec(1, 1, figure=fig, hspace=0.5, wspace=0.35)
     ax = fig.add_subplot(gs[0, 0])
@@ -27,7 +27,8 @@ def plot_results(paths, results_dict):
         
         results = item["results"]
         data_dict = item["data"]
-        data = data_dict["B data"]
+        
+        data = data_dict[f"{label}"]
         
         time_points = results["time"]
         
@@ -36,11 +37,7 @@ def plot_results(paths, results_dict):
         if "time" in data.columns and "B" in data.columns:
             ax.scatter(data["time"], data["B"], color=color_B[i], s=30, zorder=5, label=f"Measured [B] {label}")
             
-            # If the piecewise interpolation was simulated, plot it directly from the result
-        if label == "Experiment_1":
-            ax.plot(time_points, results["pw_interp1"], '--', color="cyan", alpha=0.7, label=f"Piecewise Linear", zorder=4)
-            ax.plot(time_points, results["pw_interp2"], '--', color="purple", alpha=0.7, label=f"Piecewise Spline", zorder=4)
-          
+
             
     ax.set_xlabel("Time")
     ax.set_ylabel("Concentration")

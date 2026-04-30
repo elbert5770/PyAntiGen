@@ -4,11 +4,13 @@ Append optimization results as a single row to a CSV file.
 Columns written:
   timestamp, model_name, experiment_id, method, success, optimizer_message,
   total_loss, aic, bic,
-  {param}            – optimized value for each parameter
-  SE_{param}         – standard error (NaN when Hessian is not PD)
-  CI95_lower_{param} – lower bound of 95% confidence interval
-  CI95_upper_{param} – upper bound of 95% confidence interval
-  corr_{a}_{b}       – off-diagonal correlation for every pair a < b
+  {param}                    – optimized value for each parameter
+  wald_SE_{param}            – Wald standard error (NaN when Hessian is not PD)
+  wald_CI95_lower_{param}    – lower bound of Wald 95% CI
+  wald_CI95_upper_{param}    – upper bound of Wald 95% CI
+  wald_corr_{a}_{b}          – Wald off-diagonal correlation for every pair a < b
+  profile_CI95_lower_{param} – lower bound of profile likelihood 95% CI
+  profile_CI95_upper_{param} – upper bound of profile likelihood 95% CI
 """
 
 import os
@@ -70,34 +72,42 @@ def log_optimization_results(
     for name, val in zip(param_names, x_opt):
         row[name] = float(val)
 
-    # --- standard errors ----------------------------------------------- #
-    se = stats.get("standard_errors")
+    # --- Wald standard errors ------------------------------------------ #
+    se = stats.get("wald_se")
     se_arr = np.atleast_1d(se) if se is not None else [float("nan")] * len(param_names)
     for name, s in zip(param_names, se_arr):
-        row[f"SE_{name}"] = float(s) if s is not None and not np.isnan(float(s)) else float("nan")
+        row[f"wald_SE_{name}"] = float(s) if s is not None and not np.isnan(float(s)) else float("nan")
 
-    # --- 95% confidence intervals -------------------------------------- #
-    ci = stats.get("confidence_intervals")  # list of (lower, upper)
+    # --- Wald 95% confidence intervals --------------------------------- #
+    ci = stats.get("wald_ci")
     if ci is None:
         ci = [(float("nan"), float("nan"))] * len(param_names)
     for name, (lo, hi) in zip(param_names, ci):
-        row[f"CI95_lower_{name}"] = float(lo)
-        row[f"CI95_upper_{name}"] = float(hi)
+        row[f"wald_CI95_lower_{name}"] = float(lo)
+        row[f"wald_CI95_upper_{name}"] = float(hi)
 
-    # --- off-diagonal correlations ------------------------------------- #
-    corr = stats.get("correlation_matrix")
+    # --- Wald off-diagonal correlations -------------------------------- #
+    corr = stats.get("wald_correlation")
     if corr is not None:
         corr = np.atleast_2d(corr)
         for i, a in enumerate(param_names):
             for j, b in enumerate(param_names):
                 if j > i:
                     val = corr[i, j]
-                    row[f"corr_{a}_{b}"] = float(val) if np.isfinite(val) else float("nan")
+                    row[f"wald_corr_{a}_{b}"] = float(val) if np.isfinite(val) else float("nan")
     else:
         for i, a in enumerate(param_names):
             for j, b in enumerate(param_names):
                 if j > i:
-                    row[f"corr_{a}_{b}"] = float("nan")
+                    row[f"wald_corr_{a}_{b}"] = float("nan")
+
+    # --- Profile likelihood 95% confidence intervals ------------------- #
+    profile_ci = stats.get("profile_ci")
+    if profile_ci is None:
+        profile_ci = [(float("nan"), float("nan"))] * len(param_names)
+    for name, (lo, hi) in zip(param_names, profile_ci):
+        row[f"profile_CI95_lower_{name}"] = float(lo)
+        row[f"profile_CI95_upper_{name}"] = float(hi)
 
     # ------------------------------------------------------------------ #
     # Console summary                                                      #

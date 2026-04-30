@@ -66,13 +66,10 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
 
     results_dict = {}
     experiment = EXPERIMENT_dict['EXPERIMENT']
-    for group in experiment.optimization_groups:
-        print(group)
-    
-    for label, treatment in experiment.treatments.items():
+    for label, replicate in experiment.replicates.items():
         print("Label", label)
-        df_dict = treatment["Data"](treatment, data_path)
-        events = treatment["Events"](treatment,df_dict)
+        df_dict = replicate["Data"](replicate, data_path)
+        events = replicate["Events"](replicate,df_dict)
 
         with open(save_path, "w") as f:
             f.write(events)
@@ -80,23 +77,17 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
         full_model_text = model_text + "\n" + events
 
         r = TelluriumGen(full_model_text, paths)
-        # print("k_plaque1", r["k_plaque1"])
-        # print("k_oligo1_AB42", r['k_oligo1_AB42'])
-        # print("amyloid_positive", treatment["amyloid_positive"])
-        print("Antibody_IV_Dose", r["Antibody_IV_Dose"])
-        treatment["Update_parameters"](r, treatment)
-        print("Antibody_IV_Dose", r["Antibody_IV_Dose"])
-        # print("k_plaque1", r["k_plaque1"])
-        # print("k_oligo1_AB42", r['k_oligo1_AB42'])
-        # print("amyloid_positive", treatment["amyloid_positive"])
-        solver_settings = treatment["Solver_settings"](treatment)
-        observed_species = treatment["Observed_species"](r)
-        results = simulate(r, solver_settings, observed_species)
-        
 
-        results_dict[label] = {
+        replicate["Update_parameters"](r, replicate, mode="Simulator")
+
+        solver_settings = replicate["Solver_settings"](replicate)
+        observed_species = replicate["Observed_species"](r)
+        results = simulate(r, solver_settings, observed_species)
+
+
+        results_dict[replicate["Label"]] = {
             "results": results,
-            "treatment": treatment,
+            "replicate": replicate,
             "data": df_dict,
             "observed_species": observed_species,
             "solver_settings": solver_settings,

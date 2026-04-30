@@ -5,9 +5,8 @@ High-level optimization setup.  Two entry points:
       Original flat-dict path: experiments is a plain dict of treatment dicts.
 
   setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_dict)
-      New group-aware path: uses Experiment.optimization_groups to define which
-      treatments contribute to the objective, with one model pre-built per
-      treatment and Update_parameters applied before the optimizer starts.
+      Group-aware path: uses Experiment.opt_groups (derived from each replicate's
+      Opt_group key) to define which replicates contribute to the objective.
 """
 import os
 import pandas as pd
@@ -21,7 +20,7 @@ from Modules.Experiment import *
 from Engine.Optimize import (
     run_optimization,
     run_optimization_from_groups,
-    _plot_profile_likelihood,
+    _extract_profile_ci,
 )
 from Modules.Plots import *
 from Engine.Results import log_optimization_results
@@ -58,8 +57,15 @@ def _run_steady_state(model_text, paths):
     return rss
 
 
+_PROFILE_CI_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
+
+
 def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="ALL"):
-    """Plot and save profile likelihood if the closure is available."""
+    """Run profile likelihood once per parameter, extract CIs, and save plot.
+
+    Stores profile_ci into opt['stats']['profile_ci'] so log_optimization_results
+    can include it in the CSV when called afterwards.
+    """
     import numpy as np
     import matplotlib.pyplot as plt
 
@@ -68,46 +74,111 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
         print("Warning: no profile_likelihood closure in opt['stats'] — skipping plot.")
         return
 
-    # Diagnostic: print delta-NLL range for each parameter
-    stats_dict   = opt.get("stats", {})
-    nll_opt      = stats_dict.get("nll_at_optimum")
-    fixed_sigmas = stats_dict.get("fixed_sigmas", {})
+    colors  = ['blue', 'green', 'red', 'orange', 'purple']
+    markers = ['o', 's', '^', 'D', 'v']
+    params_estimated = np.asarray(opt["x"])
 
-    print("Profile likelihood diagnostics:")
-    if nll_opt is not None:
-        print(f"  NLL at optimum (fixed-sigma): {nll_opt:.6g}")
-    if not fixed_sigmas:
-        print("  WARNING: fixed_sigmas is empty — no observables were resolved to data.")
-    else:
-        print(f"  fixed_sigmas ({len(fixed_sigmas)} entries):")
-        for k_fs, v_fs in fixed_sigmas.items():
-            print(f"    sigma[{k_fs}] = {v_fs:.4g}")
-
+    print("\nProfile likelihood:")
+    cache = {}
     for i, pname in enumerate(param_names):
         try:
-            param_vals, nll_rel = profile_func(i, n_points=5, range_factor=2.0)
-            abs_nll = nll_rel + nll_opt if nll_opt is not None else nll_rel
-            print(f"  {pname}:")
-            print(f"    param range : [{param_vals[0]:.4g}, {param_vals[-1]:.4g}]")
-            print(f"    delta-NLL   : [{nll_rel.min():.4g}, {nll_rel.max():.4g}]")
-            if nll_opt is not None:
-                print(f"    abs-NLL     : [{abs_nll.min():.6g}, {abs_nll.max():.6g}]")
-            if np.all(np.abs(nll_rel) < 1e-10):
-                print(f"    *** FLAT: model may not respond to {pname} in nll_func_fixed ***")
+            pv, nr = profile_func(i)
+            cache[i] = (pv, nr)
+            print(f"  {pname}: Δ NLL range [{nr.min():.4g}, {nr.max():.4g}]")
+            if np.all(np.abs(nr) < 1e-10):
+                print(f"    *** FLAT: model may not respond to {pname} ***")
         except Exception as exc:
             print(f"  {pname}: error — {exc}")
 
+    # Extract profile CIs and store so Results.py can write them to CSV
+    profile_ci = []
+    print("\n  Profile likelihood 95% CIs:")
+    for i, pname in enumerate(param_names):
+        cached = cache.get(i)
+        if cached is not None:
+            lo, hi = _extract_profile_ci(cached[0], cached[1], threshold=_PROFILE_CI_THRESHOLD)
+        else:
+            lo, hi = float('nan'), float('nan')
+        profile_ci.append((lo, hi))
+        print(f"    {pname}: [{lo:.4g}, {hi:.4g}]")
+    opt["stats"]["profile_ci"] = profile_ci
+
     fig, ax = plt.subplots(figsize=(8, 6))
-    _plot_profile_likelihood(
-        ax,
-        {"parameters": param_names, "n_points": 20, "range_factor": 2.0},
-        opt, opt["x"], param_names,
-    )
+    for idx, pname in enumerate(param_names):
+        cached = cache.get(idx)
+        if cached is None:
+            continue
+        pv, nr = cached
+        ax.plot(pv / params_estimated[idx], nr,
+                marker=markers[idx % len(markers)], linestyle='-',
+                label=pname, linewidth=2, color=colors[idx % len(colors)])
+
+    ax.axhline(_PROFILE_CI_THRESHOLD, color='gray', linestyle=':', alpha=0.7, linewidth=1.5,
+               label=f'95% CI (Δ NLL = {_PROFILE_CI_THRESHOLD:.2f})')
+    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
+    ax.set_xlabel('Parameter Value (relative to optimal)')
+    ax.set_ylabel('Δ NLL (relative to minimum)')
+    ax.set_title('Profile Likelihood (Identifiability Check)')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0.2, 3.5)
     plt.tight_layout()
     out_path = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood.png")
     plt.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"Profile likelihood saved to: {out_path}")
+
+
+def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="ALL"):
+    """Run likelihood slice once per parameter and save plot."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    slice_func = opt.get("stats", {}).get("likelihood_slice")
+    if not slice_func:
+        print("Warning: no likelihood_slice closure in opt['stats'] — skipping plot.")
+        return
+
+    colors  = ['blue', 'green', 'red', 'orange', 'purple']
+    markers = ['o', 's', '^', 'D', 'v']
+    params_estimated = np.asarray(opt["x"])
+
+    print("\nLikelihood slice:")
+    cache = {}
+    for i, pname in enumerate(param_names):
+        try:
+            pv, nr = slice_func(i, n_points=20, range_factor=2.0)
+            cache[i] = (pv, nr)
+            print(f"  {pname}: Δ NLL range [{nr.min():.4g}, {nr.max():.4g}]")
+            if np.all(np.abs(nr) < 1e-10):
+                print(f"    *** FLAT: model may not respond to {pname} ***")
+        except Exception as exc:
+            print(f"  {pname}: error — {exc}")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for idx, pname in enumerate(param_names):
+        cached = cache.get(idx)
+        if cached is None:
+            continue
+        pv, nr = cached
+        ax.plot(pv / params_estimated[idx], nr,
+                marker=markers[idx % len(markers)], linestyle='-',
+                label=pname, linewidth=2, color=colors[idx % len(colors)])
+
+    ax.axhline(_PROFILE_CI_THRESHOLD, color='gray', linestyle=':', alpha=0.7, linewidth=1.5,
+               label=f'95% CI threshold (Δ NLL = {_PROFILE_CI_THRESHOLD:.2f})')
+    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
+    ax.set_xlabel('Parameter Value (relative to optimal)')
+    ax.set_ylabel('Δ NLL (relative to minimum)')
+    ax.set_title('Likelihood Slice')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0.2, 3.5)
+    plt.tight_layout()
+    out_path = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice.png")
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Likelihood slice saved to: {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +220,9 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
         x0=x0,
         bounds=bounds,
         loss_config={"observables": optimization_settings["observables"]},
-        likelihood_analysis=optimization_settings.get("likelihood_analysis", False),
+        wald_analysis=optimization_settings.get("wald_analysis", False),
+        slice_analysis=optimization_settings.get("slice_analysis", False),
+        profile_likelihood_analysis=optimization_settings.get("profile_likelihood_analysis", False),
         method=method,
         optimizer_kwargs=opt_kwargs,
     )
@@ -162,7 +235,9 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
     if opt.get("results_dict") is not None:
         plot_function(paths, opt["results_dict"])
 
-    if optimization_settings.get("likelihood_analysis") and opt["stats"].get("profile_likelihood"):
+    if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
+        _save_likelihood_slice_plot(opt, param_names, paths["plot_path"], MODEL_NAME)
+    if optimization_settings.get("profile_likelihood_analysis") and opt["stats"].get("profile_likelihood"):
         _save_profile_likelihood_plot(opt, param_names, paths["plot_path"], MODEL_NAME)
 
 
@@ -181,11 +256,10 @@ def _is_per_group_settings(optimization_settings):
 
 def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_dict):
     """
-    Run parameter optimization using Experiment.optimization_groups.
+    Run parameter optimization using Experiment.opt_groups.
 
-    Loss_config is read from each group's ``Loss_config`` key in the
-    experiment structure; it is no longer passed via optimization_settings.
-    Groups whose Loss_config is ``no_optimization()`` are simulated at the
+    Loss_config is read from each replicate's ``Loss_config`` key.
+    Replicates whose Loss_config is ``no_optimization()`` are simulated at the
     end with the optimal parameters for use by the plot function.
 
     Flat mode  — optimization_settings has top-level param_names/x0/bounds:
@@ -224,33 +298,36 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                     group_names=[group_name],
                     method=method,
                     optimizer_kwargs=group_settings.get("optimizer_kwargs", {}),
-                    likelihood_analysis=group_settings.get("likelihood_analysis", False),
+                    wald_analysis=group_settings.get("wald_analysis", False),
+                    slice_analysis=group_settings.get("slice_analysis", False),
+                    profile_likelihood_analysis=group_settings.get("profile_likelihood_analysis", False),
                 )
             except Exception as e:
                 print(f"Warning: optimization for '{group_name}' failed: {e}")
                 continue
 
-            csv_path = os.path.join(
-                paths["plot_path"],
-                f"{MODEL_NAME}_{group_name}_optimization_results.csv",
-            )
-            log_optimization_results(opt, param_names, csv_path,
-                                     model_name=MODEL_NAME, experiment_id=group_name,
-                                     method=method)
             if opt.get("results_dict"):
                 filtered_results = {}
                 for req_id, item in opt["results_dict"].items():
-                    if item.get("treatment", {}).get("Drug") == group_name:
+                    if item.get("replicate", {}).get("Opt_group") == group_name:
                         filtered_results[req_id] = item
                 all_results.update(filtered_results)
-            
+
+            # Run analysis plots first so profile_ci is populated before CSV write
+            if group_settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
+                _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
+                                            MODEL_NAME, tag=group_name)
+            if group_settings.get("profile_likelihood_analysis") and opt.get("stats", {}).get("profile_likelihood"):
+                _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
+                                              MODEL_NAME, tag=group_name)
+
             print(f"\nOptimization Summary for {group_name}:")
             print("-" * 85)
-            print(f"{'Parameter':<30} | {'Optimized Value':<15} | {'Std Error':<15} | {'95% CI':<20}")
+            print(f"{'Parameter':<30} | {'Optimized Value':<15} | {'Wald SE':<15} | {'Wald 95% CI':<20}")
             print("-" * 85)
             x_vals = opt.get("x", [])
-            se = opt.get("stats", {}).get("standard_errors")
-            ci = opt.get("stats", {}).get("confidence_intervals")
+            se = opt.get("stats", {}).get("wald_se")
+            ci = opt.get("stats", {}).get("wald_ci")
             for i, p_name in enumerate(param_names):
                 val = x_vals[i] if i < len(x_vals) else float('nan')
                 std_err = se[i] if se is not None and i < len(se) else "N/A"
@@ -266,10 +343,10 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                 print(f"{p_name:<30} | {val:<15.4g} | {std_err_str:<15} | {conf_int_str:<20}")
             print("-" * 85)
             print(f"Final Objective Value (NLL): {opt.get('fun', 'N/A'):.6g}\n")
-            
-            corr_matrix = opt.get("stats", {}).get("correlation_matrix")
+
+            corr_matrix = opt.get("stats", {}).get("wald_correlation")
             if corr_matrix is not None:
-                print(f"\nCorrelation Matrix:")
+                print(f"\nWald Correlation Matrix:")
                 print("-" * 85)
                 header_str = f"{'':<25} | " + " | ".join(f"{p[:10]:<10}" for p in param_names)
                 print(header_str)
@@ -286,10 +363,14 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                     print(row_str)
                 print("-" * 85)
                 print()
-            
-            if group_settings.get("likelihood_analysis") and opt.get("stats", {}).get("profile_likelihood"):
-                _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
-                                              MODEL_NAME, tag=group_name)
+
+            csv_path = os.path.join(
+                paths["plot_path"],
+                f"{MODEL_NAME}_{group_name}_optimization_results.csv",
+            )
+            log_optimization_results(opt, param_names, csv_path,
+                                     model_name=MODEL_NAME, experiment_id=group_name,
+                                     method=method)
 
         if all_results:
             plot_function(paths, all_results)
@@ -315,10 +396,21 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             group_names=group_names,
             method=method,
             optimizer_kwargs=opt_kwargs,
-            likelihood_analysis=optimization_settings.get("likelihood_analysis", False),
+            wald_analysis=optimization_settings.get("wald_analysis", False),
+            slice_analysis=optimization_settings.get("slice_analysis", False),
+            profile_likelihood_analysis=optimization_settings.get("profile_likelihood_analysis", False),
         )
 
         groups_tag = "_".join(opt.get("groups", ["ALL"]))
+
+        # Run analysis plots first so profile_ci is populated before CSV write
+        if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
+            _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
+                                        MODEL_NAME, tag=groups_tag)
+        if optimization_settings.get("profile_likelihood_analysis") and opt["stats"].get("profile_likelihood"):
+            _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
+                                          MODEL_NAME, tag=groups_tag)
+
         csv_path = os.path.join(
             paths["plot_path"],
             f"{MODEL_NAME}_{groups_tag}_optimization_results.csv",
@@ -328,9 +420,5 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if opt.get("results_dict") is not None:
             plot_function(paths, opt["results_dict"])
-
-        if optimization_settings.get("likelihood_analysis") and opt["stats"].get("profile_likelihood"):
-            _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
-                                          MODEL_NAME, tag=groups_tag)
 
 

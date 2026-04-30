@@ -1,22 +1,14 @@
 from framework.data_interpolation import generate_antimony_piecewise
 
-def generate_no_events(experiment, df_dict):
+def generate_no_events(replicate, df_dict):
     events = '' 
     return events
 
-def event1(experiment, df_dict):
-    df = df_dict["B data"]
-    events = 'at (time >= 5): A_Comp1 = 10.0'
-    pw_str1 = generate_antimony_piecewise(df["time"], df["B"], data_name="pw_interp1", interpolation_type="linear")
-    events += "\n" + pw_str1
-    pw_str2 = generate_antimony_piecewise(df["time"], df["B"], data_name="pw_interp2", interpolation_type="spline")
-    events += "\n" + pw_str2
+def Example_event(replicate, df_dict):
+    dose = replicate["dose"]
+    delay = replicate["delay"]
+    events = f'at (time >= {delay}): A_Comp1 = {dose}'
     return events
 
-def event2(experiment, df_dict):
-    events = 'at (time >= 10): A_Comp1 = 5.0'
-    pw_str1 = "pw_interp1 := 0.0"
-    pw_str2 = "pw_interp2 := 0.0"
-    events += "\n" + pw_str1
-    events += "\n" + pw_str2
-    return events
+
+

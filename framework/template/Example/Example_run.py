@@ -2,12 +2,15 @@ import os
 import sys
 
 from Engine.Model_simulate import setup_simulation
-from Engine.Model_optimize import setup_optimization
-from Modules.Plots import plot_results
+from Engine.Model_optimize import setup_optimization_from_groups
+from Modules.Plots import *
 from Modules.Experiment import get_experiment
+from Modules.Optimizer_settings import OPTIMIZATION_SETTINGS
+from AntiGen_paths import MODEL_NAME
 
-experiment_dict = {
-    "Example": {'experiment': get_experiment('EXPERIMENTS_Example'), 'plot': plot_results, },
+
+EXPERIMENT_dict = {
+    "Example": {'EXPERIMENT': get_experiment('EXPERIMENT_Example'), 'plot': plot_results, 'opt_settings_key': 'Example'},
 }
 
 run_settings = {
@@ -15,28 +18,20 @@ run_settings = {
     "Verbose" : True,
 }
 
-optimization_settings = {
-    "run_optimization" : True,
-    "run_steady_state_first" : True,
-    "likelihood_analysis" : False,
-    "param_names" : ["k_A_to_B", "SF"],
-    "x0" : [ 0.5, 2.0 ],
-    "bounds" : [ (0.01, 10.0), (0.01, 10.0) ],
-    "Verbose" : True,
-    "observables": [
-        {
-            "observed_variable": "predicted_B",
-            "data_dict_key": "B data",
-            "data_column": "B", 
-            "time_column": "time"
-        },
-    ],
-}
 
 if __name__ == "__main__":
-    print("run_settings: ", run_settings)
-    print("optimization_settings: ", optimization_settings)
-    if optimization_settings["run_optimization"]:
-        setup_optimization(run_settings, optimization_settings, experiment_dict["Example"])
+    print("Run_settings: ", run_settings)
+    
+    run_optimization = True
+    run_name = "Example"
+
+    if run_optimization:
+        opt_key      = EXPERIMENT_dict[run_name].get('opt_settings_key', run_name)
+        experiment_arg = {
+            "EXPERIMENT": EXPERIMENT_dict[run_name]['EXPERIMENT'],
+            "plot":       EXPERIMENT_dict[run_name]['plot'],
+        }
+        setup_optimization_from_groups(run_settings, OPTIMIZATION_SETTINGS[opt_key], experiment_arg)
     else:
-        setup_simulation(run_settings, experiment_dict["Example"])
+        setup_simulation(run_settings, EXPERIMENT_dict[run_name])
+

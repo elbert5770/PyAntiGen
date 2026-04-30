@@ -1,132 +1,140 @@
-"""
-Append optimization results as a single row to a CSV file.
-
-Columns written:
-  timestamp, model_name, experiment_id, method, success, optimizer_message,
-  total_loss, aic, bic,
-  {param}            – optimized value for each parameter
-  SE_{param}         – standard error (NaN when Hessian is not PD)
-  CI95_lower_{param} – lower bound of 95% confidence interval
-  CI95_upper_{param} – upper bound of 95% confidence interval
-  corr_{a}_{b}       – off-diagonal correlation for every pair a < b
-"""
-
-import os
-from datetime import datetime
-
+import time
 import numpy as np
-import pandas as pd
 
+class StackedResult(np.ndarray):
+    def __new__(cls, input_array, colnames):
+        obj = np.asarray(input_array).view(cls)
+        obj.colnames = list(colnames)
+        return obj
 
-def log_optimization_results(
-    opt,
-    param_names,
-    csv_path,
-    model_name="",
-    experiment_id="",
-    method="",
-):
-    """
-    Append one row of optimization results to *csv_path*.
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            if hasattr(self, 'colnames') and key in self.colnames:
+                return super().__getitem__((slice(None), self.colnames.index(key)))
+            raise KeyError(f"Column '{key}' not in simulation results. "
+                           f"Available: {getattr(self, 'colnames', [])}")
+        return super().__getitem__(key)
 
-    Parameters
-    ----------
-    opt : dict
-        Return value of ``run_optimization()``.  Keys used:
-        ``x``, ``fun``, ``success``, ``message``, ``stats``.
-    param_names : list[str]
-        Parameter names in the same order as ``opt["x"]``.
-    csv_path : str
-        Absolute path to the target CSV file.  Created with a header on the
-        first call; subsequent calls append without writing the header again.
-    model_name : str, optional
-    experiment_id : str, optional
-    method : str, optional
-    """
-    stats = opt.get("stats", {})
+def safe_simulate(r, settings):
+    abs_tols = [1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14, 1e-15]
+    rel_tols = [1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14, 1e-15]
+    max_steps_list = [20000, 200000, 400000]
+    
+    last_exception = None
+    variable_step_size = settings["variable_step_size"]
+    start = settings["start_time"]
+    end = settings["end_time"]
+    points = settings["eval_points"]
+    for max_steps in max_steps_list:
+        r.integrator.maximum_num_steps = max_steps
+        for a_tol in abs_tols:
+            for r_tol in rel_tols:
+                try:
+                    # Reset tolerances
+                    # r.reset()
+                    r.integrator.absolute_tolerance = a_tol
+                    r.integrator.relative_tolerance = r_tol
+                    r.integrator.setValue('variable_step_size', variable_step_size)
+                    # Reset model time to start of segment in case a previous attempt moved it
+                    r.time = start
+                    print(f"      Simulating from {start} to {end} with abs_tol={a_tol}, rel_tol={r_tol}, max_steps={max_steps}")
+                    print(r.integrator)
+                    res = r.simulate(start, end, points, cols)
+                    metadata = {
+                        "start": start,
+                        "end": end,
+                        "abs_tol": a_tol,
+                        "rel_tol": r_tol,
+                        "max_steps": max_steps,
+                        "initial_time_step": r.integrator.initial_time_step,
+                        "variable_step_size": variable_step_size
+                    }
+                    return res, metadata
+                except Exception as e:
+                    last_exception = e
+                    continue
+    
+    print(f"      CRITICAL: All simulation attempts failed for interval [{start}, {end}]")
+    try:
+        print(f"      Final Time in model: {r.getValue('time')}")
+        # Check for non-finite values in species
+        sn = r.model.getFloatingSpeciesIds()
+        sv = [r.getValue(s) for s in sn]
+        nan_indices = [i for i, v in enumerate(sv) if not np.isfinite(v)]
+        if len(nan_indices) > 0:
+            print(f"      NaNs detected in: {[sn[i] for i in nan_indices]}")
+    except:
+        pass
+    raise last_exception
 
-    # ------------------------------------------------------------------ #
-    # Build the row as an ordered dict so column order is deterministic.  #
-    # ------------------------------------------------------------------ #
-    row = {}
+def simulate(r, solver_settings, observed_species):
+    
+    solver_settings["integrator"] = solver_settings.get("integrator", "cvode")
+    solver_settings["absolute_tolerance"] = solver_settings.get("absolute_tolerance", 1e-8)
+    solver_settings["relative_tolerance"] = solver_settings.get("relative_tolerance", 1e-8)
+    solver_settings["stiff"] = solver_settings.get("stiff", True)
+    solver_settings["variable_step_size"] = solver_settings.get("variable_step_size", True)
+    # solver_settings["initial_time_step"] = solver_settings.get("initial_time_step", 1e-6)
+    # solver_settings["maximum_num_steps"] = solver_settings.get("maximum_num_steps", 20000)
+    # print("solver_settings", solver_settings)
+    r.setIntegrator(solver_settings["integrator"])
+    r.integrator.absolute_tolerance = solver_settings["absolute_tolerance"]
+    r.integrator.relative_tolerance = solver_settings["relative_tolerance"]
+    r.integrator.setValue('stiff', solver_settings["stiff"])
+    r.integrator.variable_step_size = solver_settings["variable_step_size"]
+    # r.integrator.setValue('initial_time_step', solver_settings["initial_time_step"])
+    # r.integrator.setValue('maximum_num_steps', solver_settings["maximum_num_steps"])
+    # print(r.integrator)
 
-    # --- bookkeeping --------------------------------------------------- #
-    row["timestamp"]          = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    row["model_name"]         = model_name
-    row["experiment_id"]      = experiment_id
-    row["method"]             = method
+    # te.noticesOff()
+    # te.r.printVersionInfo()
+    # te.roadrunner.Logger.setLevel(te.roadrunner.Logger.LOG_ERROR)
 
-    # --- core optimization results ------------------------------------- #
-    row["success"]            = opt.get("success", False)
-    row["optimizer_message"]  = str(opt.get("message", ""))
-    row["total_loss"]         = float(opt.get("fun", float("nan")))
+    t0 = time.perf_counter()
 
-    # --- information criteria ------------------------------------------ #
-    row["aic"] = float(stats.get("aic", float("nan")))
-    row["bic"] = float(stats.get("bic", float("nan")))
-
-    # --- parameter values ---------------------------------------------- #
-    x_opt = np.atleast_1d(opt.get("x", []))
-    for name, val in zip(param_names, x_opt):
-        row[name] = float(val)
-
-    # --- standard errors ----------------------------------------------- #
-    se = stats.get("standard_errors")
-    se_arr = np.atleast_1d(se) if se is not None else [float("nan")] * len(param_names)
-    for name, s in zip(param_names, se_arr):
-        row[f"SE_{name}"] = float(s) if s is not None and not np.isnan(float(s)) else float("nan")
-
-    # --- 95% confidence intervals -------------------------------------- #
-    ci = stats.get("confidence_intervals")  # list of (lower, upper)
-    if ci is None:
-        ci = [(float("nan"), float("nan"))] * len(param_names)
-    for name, (lo, hi) in zip(param_names, ci):
-        row[f"CI95_lower_{name}"] = float(lo)
-        row[f"CI95_upper_{name}"] = float(hi)
-
-    # --- off-diagonal correlations ------------------------------------- #
-    corr = stats.get("correlation_matrix")
-    if corr is not None:
-        corr = np.atleast_2d(corr)
-        for i, a in enumerate(param_names):
-            for j, b in enumerate(param_names):
-                if j > i:
-                    val = corr[i, j]
-                    row[f"corr_{a}_{b}"] = float(val) if np.isfinite(val) else float("nan")
+    blocks = solver_settings['simulation_blocks']
+    if isinstance(blocks, dict):
+        block_list = list(blocks.values())
     else:
-        for i, a in enumerate(param_names):
-            for j, b in enumerate(param_names):
-                if j > i:
-                    row[f"corr_{a}_{b}"] = float("nan")
+        block_list = blocks
 
-    # ------------------------------------------------------------------ #
-    # Console summary                                                      #
-    # ------------------------------------------------------------------ #
-    nit  = opt.get("nit")
-    nfev = opt.get("nfev")
-    iter_str = (f"  Iterations: {nit}  |  Func evals: {nfev}"
-                if nit is not None else "")
-    print(f'\n{"=" * 80}')
-    print(f'OPTIMIZATION COMPLETE  [{experiment_id}]')
-    print(f'{"=" * 80}')
-    print(f'  Model:      {model_name}')
-    print(f'  Method:     {method}')
-    print(f'  Success:    {opt.get("success", False)}')
-    print(f'  Message:    {opt.get("message", "")}')
-    print(f'  Final loss: {float(opt.get("fun", float("nan"))):.6e}')
-    if iter_str:
-        print(iter_str)
-    if param_names and len(x_opt) == len(param_names):
-        print(f'\n  {"Parameter":<45} {"Value":>18}')
-        print(f'  {"-" * 63}')
-        for name, val in zip(param_names, x_opt):
-            print(f'  {name:<45} {float(val):>18.8e}')
-    print(f'{"=" * 80}\n')
+    # Drop any requested symbols that don't exist in this model variant.
+    _ids = (set(r.getFloatingSpeciesIds()) | set(r.getBoundarySpeciesIds())
+            | set(r.getAssignmentRuleIds()) | set(r.getGlobalParameterIds())
+            | set(r.getReactionIds()))
+    _available = {'time'} | _ids | {'[' + s + ']' for s in _ids}
+    observed_species = [s for s in observed_species if s in _available]
 
-    # ------------------------------------------------------------------ #
-    # Append to CSV.                                                       #
-    # ------------------------------------------------------------------ #
-    df_row = pd.DataFrame([row])
-    write_header = not os.path.exists(csv_path)
-    df_row.to_csv(csv_path, mode="a", header=write_header, index=False)
-    print(f"Optimization results appended to: {csv_path}")
+    all_results = None
+
+    # Find index of the last tracked block so we can skip trailing untracked ones.
+    last_tracked_idx = -1
+    for i, blk in enumerate(block_list):
+        if blk.get('tracked', True):
+            last_tracked_idx = i
+
+    for i, block in enumerate(block_list):
+        if i > last_tracked_idx:
+            break
+        tracked = block.get('tracked', True)
+
+        if 'maximum_num_steps' in block:
+            r.integrator.maximum_num_steps = block['maximum_num_steps']
+
+        try:
+            res = r.simulate(block['start'], block['end'], block['n_points'], observed_species)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Integration failed in block {i} "
+                f"[{block['start']:.4g}, {block['end']:.4g}]: {exc}"
+            ) from exc
+
+        if not tracked:
+            continue
+        if all_results is None:
+            all_results = res
+        else:
+            colnames = all_results.colnames
+            stacked = np.vstack((all_results, res))
+            all_results = StackedResult(stacked, colnames)
+    return all_results

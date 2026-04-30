@@ -13,6 +13,7 @@ except ImportError:
     pass
 from framework.TelluriumGen import TelluriumGen
 from Engine.Simulate import simulate
+from Modules.Loss_config import no_optimization
 
 
 # ---------------------------------------------------------------------------
@@ -55,20 +56,18 @@ def run_all(r, exp_num, experiment, df_dict, set_parameters=None, parameters=Non
     Returns a results dict keyed by treatment label.
     """
     r.reset()
-    print('r[k_r_DensePlaque_Antibody]', r['k_r_DensePlaque_Antibody'])
-    print('r[CLup_Tissue_basal]', r['CLup_Tissue_basal'])
+
     if set_parameters is not None and parameters is not None:
         set_parameters(r, parameters)
         for hook in experiment.get("parameter_hooks", []):
             hook(r, parameters)
-    print('r[CLup_Tissue_basal]', r['CLup_Tissue_basal'])
-    print('r[k_r_DensePlaque_Antibody]', r['k_r_DensePlaque_Antibody'])
+
     solver_settings  = experiment["Solver_settings"](experiment)
     observed_species = experiment["Observed_species"](r)
     results          = simulate(r, solver_settings, observed_species)
     label            = experiment["Label"]
 
-    return {label: {"results": results, "data": df_dict, "treatment": experiment}}
+    return {label: {"results": results, "data": df_dict, "replicate": experiment}}
 
 
 def set_parameters_from_dict(r, params):
@@ -89,7 +88,7 @@ def loss_function(
     param_names,
     loss_config=None,
     fixed_sigmas=None,
-    debug=True,
+    debug=False,
 ):
     """
     Run *experiment* with the given parameters and return a scalar NLL loss.
@@ -408,7 +407,9 @@ def run_optimization(
     x0,
     bounds=None,
     loss_config=None,
-    likelihood_analysis=False,
+    wald_analysis=False,
+    slice_analysis=False,
+    profile_likelihood_analysis=False,
     method="Nelder-Mead",
     optimizer_kwargs=None,
     fast=False,
@@ -428,7 +429,7 @@ def run_optimization(
         df_dict    = experiment["Data"](experiment, data_path)
         events_str = experiment["Events"](experiment, df_dict)
         r          = TelluriumGen(model_text + "\n" + events_str, paths)
-        experiment["Update_parameters"](r, experiment)
+        experiment["Update_parameters"](r, experiment, mode="Optimizer")
         models[exp_num] = {"r": r, "df_dict": df_dict}
 
     def objective(x):
@@ -543,7 +544,13 @@ def run_optimization(
 
         out["results_dict"] = best_results
 
-        if likelihood_analysis:
+        if wald_analysis or slice_analysis or profile_likelihood_analysis:
+            aic = 2 * k + 2 * res.fun
+            bic = k * np.log(total_n) + 2 * res.fun
+            out["stats"]["aic"] = aic
+            out["stats"]["bic"] = bic
+
+        if wald_analysis:
             try:
                 hessian_raw  = compute_hessian_numdifftools(nll_func_fixed, res.x)
                 fisher_info  = (hessian_raw + hessian_raw.T) / 2.0
@@ -557,41 +564,85 @@ def run_optimization(
                     diag_elements   = np.diag(cov_matrix)
                     standard_errors = (None if np.any(diag_elements < 0)
                                        else np.sqrt(diag_elements))
-                out["stats"]["fisher_info"]       = fisher_info
-                out["stats"]["covariance_matrix"] = cov_matrix
-                out["stats"]["standard_errors"]   = standard_errors
-
+                out["stats"]["wald_fisher_info"]  = fisher_info
+                out["stats"]["wald_covariance"]   = cov_matrix
+                out["stats"]["wald_se"]           = standard_errors
                 if standard_errors is not None:
                     cv = stats.norm.ppf(1 - 0.05/2)
-                    out["stats"]["confidence_intervals"] = [
+                    out["stats"]["wald_ci"] = [
                         (p_val - cv * se, p_val + cv * se)
                         for p_val, se in zip(res.x, standard_errors)
                     ]
-
                 if cov_matrix is not None:
-                    out["stats"]["correlation_matrix"] = compute_parameter_correlations(cov_matrix)
+                    out["stats"]["wald_correlation"] = compute_parameter_correlations(cov_matrix)
             except Exception as e:
-                print(f"Error computing advanced statistics: {e}")
+                print(f"Error computing Wald statistics: {e}")
 
-            aic = 2 * k + 2 * res.fun
-            bic = k * np.log(total_n) + 2 * res.fun
-            out["stats"]["aic"] = aic
-            out["stats"]["bic"] = bic
+        if slice_analysis or profile_likelihood_analysis:
+            nll_at_optimum = nll_func_fixed(res.x)
+            out["stats"]["nll_at_optimum"] = nll_at_optimum
 
-            def profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
+            def likelihood_slice_func(param_idx, n_points=20, range_factor=2.0):
                 p_val      = res.x[param_idx]
                 pname      = param_names[param_idx]
                 param_vals = np.linspace(p_val / range_factor, p_val * range_factor, n_points)
                 width      = len(str(n_points))
-                print(f"\n[profile] {pname}  ({n_points} points, x{range_factor} range)")
+                print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
                 nll_vals = []
                 for i, val in enumerate(param_vals):
                     nll = nll_func_fixed(np.where(np.arange(len(res.x)) == param_idx, val, res.x))
                     print(f"  [{i+1:{width}d}/{n_points}]  {pname}={val:.4g}  nll={nll:.6g}")
                     nll_vals.append(nll)
-                return param_vals, np.array(nll_vals)
+                return param_vals, np.array(nll_vals) - nll_at_optimum
 
-            out["stats"]["profile_likelihood"] = profile_likelihood_func
+            if slice_analysis:
+                out["stats"]["likelihood_slice"] = likelihood_slice_func
+
+            if profile_likelihood_analysis:
+                def true_profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
+                    try:
+                        import pypesto
+                        import pypesto.profile as pypesto_profile
+                        import pypesto.optimize as pypesto_optimize
+                        pname = param_names[param_idx]
+                        print(f"\n[true profile] {pname}  (max {n_points} steps/side, re-optimizing nuisance params)")
+                        objective = pypesto.Objective(fun=nll_func_fixed)
+                        if bounds is not None:
+                            lb = np.array([b[0] for b in bounds], dtype=float)
+                            ub = np.array([b[1] for b in bounds], dtype=float)
+                        else:
+                            lb = res.x / (range_factor ** 2)
+                            ub = res.x * (range_factor ** 2)
+                        problem = pypesto.Problem(objective=objective, lb=lb, ub=ub, x_names=list(param_names))
+                        pypesto_result = pypesto.Result(problem=problem)
+                        pypesto_result.optimize_result.append(
+                            pypesto.result.OptimizerResult(id='0', x=res.x.copy(), fval=float(nll_at_optimum)),
+                            sort=True,
+                        )
+                        optimizer = pypesto_optimize.ScipyOptimizer(method='L-BFGS-B')
+                        profile_options = pypesto_profile.ProfileOptions()
+                        pypesto_profile.parameter_profile(
+                            problem=problem, result=pypesto_result, optimizer=optimizer,
+                            profile_index=np.array([param_idx]), result_index=0,
+                            profile_options=profile_options,
+                        )
+                        profiler = pypesto_result.profile_result.list[0][param_idx]
+                        param_vals = profiler.x_path[param_idx, :]
+                        nll_vals_rel = profiler.fval_path - float(nll_at_optimum)
+                        sort_idx = np.argsort(param_vals)
+                        pv, nr = param_vals[sort_idx], nll_vals_rel[sort_idx]
+                        width = len(str(len(pv)))
+                        for i, (v, n) in enumerate(zip(pv, nr)):
+                            print(f"  [{i+1:{width}d}/{len(pv)}]  {pname}={v:.4g}  Δnll={n:.6g}")
+                        return pv, nr
+                    except ImportError:
+                        print("pypesto not installed — falling back to likelihood slice")
+                        return likelihood_slice_func(param_idx, n_points=n_points, range_factor=range_factor)
+                    except Exception as e:
+                        print(f"[true profile] failed ({e}) — falling back to likelihood slice")
+                        return likelihood_slice_func(param_idx, n_points=n_points, range_factor=range_factor)
+
+                out["stats"]["profile_likelihood"] = true_profile_likelihood_func
 
     out["r"] = list(models.values())[0]["r"] if models else None
     return out
@@ -601,15 +652,6 @@ def run_optimization(
 # Group-aware optimization entry point
 # ---------------------------------------------------------------------------
 
-def _iter_group_replicates(group_data):
-    """Yield replicate IDs from a 3-level group dict, skipping the 'Loss_config' key."""
-    for key, value in group_data.items():
-        if key == "Loss_config":
-            continue
-        if isinstance(value, dict):
-            yield from value.keys()
-
-
 def run_optimization_from_groups(
     model_text,
     paths,
@@ -617,34 +659,29 @@ def run_optimization_from_groups(
     param_names,
     x0,
     bounds=None,
-    loss_config=None,
     group_names=None,
     method="Nelder-Mead",
     optimizer_kwargs=None,
-    likelihood_analysis=False,
+    wald_analysis=False,
+    slice_analysis=False,
+    profile_likelihood_analysis=False,
     fast=False,
     maxiter=None,
     tol=None,
 ):
     """
-    Optimize shared parameters using ``experiment.optimization_groups``.
+    Optimize shared parameters using ``experiment.opt_groups``.
 
-    Groups follow a 3-level structure::
-
-        {opt_group: {"Loss_config": cfg, treatment_group: {replicate_id: params}}}
-
-    ``Loss_config`` at the group level can be:
-      - ``{}`` / ``no_optimization()`` → passive: simulated at end for plotting only
-      - ``{"observables": [...]}``     → active: contributes to the NLL objective
-      - ``callable(treatment)``        → resolved per replicate (e.g. age-dependent SILK)
-
-    The ``loss_config`` parameter is a fallback used when a group has no
-    ``Loss_config`` key (supports legacy callers).
+    Each replicate in ``experiment.replicates`` carries an ``Opt_group`` key
+    that controls group membership, and a ``Loss_config`` key that controls
+    whether it contributes to the NLL objective:
+      - ``no_optimization()`` → passive: simulated at end for plotting only
+      - ``{"observables": [...]}`` → active: contributes to the NLL objective
 
     Parameters
     ----------
-    experiment      : Experiment with .treatments and .optimization_groups.
-    group_names     : group keys to include; None = all groups.
+    experiment      : Experiment with .replicates and .opt_groups property.
+    group_names     : opt_group names to include; None = all groups.
     method          : local scipy method name OR one of _GLOBAL_METHODS.
     optimizer_kwargs: extra kwargs forwarded to the chosen optimizer.
     """
@@ -655,53 +692,40 @@ def run_optimization_from_groups(
 
     data_path = paths["data_path"]
 
+    opt_groups = experiment.opt_groups  # {opt_group: [key, ...]}
     if group_names is None:
-        selected_groups = experiment.optimization_groups
+        selected_group_names = set(opt_groups.keys())
     else:
-        selected_groups = {k: v for k, v in experiment.optimization_groups.items()
-                           if k in group_names}
-    if not selected_groups:
-        raise ValueError(
-            "No optimization groups found. Check group_names or "
-            "experiment.optimization_groups."
-        )
+        selected_group_names = set(group_names)
+        missing = selected_group_names - set(opt_groups.keys())
+        if missing:
+            raise ValueError(
+                f"Optimization groups not found: {sorted(missing)}. "
+                f"Available: {sorted(opt_groups.keys())}"
+            )
 
-    def _effective_loss_cfg(gname, treatment):
-        """Resolve the loss config for one replicate from its group's Loss_config."""
-        lc = selected_groups[gname].get("Loss_config", loss_config)
-        if callable(lc):
-            return lc(treatment)
-        return lc or {}
+    def _effective_loss_cfg(treatment):
+        lc = treatment.get("Loss_config", no_optimization)
+        return lc(treatment)
 
-    def _group_is_active(gname):
-        lc = selected_groups[gname].get("Loss_config", loss_config)
-        return callable(lc) or bool(lc)
-
-    # Pre-build one Tellurium model per replicate for ALL selected groups.
-    # Passive (no_optimization) groups are also pre-built so they can be
-    # simulated at optimal params for the results_dict used by plot functions.
-    models = {}
-    treatments = {}
-    for gname, gdata in selected_groups.items():
-        for rep_id in _iter_group_replicates(gdata):
-            if rep_id not in experiment.treatments:
-                print(f"Warning: '{rep_id}' in group '{gname}' not in "
-                      "experiment.treatments — skipping.")
-                continue
-            treatment  = experiment.treatments[rep_id]
-            df_dict    = treatment["Data"](treatment, data_path)
-            events_str = treatment["Events"](treatment, df_dict)
-            r          = TelluriumGen(model_text + "\n" + events_str, paths)
-            treatment["Update_parameters"](r, treatment)
-            models[rep_id]    = {"r": r, "df_dict": df_dict}
-            treatments[rep_id] = treatment
+    # Pre-build one Tellurium model per replicate in selected groups.
+    models     = {}
+    replicates = {}
+    for key, replicate in experiment.replicates.items():
+        if replicate.get("Opt_group") not in selected_group_names:
+            continue
+        df_dict    = replicate["Data"](replicate, data_path)
+        events_str = replicate["Events"](replicate, df_dict)
+        r          = TelluriumGen(model_text + "\n" + events_str, paths)
+        replicate["Update_parameters"](r, replicate, mode="Optimizer")
+        models[key]     = {"r": r, "df_dict": df_dict}
+        replicates[key] = replicate
 
     if not models:
-        raise ValueError("No valid treatments found across selected groups.")
+        raise ValueError("No valid replicates found across selected groups.")
 
-    # Objective: sum NLL over active groups only.
-    # First 3 calls print full predicted-vs-data diagnostics to help identify
-    # time-alignment or observable issues.
+    # Objective: sum NLL over active replicates only.
+    # First 3 calls print diagnostics to help identify time-alignment issues.
     _debug_calls = [0]
 
     def objective(x):
@@ -710,24 +734,19 @@ def run_optimization_from_groups(
             print(f"\n[opt debug] call #{_debug_calls[0] + 1}  "
                   + "  ".join(f"{n}={v:.4g}" for n, v in zip(param_names, x.tolist())))
         total_loss = 0.0
-        for gname, gdata in selected_groups.items():
-            if not _group_is_active(gname):
+        for key, replicate in replicates.items():
+            effective_lc = _effective_loss_cfg(replicate)
+            if not effective_lc or not effective_lc.get("observables"):
                 continue
-            for rep_id in _iter_group_replicates(gdata):
-                if rep_id not in models:
-                    continue
-                effective_lc = _effective_loss_cfg(gname, treatments[rep_id])
-                if not effective_lc or not effective_lc.get("observables"):
-                    continue
-                loss_val = loss_function(
-                    x, models[rep_id]["r"], rep_id, treatments[rep_id],
-                    models[rep_id]["df_dict"], param_names,
-                    loss_config=effective_lc
-                )
-                if loss_val >= 1e10:
-                    _debug_calls[0] += 1
-                    return 1e10
-                total_loss += loss_val
+            loss_val = loss_function(
+                x, models[key]["r"], key, replicate,
+                models[key]["df_dict"], param_names,
+                loss_config=effective_lc,
+            )
+            if loss_val >= 1e10:
+                _debug_calls[0] += 1
+                return 1e10
+            total_loss += loss_val
         if do_debug:
             print(f"  → total_loss = {total_loss:.6g}")
         _debug_calls[0] += 1
@@ -742,7 +761,7 @@ def run_optimization_from_groups(
     out = {
         "x": res.x, "fun": res.fun, "success": res.success,
         "message": res.message, "stats": {},
-        "groups": list(selected_groups.keys()),
+        "groups": sorted(selected_group_names),
         "nit":  getattr(res, "nit",  None),
         "nfev": getattr(res, "nfev", None),
     }
@@ -756,129 +775,118 @@ def run_optimization_from_groups(
     def set_params(r, p):
         set_parameters_from_dict(r, p)
 
-    # Run ALL groups (active + passive) at optimal params.
-    # Passive groups produce results for plotting but do not populate fixed_sigmas.
+    # Run selected replicates at optimal params; passive ones produce plot data only.
     best_results = {}
     fixed_sigmas = {}
     total_n      = 0
     k            = len(param_names)
 
-    for gname, gdata in selected_groups.items():
-        active = _group_is_active(gname)
-        for rep_id in _iter_group_replicates(gdata):
-            if rep_id not in models:
-                continue
-            m         = models[rep_id]
-            treatment = treatments[rep_id]
-            res_dict  = run_all(m["r"], rep_id, treatment, m["df_dict"],
-                                set_parameters=set_params, parameters=param_dict)
-            best_results.update(res_dict)
+    for key, replicate in replicates.items():
+        m        = models[key]
+        res_dict = run_all(m["r"], key, replicate, m["df_dict"],
+                           set_parameters=set_params, parameters=param_dict)
+        best_results.update(res_dict)
 
-            if not active:
-                continue
-
-            effective_lc       = _effective_loss_cfg(gname, treatment)
-            observables_config = effective_lc.get("observables", [])
-
-            for _, item in res_dict.items():
-                result  = item["results"]
-                item_df = item["data"]
-                t_sim   = np.asarray(result["time"])
-
-                local_dict = {"np": np, "time": t_sim}
-                cols = (result.colnames if hasattr(result, "colnames") else
-                        (result.dtype.names if hasattr(result, "dtype") else []))
-                for c in cols:
-                    local_dict[c] = np.asarray(result[c])
-                    if c.startswith('[') and c.endswith(']'):
-                        local_dict[c[1:-1]] = np.asarray(result[c])
-                local_dict.update(param_dict)
-
-                for obs_cfg in observables_config:
-                    obs   = obs_cfg["observed_variable"]
-                    d_col = obs_cfg["data_column"]
-                    t_col = obs_cfg["time_column"]
-                    obs_df = _resolve_obs_df(item_df, obs_cfg)
-                    if obs_df is None or d_col not in obs_df.columns or t_col not in obs_df.columns:
-                        continue
-
-                    y_data = np.asarray(obs_df[d_col])
-                    t_data = np.asarray(obs_df[t_col])
-
-                    try:
-                        if callable(obs):
-                            y_sim = np.asarray(obs(result))
-                        elif isinstance(obs, str) and obs in cols:
-                            y_sim = np.asarray(result[obs])
-                        elif isinstance(obs, str):
-                            eval_obs = str(obs)
-                            for c in cols:
-                                if c.startswith('[') and c.endswith(']'):
-                                    eval_obs = eval_obs.replace(c, c[1:-1])
-                            y_sim = np.asarray(eval(eval_obs, {}, local_dict))
-                        else:
-                            continue
-                    except Exception:
-                        continue
-
-                    y_pred = np.interp(t_data, t_sim, y_sim)
-                    valid = np.isfinite(y_pred) & np.isfinite(y_data)
-                    if not valid.any():
-                        continue
-                    y_data_v  = y_data[valid]
-                    y_pred_v  = y_pred[valid]
-                    residuals = y_data_v - y_pred_v
-
-                    sigma_config = obs_cfg.get("noise_formula", None)
-                    if sigma_config and sigma_config in local_dict:
-                        sigma = float(local_dict[sigma_config])
-                    else:
-                        n_block = len(residuals)
-                        sigma = (np.sqrt(np.sum(residuals**2) /
-                                         max(1, n_block - k / max(1, len(observables_config))))
-                                 if n_block > 1 else 1e-6)
-                    fixed_sigmas[(rep_id, obs)] = sigma
-                    total_n += len(residuals)
-
-    # Simulate groups NOT in selected_groups at optimal params so that the
-    # plot function receives a complete results_dict (e.g. ADneg when only
-    # ADpos was optimised).
-    for gname, gdata in experiment.optimization_groups.items():
-        if gname in selected_groups:
+        effective_lc       = _effective_loss_cfg(replicate)
+        observables_config = effective_lc.get("observables", [])
+        if not observables_config:
             continue
-        for rep_id in _iter_group_replicates(gdata):
-            if rep_id not in experiment.treatments:
-                continue
-            treatment  = experiment.treatments[rep_id]
-            df_dict    = treatment["Data"](treatment, data_path)
-            events_str = treatment["Events"](treatment, df_dict)
-            r          = TelluriumGen(model_text + "\n" + events_str, paths)
-            treatment["Update_parameters"](r, treatment)
-            res_dict   = run_all(r, rep_id, treatment, df_dict,
-                                 set_parameters=set_params, parameters=param_dict)
-            best_results.update(res_dict)
+
+        for _, item in res_dict.items():
+            result  = item["results"]
+            item_df = item["data"]
+            t_sim   = np.asarray(result["time"])
+
+            local_dict = {"np": np, "time": t_sim}
+            cols = (result.colnames if hasattr(result, "colnames") else
+                    (result.dtype.names if hasattr(result, "dtype") else []))
+            for c in cols:
+                local_dict[c] = np.asarray(result[c])
+                if c.startswith('[') and c.endswith(']'):
+                    local_dict[c[1:-1]] = np.asarray(result[c])
+            local_dict.update(param_dict)
+
+            for obs_cfg in observables_config:
+                obs   = obs_cfg["observed_variable"]
+                d_col = obs_cfg["data_column"]
+                t_col = obs_cfg["time_column"]
+                obs_df = _resolve_obs_df(item_df, obs_cfg)
+                if obs_df is None or d_col not in obs_df.columns or t_col not in obs_df.columns:
+                    continue
+
+                y_data = np.asarray(obs_df[d_col])
+                t_data = np.asarray(obs_df[t_col])
+
+                try:
+                    if callable(obs):
+                        y_sim = np.asarray(obs(result))
+                    elif isinstance(obs, str) and obs in cols:
+                        y_sim = np.asarray(result[obs])
+                    elif isinstance(obs, str):
+                        eval_obs = str(obs)
+                        for c in cols:
+                            if c.startswith('[') and c.endswith(']'):
+                                eval_obs = eval_obs.replace(c, c[1:-1])
+                        y_sim = np.asarray(eval(eval_obs, {}, local_dict))
+                    else:
+                        continue
+                except Exception:
+                    continue
+
+                y_pred = np.interp(t_data, t_sim, y_sim)
+                valid = np.isfinite(y_pred) & np.isfinite(y_data)
+                if not valid.any():
+                    continue
+                y_data_v  = y_data[valid]
+                y_pred_v  = y_pred[valid]
+                residuals = y_data_v - y_pred_v
+
+                sigma_config = obs_cfg.get("noise_formula", None)
+                if sigma_config and sigma_config in local_dict:
+                    sigma = float(local_dict[sigma_config])
+                else:
+                    n_block = len(residuals)
+                    sigma = (np.sqrt(np.sum(residuals**2) /
+                                     max(1, n_block - k / max(1, len(observables_config))))
+                             if n_block > 1 else 1e-6)
+                fixed_sigmas[(key, obs)] = sigma
+                total_n += len(residuals)
+
+    # Simulate replicates NOT in selected groups at optimal params so that
+    # plot functions receive a complete results_dict.
+    for key, replicate in experiment.replicates.items():
+        if replicate.get("Opt_group") in selected_group_names:
+            continue
+        df_dict    = replicate["Data"](replicate, data_path)
+        events_str = replicate["Events"](replicate, df_dict)
+        r          = TelluriumGen(model_text + "\n" + events_str, paths)
+        replicate["Update_parameters"](r, replicate, mode="Optimizer")
+        res_dict   = run_all(r, key, replicate, df_dict,
+                             set_parameters=set_params, parameters=param_dict)
+        best_results.update(res_dict)
 
     def nll_func_fixed(p):
         total_nll = 0.0
-        for gname, gdata in selected_groups.items():
-            if not _group_is_active(gname):
+        for key, replicate in replicates.items():
+            effective_lc = _effective_loss_cfg(replicate)
+            if not effective_lc or not effective_lc.get("observables"):
                 continue
-            for rep_id in _iter_group_replicates(gdata):
-                if rep_id not in models:
-                    continue
-                effective_lc = _effective_loss_cfg(gname, treatments[rep_id])
-                if not effective_lc or not effective_lc.get("observables"):
-                    continue
-                total_nll += loss_function(
-                    p, models[rep_id]["r"], rep_id, treatments[rep_id],
-                    models[rep_id]["df_dict"], param_names,
-                    effective_lc, fixed_sigmas=fixed_sigmas,
-                )
+            total_nll += loss_function(
+                p, models[key]["r"], key, replicate,
+                models[key]["df_dict"], param_names,
+                effective_lc, fixed_sigmas=fixed_sigmas,
+            )
         return total_nll
 
     out["results_dict"] = best_results
 
-    if likelihood_analysis:
+    if wald_analysis or slice_analysis or profile_likelihood_analysis:
+        aic = 2 * k + 2 * res.fun
+        bic = k * np.log(max(total_n, 1)) + 2 * res.fun
+        out["stats"]["aic"] = aic
+        out["stats"]["bic"] = bic
+
+    if wald_analysis:
         try:
             hessian_raw = compute_hessian_numdifftools(nll_func_fixed, res.x)
             fisher_info = (hessian_raw + hessian_raw.T) / 2.0
@@ -892,32 +900,27 @@ def run_optimization_from_groups(
                 diag_elements   = np.diag(cov_matrix)
                 standard_errors = (None if np.any(diag_elements < 0)
                                    else np.sqrt(diag_elements))
-            out["stats"]["fisher_info"]       = fisher_info
-            out["stats"]["covariance_matrix"] = cov_matrix
-            out["stats"]["standard_errors"]   = standard_errors
-
+            out["stats"]["wald_fisher_info"] = fisher_info
+            out["stats"]["wald_covariance"]  = cov_matrix
+            out["stats"]["wald_se"]          = standard_errors
             if standard_errors is not None:
                 cv = stats.norm.ppf(1 - 0.05 / 2)
-                out["stats"]["confidence_intervals"] = [
+                out["stats"]["wald_ci"] = [
                     (p_val - cv * se, p_val + cv * se)
                     for p_val, se in zip(res.x, standard_errors)
                 ]
             if cov_matrix is not None:
-                out["stats"]["correlation_matrix"] = compute_parameter_correlations(cov_matrix)
+                out["stats"]["wald_correlation"] = compute_parameter_correlations(cov_matrix)
         except Exception as e:
-            print(f"Error computing advanced statistics: {e}")
+            print(f"Error computing Wald statistics: {e}")
 
-        aic = 2 * k + 2 * res.fun
-        bic = k * np.log(max(total_n, 1)) + 2 * res.fun
-        out["stats"]["aic"] = aic
-        out["stats"]["bic"] = bic
-
+    if slice_analysis or profile_likelihood_analysis:
         try:
             nll_at_optimum = nll_func_fixed(res.x)
             out["stats"]["nll_at_optimum"] = nll_at_optimum
             out["stats"]["fixed_sigmas"]   = fixed_sigmas
 
-            print(f"\nProfile likelihood setup diagnostics:")
+            print(f"\nLikelihood analysis setup diagnostics:")
             print(f"  NLL at optimum (fixed-sigma): {nll_at_optimum:.6g}")
             print(f"  fixed_sigmas populated: {len(fixed_sigmas)} entries")
             if not fixed_sigmas:
@@ -932,12 +935,12 @@ def run_optimization_from_groups(
                 _nll_test = nll_func_fixed(_x_test)
                 print(f"    {_pname}: {nll_at_optimum:.6g} → {_nll_test:.6g}  (delta={_nll_test - nll_at_optimum:+.6g})")
 
-            def profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
+            def likelihood_slice_func(param_idx, n_points=20, range_factor=2.0):
                 p_val      = res.x[param_idx]
                 pname      = param_names[param_idx]
                 param_vals = np.linspace(p_val / range_factor, p_val * range_factor, n_points)
                 width      = len(str(n_points))
-                print(f"\n[profile] {pname}  ({n_points} points, x{range_factor} range)")
+                print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
                 nll_vals = []
                 for i, val in enumerate(param_vals):
                     nll = nll_func_fixed(np.where(np.arange(len(res.x)) == param_idx, val, res.x))
@@ -945,9 +948,56 @@ def run_optimization_from_groups(
                     nll_vals.append(nll)
                 return param_vals, np.array(nll_vals) - nll_at_optimum
 
-            out["stats"]["profile_likelihood"] = profile_likelihood_func
+            if slice_analysis:
+                out["stats"]["likelihood_slice"] = likelihood_slice_func
+
+            if profile_likelihood_analysis:
+                def true_profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
+                    try:
+                        import pypesto
+                        import pypesto.profile as pypesto_profile
+                        import pypesto.optimize as pypesto_optimize
+                        pname = param_names[param_idx]
+                        print(f"\n[true profile] {pname}  (max {n_points} steps/side, re-optimizing nuisance params)")
+                        objective = pypesto.Objective(fun=nll_func_fixed)
+                        if bounds is not None:
+                            lb = np.array([b[0] for b in bounds], dtype=float)
+                            ub = np.array([b[1] for b in bounds], dtype=float)
+                        else:
+                            lb = res.x / (range_factor ** 2)
+                            ub = res.x * (range_factor ** 2)
+                        problem = pypesto.Problem(objective=objective, lb=lb, ub=ub, x_names=list(param_names))
+                        pypesto_result = pypesto.Result(problem=problem)
+                        pypesto_result.optimize_result.append(
+                            pypesto.result.OptimizerResult(id='0', x=res.x.copy(), fval=float(nll_at_optimum)),
+                            sort=True,
+                        )
+                        optimizer = pypesto_optimize.ScipyOptimizer(method='L-BFGS-B')
+                        profile_options = pypesto_profile.ProfileOptions()
+                        pypesto_profile.parameter_profile(
+                            problem=problem, result=pypesto_result, optimizer=optimizer,
+                            profile_index=np.array([param_idx]), result_index=0,
+                            profile_options=profile_options,
+                        )
+                        profiler = pypesto_result.profile_result.list[0][param_idx]
+                        param_vals = profiler.x_path[param_idx, :]
+                        nll_vals_rel = profiler.fval_path - float(nll_at_optimum)
+                        sort_idx = np.argsort(param_vals)
+                        pv, nr = param_vals[sort_idx], nll_vals_rel[sort_idx]
+                        width = len(str(len(pv)))
+                        for i, (v, n) in enumerate(zip(pv, nr)):
+                            print(f"  [{i+1:{width}d}/{len(pv)}]  {pname}={v:.4g}  Δnll={n:.6g}")
+                        return pv, nr
+                    except ImportError:
+                        print("pypesto not installed — falling back to likelihood slice")
+                        return likelihood_slice_func(param_idx, n_points=n_points, range_factor=range_factor)
+                    except Exception as e:
+                        print(f"[true profile] failed ({e}) — falling back to likelihood slice")
+                        return likelihood_slice_func(param_idx, n_points=n_points, range_factor=range_factor)
+
+                out["stats"]["profile_likelihood"] = true_profile_likelihood_func
         except Exception as e:
-            print(f"Warning: profile likelihood setup failed: {e}")
+            print(f"Warning: likelihood analysis setup failed: {e}")
 
     out["r"] = list(models.values())[0]["r"] if models else None
     return out
@@ -1119,9 +1169,9 @@ def neg_log_likelihood_fixed_sigma(params, observable_data, model, param_names,
         return 1e10
 
 
-def profile_likelihood(param_idx, params_estimated, observable_data, model,
-                        param_names, sigmas, observable_defs=None,
-                        n_points=20, range_factor=2.0):
+def likelihood_slice(param_idx, params_estimated, observable_data, model,
+                     param_names, sigmas, observable_defs=None,
+                     n_points=20, range_factor=2.0):
     param_values = np.linspace(
         params_estimated[param_idx] / range_factor,
         params_estimated[param_idx] * range_factor,
@@ -1167,6 +1217,66 @@ def _plot_profile_likelihood(ax, plot_config, opt, params_estimated, param_names
     ax.set_xlabel(plot_config.get('xlabel', 'Parameter Value (relative to optimal)'))
     ax.set_ylabel(plot_config.get('ylabel', 'Δ NLL (relative to minimum)'))
     ax.set_title(plot_config.get('title', 'Profile Likelihood (Identifiability Check)'))
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    if 'xlim' in plot_config:
+        ax.set_xlim(plot_config['xlim'])
+    else:
+        ax.set_xlim(0.2, 3.5)
+
+
+def _extract_profile_ci(param_vals, nll_vals_rel, threshold=1.9207):
+    """Interpolate lower/upper CI bounds where ΔNLL crosses threshold (default 95%)."""
+    mle_idx = int(np.argmin(nll_vals_rel))
+    lo, hi = float('nan'), float('nan')
+    for i in range(mle_idx - 1, -1, -1):
+        if nll_vals_rel[i] >= threshold:
+            x0, x1 = param_vals[i], param_vals[i + 1]
+            y0, y1 = nll_vals_rel[i], nll_vals_rel[i + 1]
+            if y1 != y0:
+                lo = x0 + (threshold - y0) * (x1 - x0) / (y1 - y0)
+            break
+    for i in range(mle_idx + 1, len(nll_vals_rel)):
+        if nll_vals_rel[i] >= threshold:
+            x0, x1 = param_vals[i - 1], param_vals[i]
+            y0, y1 = nll_vals_rel[i - 1], nll_vals_rel[i]
+            if y1 != y0:
+                hi = x0 + (threshold - y0) * (x1 - x0) / (y1 - y0)
+            break
+    return lo, hi
+
+
+def _plot_likelihood_slice(ax, plot_config, opt, params_estimated, param_names):
+    """Plot likelihood slice for parameters."""
+    params_to_profile = plot_config.get('parameters', param_names)
+    n_points          = plot_config.get('n_points', 30)
+    range_factor      = plot_config.get('range_factor', 3.0)
+
+    colors  = ['blue', 'green', 'red', 'orange', 'purple']
+    markers = ['o', 's', '^', 'D', 'v']
+
+    slice_func = opt.get("stats", {}).get("likelihood_slice")
+    if not slice_func:
+        print("Warning: no likelihood_slice closure found in opt['stats']")
+        return
+
+    for idx, param_name in enumerate(params_to_profile):
+        if param_name not in param_names:
+            continue
+        param_idx = param_names.index(param_name)
+        param_vals, nll_vals_rel = slice_func(param_idx, n_points=n_points, range_factor=range_factor)
+
+        param_vals_normalized = param_vals / params_estimated[param_idx]
+
+        color  = colors[idx % len(colors)]
+        marker = markers[idx % len(markers)]
+        ax.plot(param_vals_normalized, nll_vals_rel,
+                marker=marker, linestyle='-', label=param_name, linewidth=2, color=color)
+
+    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
+    ax.set_xlabel(plot_config.get('xlabel', 'Parameter Value (relative to optimal)'))
+    ax.set_ylabel(plot_config.get('ylabel', 'Δ NLL (relative to minimum)'))
+    ax.set_title(plot_config.get('title', 'Likelihood Slice'))
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     if 'xlim' in plot_config:
