@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "PyAntiGen"
-version = "0.1.0"
+version = "v1.0"
 description = "Short one-line description of what PyAntiGen does"
 readme = "README.md"
 license = { text = "MIT" }          # adjust if needed
