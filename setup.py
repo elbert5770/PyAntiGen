@@ -19,6 +19,7 @@ setup(
         'numpy',
         'pandas',
         'scipy',
+        'pypesto'
     ],
     entry_points={
         'console_scripts': [
