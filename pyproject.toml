@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "PyAntiGen"
+version = "0.1.0"
+description = "Short one-line description of what PyAntiGen does"
+readme = "README.md"
+license = { text = "MIT" }          # adjust if needed
+requires-python = ">=3.9"
+authors = [
+  { name = "Don", email = "you@example.com" }
+]
+keywords = ["alzheimer", "immunology", "simulation"]   # tailor to your project
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  # list your runtime deps here, e.g.:
+  # "numpy>=1.24",
+  # "scipy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/you/PyAntiGen"
