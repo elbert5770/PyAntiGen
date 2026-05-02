@@ -19,9 +19,14 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = [
-  # list your runtime deps here, e.g.:
-  # "numpy>=1.24",
-  # "scipy>=1.10",
+  "tellurium",
+  "scipy",
+  "numpy",
+  "pandas",
+  "numdifftools",
+  "openpyxl",
+  "matplotlib",
+  "pypesto",
 ]
 
 [project.urls]
