@@ -78,7 +78,7 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
 
         r = TelluriumGen(full_model_text, paths)
 
-        replicate["Update_parameters"](r, replicate, mode="Simulator")
+        replicate["Update_parameters"](r, replicate)
 
         solver_settings = replicate["Solver_settings"](replicate)
         observed_species = replicate["Observed_species"](r)

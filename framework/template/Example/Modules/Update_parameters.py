@@ -2,10 +2,19 @@
 # 1. The base parameters change from one treatment to another
 # 2. The base parameters change from one replicate to another
 # 3. The base parameters are modified by events during the treatment
-#  Update_parameters is called after the parameters are set, but before the simulation is run.
+#  Update_parameters is called after the parameters are set during
+#  construction of the RoadRunner model, but before the simulation is run.
+#  It is not called during each round of optimization, only at the
+#  setup of the optimization problem. If parameters need to be modified
+#  at each parameter update in an optimization problem, then
+#  contruct a function within Update_opt_parameters.py.
 #  The function does not need to return anything, but modifies the parameters in the
 #  RoadRunner instance (r).
-#  Keyword arguments are passed to the function as meta data.
+#  'mode' is optional and is given "Simulator" for a pure simulation
+#  and "Optimizer" for an optimization problem. The purpose is to allow for
+#  different parameter updates for simulations and optimizations.
+#  'replicate' is a dictionary containing the replicate information.
+#  'r' is the RoadRunner instance.
 #
 #  Example:
 #
@@ -16,11 +25,11 @@
 
 
 
-def update_no_parameters(r, replicate, mode):
-    return {}
+def update_no_parameters(r, replicate, mode=None):
+    return
 
-def update_Example(r, replicate, mode):
+def update_Example(r, replicate, mode=None):
     if mode == "Simulator":
         if replicate["amyloid_positive"]:
             r['k_A_to_B'] = 0.2
-    return {}
+    return

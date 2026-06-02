@@ -25,6 +25,8 @@ if __name__ == "__main__":
     run_optimization = True
     run_name = "Example"
 
+    update_antimony_model()
+    
     if run_optimization:
         opt_key      = EXPERIMENT_dict[run_name].get('opt_settings_key', run_name)
         experiment_arg = {

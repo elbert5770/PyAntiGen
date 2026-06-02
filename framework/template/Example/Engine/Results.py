@@ -1,7 +1,8 @@
 """
-Append optimization results as a single row to a CSV file.
+Append optimization results as a single row to a CSV file, and write a
+per-run JSON snapshot alongside it.
 
-Columns written:
+CSV columns written:
   timestamp, model_name, experiment_id, method, success, optimizer_message,
   total_loss, aic, bic,
   {param}                    – optimized value for each parameter
@@ -11,13 +12,34 @@ Columns written:
   wald_corr_{a}_{b}          – Wald off-diagonal correlation for every pair a < b
   profile_CI95_lower_{param} – lower bound of profile likelihood 95% CI
   profile_CI95_upper_{param} – upper bound of profile likelihood 95% CI
+
+JSON file (one per run, timestamped to avoid overwrite):
+  {base}_{YYYYMMDD_HHMMSS}.json   alongside the CSV, with
+    metadata          – timestamp, model_name, experiment_id, method, success,
+                        message, total_loss, aic, bic, n_iter, n_fev
+    parameters        – {name: value} pairs, registry-shaped for direct copy
+                        into Modules/utils/*_registry.py
+    wald_se           – {name: SE}
+    wald_ci95         – {name: [lo, hi]}
+    profile_ci95      – {name: [lo, hi]}
+    wald_correlation  – {"a|b": corr} for every off-diagonal pair (a < b)
 """
 
+import json
 import os
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+
+
+def _finite_or_none(x):
+    """Convert NaN/inf to None so the value is valid strict JSON."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
 
 
 def log_optimization_results(
@@ -62,6 +84,7 @@ def log_optimization_results(
     row["success"]            = opt.get("success", False)
     row["optimizer_message"]  = str(opt.get("message", ""))
     row["total_loss"]         = float(opt.get("fun", float("nan")))
+    row["nll_proper"]         = float(stats.get("nll_proper", float("nan")))
 
     # --- information criteria ------------------------------------------ #
     row["aic"] = float(stats.get("aic", float("nan")))
@@ -140,3 +163,66 @@ def log_optimization_results(
     write_header = not os.path.exists(csv_path)
     df_row.to_csv(csv_path, mode="a", header=write_header, index=False)
     print(f"Optimization results appended to: {csv_path}")
+
+    # ------------------------------------------------------------------ #
+    # Per-run JSON snapshot. The "parameters" block is shaped like the    #
+    # INDEPENDENT_*_REGISTRY dicts in Modules/utils/ so it can be copied   #
+    # directly into the registry source.                                   #
+    # ------------------------------------------------------------------ #
+    ts_compact = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base, _ = os.path.splitext(csv_path)
+    json_path = f"{base}_{ts_compact}.json"
+
+    parameters_dict = {
+        name: _finite_or_none(val) for name, val in zip(param_names, x_opt)
+    }
+
+    wald_se_dict = {
+        name: _finite_or_none(s) for name, s in zip(param_names, se_arr)
+    }
+    wald_ci_dict = {
+        name: [_finite_or_none(lo), _finite_or_none(hi)]
+        for name, (lo, hi) in zip(param_names, ci)
+    }
+    profile_ci_dict = {
+        name: [_finite_or_none(lo), _finite_or_none(hi)]
+        for name, (lo, hi) in zip(param_names, profile_ci)
+    }
+
+    wald_corr_dict = {}
+    if corr is not None:
+        for i, a in enumerate(param_names):
+            for j, b in enumerate(param_names):
+                if j > i:
+                    wald_corr_dict[f"{a}|{b}"] = _finite_or_none(corr[i, j])
+
+    snapshot = {
+        "metadata": {
+            "timestamp":     row["timestamp"],
+            "model_name":    model_name,
+            "experiment_id": experiment_id,
+            "method":        method,
+            "success":       bool(opt.get("success", False)),
+            "message":       str(opt.get("message", "")),
+            "total_loss":    _finite_or_none(opt.get("fun")),
+            "nll_proper":    _finite_or_none(stats.get("nll_proper")),
+            "aic":           _finite_or_none(stats.get("aic")),
+            "bic":           _finite_or_none(stats.get("bic")),
+            "n_iterations":  opt.get("nit"),
+            "n_fevals":      opt.get("nfev"),
+        },
+        "parameters":       parameters_dict,
+        "wald_se":          wald_se_dict,
+        "wald_ci95":        wald_ci_dict,
+        "profile_ci95":     profile_ci_dict,
+        "wald_correlation": wald_corr_dict,
+    }
+
+    if "profile_traces" in stats:
+        snapshot["profile_traces"] = stats["profile_traces"]
+    if "slice_traces" in stats:
+        snapshot["slice_traces"] = stats["slice_traces"]
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, indent=2, allow_nan=False)
+    print(f"Optimization snapshot written to: {json_path}")

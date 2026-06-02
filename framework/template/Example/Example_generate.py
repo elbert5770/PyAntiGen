@@ -25,6 +25,10 @@ def generate_antimony_model(Isotopes=['']):
     print(f"  1. Optionally edit parameters in antimony_models/{MODEL_NAME}/{MODEL_NAME}_parameters.csv")
     print(f"  2. From scripts/{MODEL_NAME}/, run: python {MODEL_NAME}_run.py")
 
-if __name__ == "__main__":
+
+def update_antimony_model():
     Isotopes = ['']
     generate_antimony_model(Isotopes)
+
+if __name__ == "__main__":
+    update_antimony_model()

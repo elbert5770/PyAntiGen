@@ -105,7 +105,7 @@ def _build_experiment():
         "Late": {"params": {"dose": 5, "delay": 10}},
     }
     
-    # Experimental groups are not always necessary but are natural for some
+    # Experimental groups are not required but are natural for some
     # experimental designs. For example, when studying the effect of a treatment
     # in different populations.
     exp_groups = {
@@ -128,6 +128,7 @@ def _build_experiment():
                     "Data":                load_ad_data,
                     "Observed_species":    all_species,
                     "Solver_settings":     solver_settings_Example,
+                    "Update_opt_parameters": update_no_opt_parameters,
                     "Update_parameters":   update_Example,
                     "Loss_config":         Example_loss_config_AD,
                     "Opt_group":           opt_group,
