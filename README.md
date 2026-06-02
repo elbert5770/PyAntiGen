@@ -10,8 +10,12 @@ PyAntiGen is a declarative, object-oriented framework for generating compartment
 - **Isotope Tracking:** Natively supports tracking labeled isotopes and generating corresponding parallel reactions.
 
 ## Installation
+You can install PyAntiGen into your Python environment with:
+```bash
+pip install pyantigen
+```
 
-You can install PyAntiGen globally into your preferred Python environment by cloning this repository and running pip:
+You can also install PyAntiGen globally into your preferred Python environment by cloning this repository and running pip:
 
 ```bash
 git clone https://github.com/elbert5770/PyAntiGen.git
