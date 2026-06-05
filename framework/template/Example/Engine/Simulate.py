@@ -16,39 +16,32 @@ class StackedResult(np.ndarray):
         return super().__getitem__(key)
 
 def save_model_state(r):
-    # Get all assignment rules to exclude them from being set/restored
+    # Cache the state keys on the RoadRunner instance to minimize overhead
     try:
-        assignment_rules = set(r.getAssignmentRuleIds())
-    except Exception:
-        assignment_rules = set()
+        keys = r._cached_state_keys
+    except AttributeError:
+        try:
+            assignment_rules = set(r.getAssignmentRuleIds())
+        except Exception:
+            assignment_rules = set()
+        keys = ['time']
+        keys += [s for s in r.getFloatingSpeciesIds() if s not in assignment_rules]
+        keys += [s for s in r.getBoundarySpeciesIds() if s not in assignment_rules]
+        keys += [s for s in r.getGlobalParameterIds() if s not in assignment_rules]
+        r._cached_state_keys = keys
 
+    prev_selections = r.selections
+    r.selections = keys
+    values = list(r.getSelectedValues())
+    r.selections = prev_selections
+    
     return {
-        "time": r.getValue('time'),
-        "floating_species": {s: r.getValue(s) for s in r.getFloatingSpeciesIds() if s not in assignment_rules},
-        "boundary_species": {s: r.getValue(s) for s in r.getBoundarySpeciesIds() if s not in assignment_rules},
-        "global_parameters": {s: r.getValue(s) for s in r.getGlobalParameterIds() if s not in assignment_rules}
+        "keys": keys,
+        "values": values
     }
 
 def restore_model_state(r, state):
-    try:
-        r.setValue('time', state["time"])
-    except Exception:
-        pass
-    for s, val in state["floating_species"].items():
-        try:
-            r.setValue(s, val)
-        except Exception:
-            pass
-    for s, val in state["boundary_species"].items():
-        try:
-            r.setValue(s, val)
-        except Exception:
-            pass
-    for s, val in state["global_parameters"].items():
-        try:
-            r.setValue(s, val)
-        except Exception:
-            pass
+    r.setValues(state["keys"], state["values"])
 
 def _adjust_settings_for_error(err_msg, cur_abs_tol, cur_rel_tol, cur_max_steps, cur_initial_step):
     """Return updated (abs_tol, rel_tol, max_steps, initial_step) based on the CVODE error message."""
@@ -96,10 +89,12 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
     end = float(end)
     points = int(points)
 
-    # Fast path: try once with whatever settings the model already has. On
-    # success we skip the integrator-attr churn, the time-set, and the full
-    # model-state snapshot — all of which scale with species count and are
-    # the dominant per-call overhead during optimization.
+    # Save original state before any simulation is attempted.
+    # This is critical because if the fast path fails, it leaves the model in a
+    # corrupted/advanced state that cannot be reverted without this snapshot.
+    saved_state = save_model_state(r)
+
+    # Fast path: try once with whatever settings the model already has.
     try:
         res = r.simulate(start, end, points, observed_species)
         return res, {
@@ -112,7 +107,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
         first_err_msg = str(e).lower()
         first_err_str = str(e).strip()
 
-    # Slow path: simulation failed. Now pay the cost to snapshot state, clamp
+    # Slow path: simulation failed. Now pay the cost to restore state, clamp
     # small negatives that may have caused a CVODE ill-defined error, and
     # enter the adaptive retry loop.
     orig_abs_tol = r.integrator.absolute_tolerance
@@ -120,14 +115,16 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
     orig_max_steps = r.integrator.maximum_num_steps
     orig_initial_step = r.integrator.initial_time_step
 
-    # Reset model time and clamp small negative initial values which can cause
-    # CVODE ill-defined errors. Done before save_model_state so the clamped
-    # values become the restore target for subsequent retries.
-    r.setValue('time', start)
+    # Restore the model to the starting state to revert any changes made by the failed attempt
+    restore_model_state(r, saved_state)
+
+    # Clamp small negative initial values which can cause CVODE ill-defined errors.
+    # Done before re-saving so the clamped values become the restore target for subsequent retries.
     for s_id in r.model.getFloatingSpeciesIds():
         if r[s_id] < 1e-12:
             r[s_id] = 0.0
 
+    # Save state again with the clamped values
     saved_state = save_model_state(r)
 
     # Pre-adjust settings using the first error so attempt 2 starts smarter
