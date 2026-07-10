@@ -15,7 +15,7 @@ from Engine.Simulate import simulate
 
 def run_steady_state(model_text, paths, settings):
     
-    rss = TelluriumGen(model_text, paths)
+    rss = TelluriumGen(model_text, paths, settings)
     if settings["Verbose"]:
         print("Steady state: ", rss.steadyState())
         print("getFloatingSpeciesIds: ", rss.getFloatingSpeciesIds())
@@ -56,7 +56,7 @@ def run_steady_state(model_text, paths, settings):
         print(s, rss.getValue(s))
 
 
-def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
+def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=None):
 
     data_path = paths["data_path"]
     repo_root = paths["repo_root"]
@@ -76,9 +76,15 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
 
         full_model_text = model_text + "\n" + events
 
-        r = TelluriumGen(full_model_text, paths)
+        r = TelluriumGen(full_model_text, paths, settings)
 
         replicate["Update_parameters"](r, replicate)
+        if parameter_overrides:
+            for p_name, p_val in parameter_overrides.items():
+                try:
+                    r[p_name] = p_val
+                except Exception:
+                    pass
 
         solver_settings = replicate["Solver_settings"](replicate)
         observed_species = replicate["Observed_species"](r)
@@ -96,7 +102,7 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict):
     EXPERIMENT_dict["plot"](paths,results_dict)
     return results_dict
 
-def setup_simulation(settings, EXPERIMENT_dict):
+def setup_simulation(settings, EXPERIMENT_dict, parameter_overrides=None):
     if settings.get("MODEL_NAME"):
         MODEL_NAME = settings["MODEL_NAME"]
     else:
@@ -108,6 +114,6 @@ def setup_simulation(settings, EXPERIMENT_dict):
     if settings["run_steady_state_first"]:
         run_steady_state(model_text, paths, settings)
 
-    results_dict = run_simulation(model_text, paths, settings, EXPERIMENT_dict)
+    results_dict = run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=parameter_overrides)
 
 

@@ -45,13 +45,13 @@ def _profile_fork_worker(result_queue, param_idx, profile_func):
 # Shared steady-state helper
 # ---------------------------------------------------------------------------
 
-def _run_steady_state(model_text, paths):
+def _run_steady_state(model_text, paths, settings):
     """Compute steady state and update InitialConditions CSV."""
     ic_path = os.path.join(
         paths["repo_root"], "antimony_models",
         paths["MODEL_NAME"], f"{paths['MODEL_NAME']}_InitialConditions.csv",
     )
-    rss = TelluriumGen(model_text, paths)
+    rss = TelluriumGen(model_text, paths, settings)
     print("Steady state:", rss.steadyState())
     if os.path.exists(ic_path):
         df_ic = pd.read_csv(ic_path)
@@ -323,7 +323,7 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
     model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
 
     if settings.get("run_steady_state_first"):
-        _run_steady_state(model_text, paths)
+        _run_steady_state(model_text, paths, settings)
         model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
 
     param_names = optimization_settings["param_names"]
@@ -404,11 +404,47 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
     model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
 
     if settings.get("run_steady_state_first"):
-        _run_steady_state(model_text, paths)
+        _run_steady_state(model_text, paths, settings)
         model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
 
     experiment    = EXPERIMENT_dict["EXPERIMENT"]
     plot_function = EXPERIMENT_dict["plot"]
+
+    # Support for the new decoupled, nested Optimization spec
+    from Modules.Optimizer_settings import Optimization
+    if isinstance(optimization_settings, Optimization):
+        opt = run_optimization_from_groups(
+            model_text, paths, experiment,
+            param_names=optimization_settings.param_names,
+            x0=optimization_settings.x0,
+            bounds=optimization_settings.bounds,
+            method=optimization_settings.method,
+            optimizer_kwargs=optimization_settings.optimizer_kwargs,
+            wald_analysis=settings.get("wald_analysis", False),
+            slice_analysis=settings.get("slice_analysis", False),
+            profile_likelihood_analysis=settings.get("profile_likelihood_analysis", False),
+            optimization_spec=optimization_settings,
+        )
+
+        groups_tag = "_".join(opt.get("groups", ["ALL"]))
+
+        if settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
+            _save_likelihood_slice_plot(opt, optimization_settings.param_names, paths["plot_path"],
+                                        MODEL_NAME, tag=groups_tag)
+        if settings.get("profile_likelihood_analysis") and opt.get("stats", {}).get("profile_likelihood"):
+            _save_profile_likelihood_plot(opt, optimization_settings.param_names, paths["plot_path"],
+                                          MODEL_NAME, tag=groups_tag)
+
+        csv_path = os.path.join(
+            paths["plot_path"],
+            f"{MODEL_NAME}_{groups_tag}_optimization_results.csv",
+        )
+        log_optimization_results(opt, optimization_settings.param_names, csv_path,
+                                 model_name=MODEL_NAME, experiment_id=groups_tag, method=optimization_settings.method)
+
+        if opt.get("results_dict") is not None and plot_function:
+            plot_function(paths, opt["results_dict"])
+        return opt
 
     if _is_per_group_settings(optimization_settings):
         # ── Per-group mode ────────────────────────────────────────────────
@@ -528,6 +564,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if all_results:
             plot_function(paths, all_results)
+        return group_optimizations
 
     else:
         # ── Flat (shared) mode ────────────────────────────────────────────
@@ -584,6 +621,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if opt.get("results_dict") is not None:
             plot_function(paths, opt["results_dict"])
+        return opt
 
 
 def _write_petab_archive(paths, model_name, experiment,

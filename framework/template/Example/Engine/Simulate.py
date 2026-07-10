@@ -71,7 +71,7 @@ def _adjust_settings_for_error(err_msg, cur_abs_tol, cur_rel_tol, cur_max_steps,
     return cur_abs_tol, cur_rel_tol, cur_max_steps, cur_initial_step
 
 
-def safe_simulate(r, solver_settings, observed_species, depth=0):
+def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
     # Extract start, end, points, variable_step_size
     start = solver_settings.get("start")
     if start is None:
@@ -134,7 +134,8 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
         min(max(orig_max_steps, 20000), 400000), orig_initial_step,
     )
 
-    print(f"      [safe_simulate] (Depth {depth}) Initial attempt failed: {first_err_str}")
+    label_prefix = f" [{label}]" if label else ""
+    print(f"      [safe_simulate]{label_prefix} (Depth {depth}) Initial attempt failed: {first_err_str}")
 
     max_attempts = 10
     attempt = 1  # one attempt already burned on the fast path
@@ -155,7 +156,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
         restore_model_state(r, saved_state)
 
         try:
-            print(f"      [safe_simulate] (Depth {depth}) Attempt {attempt}/{max_attempts}: Simulating [{start:.4g} to {end:.4g}] "
+            print(f"      [safe_simulate]{label_prefix} (Depth {depth}) Attempt {attempt}/{max_attempts}: Simulating [{start:.4g} to {end:.4g}] "
                   f"points={points} with abs_tol={cur_abs_tol:.2e}, rel_tol={cur_rel_tol:.2e}, max_steps={cur_max_steps}")
             res = r.simulate(start, end, points, observed_species)
 
@@ -184,7 +185,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
         except Exception as e:
             last_exception = e
             err_msg = str(e).lower()
-            print(f"      [safe_simulate] (Depth {depth}) Attempt {attempt} failed: {str(e).strip()}")
+            print(f"      [safe_simulate]{label_prefix} (Depth {depth}) Attempt {attempt} failed: {str(e).strip()}")
             cur_abs_tol, cur_rel_tol, cur_max_steps, cur_initial_step = _adjust_settings_for_error(
                 err_msg, cur_abs_tol, cur_rel_tol, cur_max_steps, cur_initial_step,
             )
@@ -194,7 +195,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
         mid = (start + end) / 2.0
         p1 = max(2, points // 2)
         p2 = max(2, points - p1)
-        print(f"      [safe_simulate] (Depth {depth}) ALL solver adjustment attempts failed. Subdividing [{start:.4g}, {end:.4g}] "
+        print(f"      [safe_simulate]{label_prefix} (Depth {depth}) ALL solver adjustment attempts failed. Subdividing [{start:.4g}, {end:.4g}] "
               f"into [{start:.4g}, {mid:.4g}] (points={p1}) and [{mid:.4g}, {end:.4g}] (points={p2})")
         
         # Restore to initial state for the first half
@@ -207,7 +208,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
             "n_points": p1,
             "variable_step_size": variable_step_size
         }
-        res1, meta1 = safe_simulate(r, block1, observed_species, depth=depth+1)
+        res1, meta1 = safe_simulate(r, block1, observed_species, depth=depth+1, label=label)
         
         # Simulate second half starting from current state (which is at mid)
         block2 = {
@@ -216,7 +217,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
             "n_points": p2,
             "variable_step_size": variable_step_size
         }
-        res2, meta2 = safe_simulate(r, block2, observed_species, depth=depth+1)
+        res2, meta2 = safe_simulate(r, block2, observed_species, depth=depth+1, label=label)
         
         # Stack results
         colnames = getattr(res1, "colnames", observed_species)
@@ -253,7 +254,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
     except Exception:
         pass
         
-    print(f"      [safe_simulate] (Depth {depth}) CRITICAL: All simulation attempts and subdivision failed for interval [{start:.4g}, {end:.4g}]")
+    print(f"      [safe_simulate]{label_prefix} (Depth {depth}) CRITICAL: All simulation attempts and subdivision failed for interval [{start:.4g}, {end:.4g}]")
     try:
         print(f"      Final Time in model: {r.getValue('time')}")
         sn = r.model.getFloatingSpeciesIds()
@@ -265,7 +266,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0):
         pass
     raise last_exception
 
-def simulate(r, solver_settings, observed_species):
+def simulate(r, solver_settings, observed_species, label=None):
     
     solver_settings["integrator"] = solver_settings.get("integrator", "cvode")
     solver_settings["absolute_tolerance"] = solver_settings.get("absolute_tolerance", 1e-8)
@@ -331,7 +332,7 @@ def simulate(r, solver_settings, observed_species):
             r.integrator.maximum_num_steps = block['maximum_num_steps']
 
         try:
-            res, _ = safe_simulate(r, block, observed_species)
+            res, _ = safe_simulate(r, block, observed_species, label=label)
         except Exception as exc:
             raise RuntimeError(
                 f"Integration failed in block {i} "
