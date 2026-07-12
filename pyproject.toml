@@ -31,3 +31,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/you/PyAntiGen"
+
+[project.scripts]
+pyantigen-create = "framework.cli:create_project"
+
+[tool.setuptools.packages.find]
+include = ["framework*"]
