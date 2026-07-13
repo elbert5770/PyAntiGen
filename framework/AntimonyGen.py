@@ -24,7 +24,7 @@ def AntimonyGen(MODEL_NAME, repo_root=None):
  
     if not model_text.strip():
         raise RuntimeError(
-            f"No model content loaded. Generate the model first: python {MODEL_NAME}_generate.py"
+            "No model content loaded. Generate the model first: python Model_generate.py"
         )
 
     events_path = os.path.join(repo_root, "generated", MODEL_NAME, MODEL_NAME + "_events.txt")

@@ -181,15 +181,14 @@ def create_project():
     os.makedirs(project_generated_dir, exist_ok=True)
     os.makedirs(project_results_dir, exist_ok=True)
 
-    # Copy Example Projects into project folder (MODEL_NAME derived from folder name at runtime)
+    # Copy Model_generate.py / Model_run.py into project folder (MODEL_NAME derived from folder name at runtime)
     if os.path.isdir(example_template):
-        for base in ("Example_generate", "Example_run"):
+        for base in ("Model_generate", "Model_run"):
             src = os.path.join(example_template, base + ".py")
             if os.path.isfile(src):
-                dst_name = project_dir + base[7:]  # "Example_foo" -> "{project_dir}_foo"
-                dst = os.path.join(project_Projects_dir, dst_name + ".py")
+                dst = os.path.join(project_Projects_dir, base + ".py")
                 shutil.copy2(src, dst)
-                print(f"  Created file: Projects/{project_dir}/{dst_name}.py")
+                print(f"  Created file: Projects/{project_dir}/{base}.py")
         
         # Also copy AntiGen_paths.py utility
         paths_src = os.path.join(example_template, "AntiGen_paths.py")

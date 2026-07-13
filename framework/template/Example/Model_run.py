@@ -7,7 +7,7 @@ from Modules.Plots import *
 from Modules.Experiment import get_experiment
 from Modules.Optimizer_settings import OPTIMIZATION_SETTINGS
 from AntiGen_paths import MODEL_NAME
-
+from Model_generate import update_antimony_model
 
 EXPERIMENT_dict = {
     "Example": {'EXPERIMENT': get_experiment('EXPERIMENT_Example'), 'plot': plot_results, 'opt_settings_key': 'Example'},

@@ -7,6 +7,7 @@ from .Loss_config import *
 from .Observed_species import *
 from .Solver_settings import *
 from .Update_parameters import *
+from .Update_opt_parameters import *
 
 from dataclasses import dataclass, field
 
@@ -128,7 +129,7 @@ def _build_experiment():
                     "Data":                load_ad_data,
                     "Observed_species":    all_species,
                     "Solver_settings":     solver_settings_Example,
-                    "Update_opt_parameters": update_no_opt_parameters,
+                    "Update_opt_parameters": update_opt_no_parameters,
                     "Update_parameters":   update_Example,
                     "Loss_config":         Example_loss_config_AD,
                     "Opt_group":           opt_group,

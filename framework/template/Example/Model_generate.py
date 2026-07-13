@@ -1,5 +1,5 @@
 """
-Example model builder. Outputs go to antimony_models/Example/ and generated/Example/.
+Model builder. Outputs go to antimony_models/{MODEL_NAME}/ and generated/{MODEL_NAME}/.
 """
 import os
 import sys
@@ -23,7 +23,7 @@ def generate_antimony_model(Isotopes=['']):
     print("\nModel generated successfully.")
     print("Next steps:")
     print(f"  1. Optionally edit parameters in antimony_models/{MODEL_NAME}/{MODEL_NAME}_parameters.csv")
-    print(f"  2. From scripts/{MODEL_NAME}/, run: python {MODEL_NAME}_run.py")
+    print(f"  2. From Projects/{MODEL_NAME}/, run: python Model_run.py")
 
 
 def update_antimony_model():
