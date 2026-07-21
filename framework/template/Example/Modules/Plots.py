@@ -33,7 +33,7 @@ def plot_results(paths, results_dict):
         time_points = results["time"]
         
         ax.plot(time_points, results["predicted_A"], label=f"[A] {label}", color=color_A[i])
-        ax.plot(time_points, results["predicted_B"], label=f"[B] {label}", color=color_B[i])
+        ax.plot(time_points, results["predicted_B"], label=f"[B] {label}", color=color_B[i], linestyle='--')
         if "time" in data.columns and "B" in data.columns:
             ax.scatter(data["time"], data["B"], color=color_B[i], s=30, zorder=5, label=f"Measured [B] {label}")
             

@@ -23,7 +23,6 @@ from Engine.Optimize import (
     _extract_profile_ci,
 )
 from Modules.Plots import *
-from Engine.Optimize import _run_pypesto_profile_single
 from Engine.Results import log_optimization_results
 from Engine.Petab_export import export_petab
 
@@ -78,9 +77,10 @@ _PROFILE_CI_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
 def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="ALL"):
     """Run profile likelihood once per parameter, extract CIs, and save plot.
 
-    Parallelises across parameters automatically:
-      - Linux / macOS : fork-based multiprocessing.Process (inherits closure, no pickling)
-      - Windows       : ThreadPoolExecutor with per-thread independently-built models
+    Parallelises across parameters on Linux / macOS via fork-based
+    multiprocessing.Process (inherits the closure, including non-picklable
+    RoadRunner objects, via copy-on-write — no serialisation needed). Windows
+    lacks fork, so it falls back to the sequential loop below.
 
     Stores profile_ci into opt['stats']['profile_ci'] so log_optimization_results
     can include it in the CSV when called afterwards.
@@ -103,11 +103,8 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
     cache = {}
 
     _is_posix   = sys.platform != 'win32'
-    _factory    = opt.get("stats", {}).get("nll_fixed_factory")
-    _pstate     = opt.get("stats", {}).get("profile_state")
-    _can_par    = n_params > 1
 
-    if _can_par and _is_posix:
+    if n_params > 1 and _is_posix:
         # ── Linux / macOS: fork each parameter into its own process ──────────
         # Forked children inherit the closure (including non-picklable RoadRunner
         # objects) directly via copy-on-write — no serialisation needed.
@@ -127,57 +124,19 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
             i, pv, nr, err = q.get()
             if err is None:
                 cache[i] = (pv, nr)
-                print(f"  {param_names[i]}: Δ NLL range [{nr.min():.4g}, {nr.max():.4g}]")
+                print(f"  {param_names[i]}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
                 if np.all(np.abs(nr) < 1e-10):
                     print(f"    *** FLAT: model may not respond to {param_names[i]} ***")
             else:
                 print(f"  {param_names[i]}: error — {err}")
 
-    elif _can_par and _factory and _pstate:
-        # ── Windows: thread pool with per-thread rebuilt model instances ──────
-        # RoadRunner objects are not thread-safe; each thread calls _factory()
-        # to get an independent set of models.  Model construction is sequential
-        # (safe), only the pypesto optimisation runs concurrently.
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        res_x        = _pstate["res_x"]
-        bounds       = _pstate["bounds"]
-        nll_at_opt   = _pstate["nll_at_optimum"]
-
-        print(f"  [parallel] building {n_params} model copies for thread pool …", flush=True)
-        nll_funcs = [_factory() for _ in range(n_params)]   # sequential build
-
-        import time as _time
-        _t0 = _time.time()
-
-        def _thread_worker(i):
-            print(f"  [thread {i}] starting {param_names[i]} …", flush=True)
-            result = _run_pypesto_profile_single(
-                i, nll_funcs[i], bounds, res_x, nll_at_opt, param_names)
-            elapsed = _time.time() - _t0
-            print(f"  [thread {i}] done    {param_names[i]}  ({elapsed:.0f}s elapsed)", flush=True)
-            return i, result
-
-        print(f"  [parallel] launching {n_params} profile threads …", flush=True)
-        with ThreadPoolExecutor(max_workers=n_params) as ex:
-            futs = {ex.submit(_thread_worker, i): i for i in range(n_params)}
-            for fut in as_completed(futs):
-                try:
-                    i, (pv, nr) = fut.result()
-                    cache[i] = (pv, nr)
-                    print(f"  {param_names[i]}: Δ NLL range [{nr.min():.4g}, {nr.max():.4g}]", flush=True)
-                    if np.all(np.abs(nr) < 1e-10):
-                        print(f"    *** FLAT: model may not respond to {param_names[i]} ***", flush=True)
-                except Exception as exc:
-                    print(f"  {param_names[futs[fut]]}: error — {exc}", flush=True)
-
     else:
-        # ── Sequential fallback (single param, or Windows without factory) ────
+        # ── Sequential fallback (single param, or non-POSIX platforms) ────────
         for i, pname in enumerate(param_names):
             try:
                 pv, nr = profile_func(i)
                 cache[i] = (pv, nr)
-                print(f"  {pname}: Δ NLL range [{nr.min():.4g}, {nr.max():.4g}]")
+                print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
                 if np.all(np.abs(nr) < 1e-10):
                     print(f"    *** FLAT: model may not respond to {pname} ***")
             except Exception as exc:
@@ -260,7 +219,7 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
             pv, nr = slice_func(i, n_points=20, range_factor=2.0)
             cache[i] = (pv, nr)
             slice_traces[pname] = {"x": pv.tolist(), "y": nr.tolist()}
-            print(f"  {pname}: Δ NLL range [{nr.min():.4g}, {nr.max():.4g}]")
+            print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
             if np.all(np.abs(nr) < 1e-10):
                 print(f"    *** FLAT: model may not respond to {pname} ***")
         except Exception as exc:
@@ -423,6 +382,8 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             wald_analysis=settings.get("wald_analysis", False),
             slice_analysis=settings.get("slice_analysis", False),
             profile_likelihood_analysis=settings.get("profile_likelihood_analysis", False),
+            sobol_analysis=settings.get("sobol_analysis", False),
+            sobol_kwargs={"N": settings.get("sobol_N", 128), "mode": settings.get("sobol_mode", "loss")},
             optimization_spec=optimization_settings,
         )
 
@@ -434,6 +395,9 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
         if settings.get("profile_likelihood_analysis") and opt.get("stats", {}).get("profile_likelihood"):
             _save_profile_likelihood_plot(opt, optimization_settings.param_names, paths["plot_path"],
                                           MODEL_NAME, tag=groups_tag)
+        if settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
+            from Engine.Sensitivity_analysis import save_sobol_plot
+            save_sobol_plot(opt["stats"]["sobol"], paths["plot_path"], MODEL_NAME, tag=groups_tag)
 
         csv_path = os.path.join(
             paths["plot_path"],
@@ -562,7 +526,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             _write_petab_archive(paths, MODEL_NAME, experiment,
                                  optimization_settings, group_optimizations)
 
-        if all_results:
+        if all_results and plot_function:
             plot_function(paths, all_results)
         return group_optimizations
 
@@ -619,7 +583,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             _write_petab_archive(paths, MODEL_NAME, experiment,
                                  optimization_settings, {"__flat__": opt})
 
-        if opt.get("results_dict") is not None:
+        if opt.get("results_dict") is not None and plot_function:
             plot_function(paths, opt["results_dict"])
         return opt
 

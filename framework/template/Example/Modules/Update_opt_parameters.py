@@ -1,20 +1,14 @@
 #  Unlike Update_parameters.py, this function is called at each
-#  iteration of the optimization problem. The purpose is to modify the parameters
-#  in the RoadRunner instance (r) based on the current values of the
-#  parameters being optimized. 'parameters' is a dictionary of the parameters
-#  being optimized. 'parameters' is a dictionary of the parameters
-#  that are being optimized.
+#  iteration of the optimization problem. The purpose is to modify some 
+#  non-optimized parameters that depend upon an optimized parameter.
+#  The parameters are modified in the RoadRunner instance (r).
 #
 #  Use cases: 
-#    1. Some parameters depend on other parameters that are being optimized.
-#    2. Events 
+#    1. Some parameters depend on parameters that are being optimized.
+#    2. Event parameters change depending on experimental design.
+#    
 #
-#  Example 1:
-#
-#      def update_opt_parameters_example(r, experiment, parameters):
-#          r.k_A2_to_B2 = parameters["k_A_to_B"]
-#
-#  Example 2:
+#  Example:
 #
 #      def update_opt_parameters_antibody(r, experiment, parameters):
 #          drug_name = experiment.get("Drug")

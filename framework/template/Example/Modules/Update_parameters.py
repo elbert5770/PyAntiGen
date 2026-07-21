@@ -25,11 +25,15 @@
 
 
 
-def update_no_parameters(r, replicate, mode=None):
+def update_no_parameters(r, replicate):
     return
 
-def update_Example(r, replicate, mode=None):
-    if mode == "Simulator":
-        if replicate["amyloid_positive"]:
-            r['k_A_to_B'] = 0.2
+def update_Example(r, replicate):
+    
+    if replicate["amyloid_positive"]:
+        r['k_A_to_B'] = 0.2
+        print("Replicate: ", replicate["Label"], " k_A_to_B: ", r['k_A_to_B'])
+    else:
+        r['k_A_to_B'] = 0.1
+        print("Replicate: ", replicate["Label"], " k_A_to_B: ", r['k_A_to_B'])
     return

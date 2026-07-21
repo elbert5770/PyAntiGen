@@ -120,7 +120,7 @@ def _build_experiment():
         for treatment_name, treatment_data in treatments.items():
             treatment_params = treatment_data.get("params", {})
 
-            key = f"{exp_group_name}__{treatment_name}"
+            key = f"{exp_group_name}_{treatment_name}"
             
             replicate = make_replicate(
                 {
@@ -131,10 +131,8 @@ def _build_experiment():
                     "Solver_settings":     solver_settings_Example,
                     "Update_opt_parameters": update_opt_no_parameters,
                     "Update_parameters":   update_Example,
-                    "Loss_config":         Example_loss_config_AD,
-                    "Opt_group":           opt_group,
                 },
-                **exp_params, 
+                **exp_params,
                 **treatment_params
             )
             
@@ -153,10 +151,10 @@ EXPERIMENT_Example = _build_experiment()
 # Registry accessors
 # ---------------------------------------------------------------------------
 
-def get_experiments():
-    """Returns a dict mapping experiment name -> experiment dict."""
+def get_EXPERIMENTS():
+    """Returns a dict mapping experiment name -> Experiment."""
     return {k: v for k, v in globals().items() if k.startswith('EXPERIMENT_')}
 
-def get_experiment(name):
-    """Returns an experiment dict by name."""
+def get_EXPERIMENT(name):
+    """Returns a single Experiment by name."""
     return globals().get(name)

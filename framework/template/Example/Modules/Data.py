@@ -25,10 +25,10 @@ def load_ad_data(replicate, data_path):
     df_pos_late = reshape_df(df_pos[df_pos['Treatment'] == 'Late'])
     
     data_dict = {
-        "ADneg__Early": df_neg_early,
-        "ADneg__Late": df_neg_late,
-        "ADpos__Early": df_pos_early,
-        "ADpos__Late": df_pos_late,
+        "ADneg_Early": df_neg_early,
+        "ADneg_Late": df_neg_late,
+        "ADpos_Early": df_pos_early,
+        "ADpos_Late": df_pos_late,
     }
     return data_dict
 

@@ -993,7 +993,7 @@ def _old_run_pypesto_profile_single(
             vals.append(test_val)
             nlls.append(nll_rel)
             
-            print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={test_val:.4g}  Δnll={nll_rel:.6g}", flush=True)
+            print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={test_val:.4g}  dNLL={nll_rel:.6g}", flush=True)
             
             if nll_rel > max_nll:
                 break
@@ -1072,16 +1072,23 @@ def _run_pypesto_profile_single(
         evaluated = [(p_opt, 0.0, np.delete(res_x, param_idx))]
         
         def evaluate_pt(x_target, x_nuisance_guess):
+            if len(x_nuisance_guess) == 0:
+                # No nuisance parameters to re-optimize (single-parameter fit):
+                # the profile value at x_target is just the objective itself.
+                # scipy.optimize.minimize errors on a length-0 x0, so skip it.
+                nll_rel = nuisance_objective(x_nuisance_guess, x_target) - nll_at_optimum
+                print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={x_target:.4g}  dNLL={nll_rel:.6g}", flush=True)
+                return nll_rel, x_nuisance_guess
             res = opt.minimize(
-                nuisance_objective, 
-                x_nuisance_guess, 
+                nuisance_objective,
+                x_nuisance_guess,
                 args=(x_target,),
-                method='L-BFGS-B', 
+                method='L-BFGS-B',
                 bounds=nuisance_bounds,
                 options={'maxiter': 50, 'ftol': 1e-4}
             )
             nll_rel = res.fun - nll_at_optimum
-            print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={x_target:.4g}  Δnll={nll_rel:.6g}", flush=True)
+            print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={x_target:.4g}  dNLL={nll_rel:.6g}", flush=True)
             return nll_rel, res.x
             
         coarse_steps = max(3, n_points // 4)
@@ -1172,70 +1179,6 @@ def _run_pypesto_profile_single(
     return all_vals, all_nlls
 
 
-def _build_group_nll_fixed(model_text, paths, replicates, param_names, fixed_sigmas,
-                           n_points_by_key=None):
-    """Rebuild independent RoadRunner models and return a fresh nll_func_fixed (group path).
-
-    Called once per profile thread on Windows so each thread owns its own models.
-    With fixed_sigmas, loss_function returns the joint NLL (no per-point averaging),
-    so this helper sums those directly — no further /n_pts normalization. The
-    n_points_by_key argument is accepted for backward-compatible call signatures
-    but is intentionally unused on this code path.
-    """
-    from framework.TelluriumGen import TelluriumGen
-    del n_points_by_key  # retained for signature compat; see docstring
-    new_models = {}
-    for key, replicate in replicates.items():
-        df_dict    = replicate["Data"](replicate, paths["data_path"])
-        events_str = replicate["Events"](replicate, df_dict)
-        r          = TelluriumGen(model_text + "\n" + events_str, paths)
-        replicate["Update_parameters"](r, replicate)
-        new_models[key] = {"r": r, "df_dict": df_dict}
-
-    def nll_fixed(p):
-        total_nll = 0.0
-        for key, replicate in replicates.items():
-            lc = replicate.get("Loss_config", no_optimization)
-            effective_lc = lc(replicate)
-            if not effective_lc or not effective_lc.get("observables"):
-                continue
-            total_nll += loss_function(
-                p, new_models[key]["r"], key, replicate,
-                new_models[key]["df_dict"], param_names,
-                effective_lc, fixed_sigmas=fixed_sigmas,
-            )
-        return total_nll
-
-    return nll_fixed
-
-
-def _build_flat_nll_fixed(model_text, paths, experiments, param_names, loss_config, fixed_sigmas):
-    """Rebuild independent RoadRunner models and return a fresh nll_func_fixed (flat path).
-
-    Called once per profile thread on Windows so each thread owns its own models.
-    """
-    from framework.TelluriumGen import TelluriumGen
-    new_models = {}
-    for exp_num, experiment in experiments.items():
-        df_dict    = experiment["Data"](experiment, paths["data_path"])
-        events_str = experiment["Events"](experiment, df_dict)
-        r          = TelluriumGen(model_text + "\n" + events_str, paths)
-        experiment["Update_parameters"](r, experiment)
-        new_models[exp_num] = {"r": r, "df_dict": df_dict}
-
-    def nll_fixed(p):
-        total_nll = 0.0
-        for exp_num, experiment in experiments.items():
-            total_nll += loss_function(
-                p, new_models[exp_num]["r"], exp_num, experiment,
-                new_models[exp_num]["df_dict"], param_names,
-                loss_config, fixed_sigmas=fixed_sigmas,
-            )
-        return total_nll
-
-    return nll_fixed
-
-
 # ---------------------------------------------------------------------------
 # High-level optimization entry point
 # ---------------------------------------------------------------------------
@@ -1272,13 +1215,6 @@ def run_optimization(
         raise ImportError("scipy is required for run_optimization") from None
 
     data_path = paths["data_path"]
-
-    # Pre-warm the centiloid dense ratio cache to avoid thread-safety issues with Tellurium compilation
-    try:
-        from Modules.utils.centiloid_utils import calculate_dense_ratio_77
-        calculate_dense_ratio_77()
-    except Exception as e:
-        print(f"Warning: could not pre-warm centiloid cache: {e}")
 
     # r_ic is only used when events depend on optimizer parameters (dynamic
     # event rebuild path). Skip the second model compile when it is not needed.
@@ -1567,12 +1503,6 @@ def run_optimization(
                     )
 
                 out["stats"]["profile_likelihood"]  = true_profile_likelihood_func
-                out["stats"]["nll_fixed_factory"]   = lambda: _build_flat_nll_fixed(
-                    model_text, paths, experiments, param_names, loss_config, dict(fixed_sigmas))
-                out["stats"]["profile_state"] = {
-                    "res_x": res.x.copy(), "bounds": bounds,
-                    "nll_at_optimum": nll_at_optimum,
-                }
 
             if sobol_analysis:
                 from Engine.Sensitivity_analysis import run_sobol_analysis
@@ -1625,13 +1555,6 @@ def run_optimization_from_groups(
         raise ImportError("scipy is required for run_optimization_from_groups") from None
 
     data_path = paths["data_path"]
-
-    # Pre-warm the centiloid dense ratio cache to avoid thread-safety issues with Tellurium compilation
-    try:
-        from Modules.utils.centiloid_utils import calculate_dense_ratio_77
-        calculate_dense_ratio_77()
-    except Exception as e:
-        print(f"Warning: could not pre-warm centiloid cache: {e}")
 
     # =========================================================================
     # DECOUPLED NESTED SPEC ROUTE
@@ -2150,13 +2073,6 @@ def run_optimization_from_groups(
                             fallback_func=likelihood_slice_func, wald_se_val=wald_se_val
                         )
                     out["stats"]["profile_likelihood"]  = true_profile_likelihood_func
-                    def _thread_build_factory():
-                        return lambda p: nll_func_fixed(p)
-                    out["stats"]["nll_fixed_factory"]   = _thread_build_factory
-                    out["stats"]["profile_state"] = {
-                        "res_x": res.x.copy(), "bounds": bounds,
-                        "nll_at_optimum": nll_at_optimum,
-                    }
             except Exception as e:
                 print(f"Warning: likelihood analysis setup failed: {e}")
 
@@ -2648,13 +2564,6 @@ def run_optimization_from_groups(
                     )
 
                 out["stats"]["profile_likelihood"]  = true_profile_likelihood_func
-                out["stats"]["nll_fixed_factory"]   = lambda: _build_group_nll_fixed(
-                    model_text, paths, replicates, param_names, dict(fixed_sigmas),
-                    dict(n_points_by_key))
-                out["stats"]["profile_state"] = {
-                    "res_x": res.x.copy(), "bounds": bounds,
-                    "nll_at_optimum": nll_at_optimum,
-                }
         except Exception as e:
             print(f"Warning: likelihood analysis setup failed: {e}")
 
