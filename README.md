@@ -27,7 +27,7 @@ pip install -e .
 
 Because PyAntiGen is installed as a system-level Python package, you don't need a copy of the framework files in your working directory. 
 
-To start a brand new modeling workspace, just open a terminal and navigate to a folder where you want it to live (not PyAntiGen) and run:
+To start a brand new modeling workspace, just open a terminal and navigate to a folder where you want your project to live (be careful not to build within the PyAntiGen folder itself) and run:
 
 ```bash
 pyantigen-create MyNewModel
@@ -60,21 +60,32 @@ MyNewModel/
 └── pyantigen_settings.json   (e.g. archive_with_timestamp: false)
 ```
 
-Every project folder under `Projects/` uses the same two entry-point filenames, `Model_generate.py` and `Model_run.py`. `MODEL_NAME` is derived automatically from the enclosing folder name (see `AntiGen_paths.py`), so being in the right project folder is all that's needed to generate/run the correct project. From `MyNewModel/Projects/Example/` run:
+Every project folder under `Projects/` has a script called `Model_generate.py` that is run to generate the model. `MODEL_NAME` is derived automatically from the enclosing folder name (see `AntiGen_paths.py`), so being in the right project folder is all that's needed to generate/run the correct project. From `MyNewModel/Projects/Example/` run:
 
 ```bash
 python Model_generate.py
 ```
 
-This generates the model and writes outputs to `antimony_models/Example/` and `generated/Example/`. Edit parameters if desired in `antimony_models/Example/Example_parameters.csv`, then run:
+This generates the model from the specified files in 'antimony_modules' and writes outputs to `antimony_models/Example/` and `generated/Example/`. This is entirely optional as Model_run.py also calls the constructor functions in `Model_generate.py`.
+
+To run a simulation or optimization, you may edit the parameters in `antimony_models/Example/Example_parameters.csv`, derived parameters in `antimony_models/Example/Example_manual.txt`, and initial conditions in `antimony_models/Example/Example_InitialConditions.csv`.
+
+Then, run `Model_run.py` to simulate the Example in Tellurium/RoadRunner:
 
 ```bash
-python Model_run.py
+python Model_run.py --simulate Example
 ```
 
-Your own model lives under `Projects/MyNewModel/` with the same file names as the Example. Modify the code for your model in `Projects/MyNewModel/Modules/`, `Projects/MyNewModel/Model_generate.py`, and `Projects/MyNewModel/Model_run.py`. Your problem will also require new modules in `antimony_modules/`.
+To run optimization examples use the --optimize flag:
 
-Keeping the generation and simulation steps separate gives you time to adjust parameters and inspect the generated files before running.
+```bash
+python Model_run.py --optimize Example1
+python Model_run.py --optimize Example2
+python Model_run.py --optimize Example3
+```
+
+Your own model lives under `Projects/MyNewModel/`. Modify the code for your model in `Projects/MyNewModel/Modules/`, `Projects/MyNewModel/Model_generate.py`, and `Projects/MyNewModel/Model_run.py`. Your problem will also require new modules in `antimony_modules/` to define the model.
+
 
 ### Running from an IDE (Cursor / VS Code)
 
