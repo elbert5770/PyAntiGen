@@ -79,6 +79,9 @@ if __name__ == "__main__":
                         help="Optimization mode")
     parser.add_argument("--simulate", type=str, choices=list(EXPERIMENT_dict.keys()),
                         help="Simulation mode")
+    parser.add_argument("--no-fit", action="store_true", dest="no_fit",
+                        help="Skip the optimizer and evaluate the spec's x0 instead, "
+                             "then run the requested diagnostics against it.")
 
     args = parser.parse_args()
 
@@ -99,6 +102,7 @@ if __name__ == "__main__":
             "save_SBML?": False,
             "MODEL_NAME": model_name_to_use,
             "slice_analysis": False,
+            "fit_mode": "evaluate_x0" if args.no_fit else "optimize",
         }
         run_settings.update(opt_info.get("diagnostics", {}))
 

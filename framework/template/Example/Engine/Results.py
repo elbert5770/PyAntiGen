@@ -210,6 +210,9 @@ def log_optimization_results(
             "bic":           _finite_or_none(stats.get("bic")),
             "n_iterations":  opt.get("nit"),
             "n_fevals":      opt.get("nfev"),
+            # Recorded so a run is reproducible: fit_mode says whether the
+            # optimizer ran at all, and x0 pins down a randomized multi-start.
+            "fit_mode":      opt.get("fit_mode"),
         },
         "parameters":       parameters_dict,
         "wald_se":          wald_se_dict,
@@ -217,6 +220,19 @@ def log_optimization_results(
         "profile_ci95":     profile_ci_dict,
         "wald_correlation": wald_corr_dict,
     }
+
+    if opt.get("x0") is not None:
+        snapshot["x0"] = {
+            name: _finite_or_none(val)
+            for name, val in zip(param_names, np.atleast_1d(opt["x0"]))
+        }
+    if opt.get("parameter_scale") is not None:
+        snapshot["parameter_scale"] = dict(zip(param_names, opt["parameter_scale"]))
+    if stats.get("curvature_se"):
+        snapshot["curvature_se"] = {
+            name: _finite_or_none(val)
+            for name, val in stats["curvature_se"].items()
+        }
 
     if "profile_traces" in stats:
         snapshot["profile_traces"] = stats["profile_traces"]

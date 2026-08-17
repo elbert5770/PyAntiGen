@@ -11,6 +11,11 @@ class Optimization:
     group_normalization: str = "mean_over_groups"  # "mean_over_groups" | "sum_over_groups"
     groups: dict = field(default_factory=dict)       # nested group/loss configuration
     passive_simulations: list = field(default_factory=list) # passive simulations to run for plotting
+    # Per-parameter optimizer scale: None/"lin" keeps the parameter linear,
+    # "log10" fits log10(p) instead. Accepts a single string for all parameters,
+    # a {name: scale} dict, or a list aligned with param_names. x0 and bounds
+    # stay in linear units; so does everything reported back.
+    parameter_scale: object = None
 
 
 def _build_example_opt1_ADpos():

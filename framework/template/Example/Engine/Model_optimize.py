@@ -74,6 +74,25 @@ def _run_steady_state(model_text, paths, settings):
 _PROFILE_CI_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
 
 
+def _shutdown_evaluator(opt):
+    """Close the worker pool once the diagnostic closures have been consumed.
+
+    run_optimization_from_groups cannot close it itself: the profile/slice
+    closures it returns are called from here, after it returns.
+    """
+    if not isinstance(opt, dict):
+        return
+    ev = opt.get("stats", {}).pop("_evaluator", None)
+    if ev is None:
+        return
+    try:
+        print(f"[pool] shutting down after {ev.n_evals} evaluation(s)"
+              + (f", {ev.n_failures} failed" if ev.n_failures else ""))
+        ev.shutdown()
+    except Exception as exc:
+        print(f"[pool] shutdown warning: {exc}")
+
+
 def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="ALL"):
     """Run profile likelihood once per parameter, extract CIs, and save plot.
 
@@ -102,9 +121,35 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
     print("\nProfile likelihood:")
     cache = {}
 
+    # Preferred path: the parallel, checkpointed grid. It replaces both the
+    # fork-only branch below (which never ran on Windows) and the sequential
+    # fallback, and it is resumable.
+    profile_all = opt.get("stats", {}).get("profile_likelihood_all")
+    if profile_all is not None:
+        try:
+            traces = profile_all()
+            for i, pname in enumerate(param_names):
+                if pname not in traces:
+                    continue
+                pv, nr = traces[pname]
+                if len(pv) < 2:
+                    print(f"  {pname}: too few points to profile")
+                    continue
+                cache[i] = (np.asarray(pv), np.asarray(nr))
+                print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
+                if np.all(np.abs(nr) < 1e-10):
+                    print(f"    *** FLAT: model may not respond to {pname} ***")
+        except Exception as exc:
+            import traceback
+            print(f"  parallel profile failed ({exc}); falling back.")
+            traceback.print_exc()
+            cache = {}
+
     _is_posix   = sys.platform != 'win32'
 
-    if n_params > 1 and _is_posix:
+    if cache:
+        pass  # parallel grid already produced every trace
+    elif n_params > 1 and _is_posix:
         # ── Linux / macOS: fork each parameter into its own process ──────────
         # Forked children inherit the closure (including non-picklable RoadRunner
         # objects) directly via copy-on-write — no serialisation needed.
@@ -214,11 +259,27 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
     print("\nLikelihood slice:")
     cache = {}
     slice_traces = {}
+
+    # Prefer the all-parameter form: it submits k x n_points evaluations as a
+    # single batch, so a 24-core pool is fully fed. Going parameter-by-parameter
+    # caps the batch at n_points (20), leaving most workers idle.
+    slice_all = opt.get("stats", {}).get("likelihood_slice_all")
+    results = None
+    if slice_all is not None:
+        try:
+            results = slice_all(n_points=20, range_factor=2.0)
+        except Exception as exc:
+            print(f"  batched slice failed ({exc}); falling back per parameter.")
+
     for i, pname in enumerate(param_names):
         try:
-            pv, nr = slice_func(i, n_points=20, range_factor=2.0)
+            if results is not None and pname in results:
+                pv, nr = results[pname]
+            else:
+                pv, nr = slice_func(i, n_points=20, range_factor=2.0)
             cache[i] = (pv, nr)
-            slice_traces[pname] = {"x": pv.tolist(), "y": nr.tolist()}
+            slice_traces[pname] = {"x": np.asarray(pv).tolist(),
+                                   "y": np.asarray(nr).tolist()}
             print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
             if np.all(np.abs(nr) < 1e-10):
                 print(f"    *** FLAT: model may not respond to {pname} ***")
@@ -307,10 +368,12 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
         wald_analysis=optimization_settings.get("wald_analysis", False),
         slice_analysis=optimization_settings.get("slice_analysis", False),
         profile_likelihood_analysis=optimization_settings.get("profile_likelihood_analysis", False),
+        fast_profile_likelihood_analysis=optimization_settings.get("fast_profile_likelihood_analysis", False),
         sobol_analysis=optimization_settings.get("sobol_analysis", False),
         sobol_kwargs={"N": optimization_settings.get("sobol_N", 128), "mode": optimization_settings.get("sobol_mode", "loss")},
         method=method,
         optimizer_kwargs=opt_kwargs,
+        fit_mode=settings.get("fit_mode"),
     )
     print(f"Optimization success: {opt['success']}  loss: {opt['fun']:.6g}")
 
@@ -323,7 +386,7 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
 
     if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
         _save_likelihood_slice_plot(opt, param_names, paths["plot_path"], MODEL_NAME)
-    if optimization_settings.get("profile_likelihood_analysis") and opt["stats"].get("profile_likelihood"):
+    if (optimization_settings.get("profile_likelihood_analysis") or optimization_settings.get("fast_profile_likelihood_analysis")) and opt["stats"].get("profile_likelihood"):
         _save_profile_likelihood_plot(opt, param_names, paths["plot_path"], MODEL_NAME)
     if optimization_settings.get("sobol_analysis") and opt["stats"].get("sobol"):
         from Engine.Sensitivity_analysis import save_sobol_plot
@@ -382,9 +445,13 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             wald_analysis=settings.get("wald_analysis", False),
             slice_analysis=settings.get("slice_analysis", False),
             profile_likelihood_analysis=settings.get("profile_likelihood_analysis", False),
+            fast_profile_likelihood_analysis=settings.get("fast_profile_likelihood_analysis", False),
             sobol_analysis=settings.get("sobol_analysis", False),
             sobol_kwargs={"N": settings.get("sobol_N", 128), "mode": settings.get("sobol_mode", "loss")},
             optimization_spec=optimization_settings,
+            fit_mode=settings.get("fit_mode"),
+            n_workers=settings.get("n_workers"),
+            profile_checkpoint=settings.get("profile_checkpoint", True),
         )
 
         groups_tag = "_".join(opt.get("groups", ["ALL"]))
@@ -392,7 +459,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
         if settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, optimization_settings.param_names, paths["plot_path"],
                                         MODEL_NAME, tag=groups_tag)
-        if settings.get("profile_likelihood_analysis") and opt.get("stats", {}).get("profile_likelihood"):
+        if (settings.get("profile_likelihood_analysis") or settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
             _save_profile_likelihood_plot(opt, optimization_settings.param_names, paths["plot_path"],
                                           MODEL_NAME, tag=groups_tag)
         if settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
@@ -408,6 +475,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if opt.get("results_dict") is not None and plot_function:
             plot_function(paths, opt["results_dict"])
+        _shutdown_evaluator(opt)
         return opt
 
     if _is_per_group_settings(optimization_settings):
@@ -442,8 +510,11 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                     wald_analysis=group_settings.get("wald_analysis", False),
                     slice_analysis=group_settings.get("slice_analysis", False),
                     profile_likelihood_analysis=group_settings.get("profile_likelihood_analysis", False),
+                    fast_profile_likelihood_analysis=group_settings.get("fast_profile_likelihood_analysis", False),
                     sobol_analysis=group_settings.get("sobol_analysis", False),
                     sobol_kwargs={"N": group_settings.get("sobol_N", 128), "mode": group_settings.get("sobol_mode", "loss")},
+                    fit_mode=group_settings.get("fit_mode", settings.get("fit_mode")),
+                    n_workers=group_settings.get("n_workers", settings.get("n_workers")),
                 )
             except Exception as e:
                 print(f"Warning: optimization for '{group_name}' failed: {e}")
@@ -463,7 +534,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             if group_settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
                 _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
                                             MODEL_NAME, tag=group_name)
-            if group_settings.get("profile_likelihood_analysis") and opt.get("stats", {}).get("profile_likelihood"):
+            if (group_settings.get("profile_likelihood_analysis") or group_settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
                 _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
                                               MODEL_NAME, tag=group_name)
             if group_settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
@@ -528,6 +599,8 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if all_results and plot_function:
             plot_function(paths, all_results)
+        for _o in group_optimizations.values():
+            _shutdown_evaluator(_o)
         return group_optimizations
 
     else:
@@ -554,8 +627,11 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             wald_analysis=optimization_settings.get("wald_analysis", False),
             slice_analysis=optimization_settings.get("slice_analysis", False),
             profile_likelihood_analysis=optimization_settings.get("profile_likelihood_analysis", False),
+            fast_profile_likelihood_analysis=optimization_settings.get("fast_profile_likelihood_analysis", False),
             sobol_analysis=optimization_settings.get("sobol_analysis", False),
             sobol_kwargs={"N": optimization_settings.get("sobol_N", 128), "mode": optimization_settings.get("sobol_mode", "loss")},
+            fit_mode=optimization_settings.get("fit_mode", settings.get("fit_mode")),
+            n_workers=optimization_settings.get("n_workers", settings.get("n_workers")),
         )
 
         groups_tag = "_".join(opt.get("groups", ["ALL"]))
@@ -564,7 +640,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
         if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
                                         MODEL_NAME, tag=groups_tag)
-        if optimization_settings.get("profile_likelihood_analysis") and opt["stats"].get("profile_likelihood"):
+        if (optimization_settings.get("profile_likelihood_analysis") or optimization_settings.get("fast_profile_likelihood_analysis")) and opt["stats"].get("profile_likelihood"):
             _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
                                           MODEL_NAME, tag=groups_tag)
         if optimization_settings.get("sobol_analysis") and opt["stats"].get("sobol"):
@@ -585,6 +661,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if opt.get("results_dict") is not None and plot_function:
             plot_function(paths, opt["results_dict"])
+        _shutdown_evaluator(opt)
         return opt
 
 

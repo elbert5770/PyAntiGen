@@ -749,6 +749,134 @@ def loss_function(
 
 
 # ---------------------------------------------------------------------------
+# Group-structured NLL (module level so worker processes can call it)
+# ---------------------------------------------------------------------------
+
+def simulate_active_replicates(
+    p_dict, models, replicates, param_names,
+    model_text=None, paths=None, events_dynamic=False,
+):
+    """Run every replicate in *replicates* at *p_dict*; return {name: result item}.
+
+    Returns None if any simulation fails, which callers translate into the
+    failure sentinel. Kept module level so both the in-process path and pool
+    workers run byte-identical code -- if these ever diverged, a parallel run
+    would silently disagree with a serial one.
+    """
+    results = {}
+    for sim_name, replicate in replicates.items():
+        m = models[sim_name]
+        try:
+            if events_dynamic:
+                r_ic = m["r_ic"]
+                r_ic.reset()
+                set_parameters_from_dict(r_ic, p_dict)
+                try:
+                    events_str = replicate["Events"](replicate, m["df_dict"], r_ic=r_ic)
+                except TypeError:
+                    events_str = replicate["Events"](replicate, m["df_dict"])
+                r_to_use = TelluriumGen(model_text + "\n" + events_str, paths)
+                r_proxy = OptRoadRunnerProxy(r_to_use, param_names)
+                replicate["Update_parameters"](r_proxy, replicate)
+            else:
+                m["r"].reset()
+                r_to_use = m["r"]
+            run_res = run_all(r_to_use, sim_name, replicate, m["df_dict"],
+                              set_parameters=set_parameters_from_dict,
+                              parameters=p_dict)
+            results[sim_name] = run_res[sim_name]
+        except Exception as e:
+            print(f"Error evaluating fixed simulation '{sim_name}': {e}")
+            return None
+    return results
+
+
+def accumulate_group_nll(
+    sim_results, groups, group_normalization, replicates, param_names,
+    p_lin, p_dict, fixed_sigmas=None, trace_collector=None, loss_components=None,
+):
+    """Combine per-simulation losses into the group-weighted total."""
+    total = 0.0
+    for g_name, g_config in groups.items():
+        g_loss_sum = 0.0
+        g_weight_sum = 0.0
+        for idx, elem in enumerate(g_config.get("loss_elements", [])):
+            elem_weight = elem.get("weight", 1.0)
+            lc_fn = elem.get("loss_config")
+
+            is_composite = elem.get("type") == "composite" or "simulations" in elem
+            if is_composite:
+                sub_sims = elem.get("simulations", [])
+                sub_results = [
+                    {
+                        "results": sim_results[s]["results"],
+                        "replicate": replicates[s],
+                        "df_dict": sim_results[s]["data"],
+                    }
+                    for s in sub_sims if s in sim_results
+                ]
+                data_sim = elem.get("data_simulation") or (sub_sims[0] if sub_sims else None)
+                if not sub_results or data_sim not in sim_results:
+                    continue
+                lc = lc_fn(replicates[data_sim]) if callable(lc_fn) else lc_fn
+                key = f"{g_name}_composite_{idx}"
+                loss_val = loss_function_composite(
+                    p_lin, sub_results, sim_results[data_sim]["data"],
+                    key, elem, param_names,
+                    loss_config=lc, fixed_sigmas=fixed_sigmas,
+                    trace_collector=trace_collector,
+                )
+            else:
+                sim = elem.get("simulation")
+                if sim not in sim_results:
+                    continue
+                lc = lc_fn(replicates[sim]) if callable(lc_fn) else lc_fn
+                key = sim
+                loss_val = loss_function_evaluated(
+                    p_dict, {sim: sim_results[sim]}, param_names,
+                    loss_config=lc, fixed_sigmas=fixed_sigmas,
+                    trace_collector=trace_collector,
+                )
+
+            if loss_components is not None:
+                loss_components[key] = loss_val * elem_weight
+            g_loss_sum += loss_val * elem_weight
+            g_weight_sum += elem_weight
+
+        if g_weight_sum > 0:
+            g_loss = (g_loss_sum / g_weight_sum
+                      if group_normalization == "mean_over_groups" else g_loss_sum)
+        else:
+            g_loss = 0.0
+        total += g_loss * g_config.get("group_weight", 1.0)
+    return total
+
+
+def evaluate_nll_fixed(
+    p, models, replicates, param_names, scales, groups, group_normalization,
+    fixed_sigmas, model_text=None, paths=None, events_dynamic=False,
+    failure_value=1e10,
+):
+    """Proper joint NLL at *p* (optimizer space) with sigmas frozen at the optimum.
+
+    This is the function every diagnostic consumes -- Wald, slice, profile,
+    Sobol -- and the one the parallel pool evaluates in worker processes.
+    """
+    p_lin = _to_linear(p, scales)
+    p_dict = dict(zip(param_names, p_lin.tolist()))
+    sim_results = simulate_active_replicates(
+        p_dict, models, replicates, param_names,
+        model_text=model_text, paths=paths, events_dynamic=events_dynamic,
+    )
+    if sim_results is None:
+        return failure_value
+    return accumulate_group_nll(
+        sim_results, groups, group_normalization, replicates, param_names,
+        p_lin, p_dict, fixed_sigmas=fixed_sigmas,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Hessian utilities
 # ---------------------------------------------------------------------------
 
@@ -760,14 +888,93 @@ def compute_hessian_numdifftools(func, params):
         warnings.warn(f"Error computing Hessian with numdifftools: {e}")
         return compute_hessian_manual(func, params)
 
-def compute_hessian_manual(func, params, epsilon=1e-5):
+def _finite_difference_steps(params, epsilon=1e-4, abs_floor=None):
+    """Per-parameter step for central differences.
+
+    **Relative**, not absolute. The obvious rule -- ``eps * max(|p|, 1.0)``,
+    which compute_hessian_manual uses -- degenerates into a fixed 1e-5 step for
+    every parameter below 1.0. PBPK rate constants routinely sit at 1e-8 or
+    smaller (AGGREGATION_BOUNDS reaches 1e-12), so that step is many orders of
+    magnitude larger than the parameter: it pushes the value negative, trips the
+    ``p <= 0`` guard, and the stencil comes back as a wall of 1e10 sentinels --
+    a garbage Hessian, or a very slow one as safe_simulate fights to integrate
+    absurd parameter sets.
+
+    epsilon defaults to 1e-4, near the optimum for second differences
+    (round-off ~ macheps/h^2 balanced against truncation ~ h^2).
+
+    Fitting in log space makes this moot -- every parameter is then O(1) -- which
+    is one more reason to prefer parameter_scale="log10" for rate constants.
+    """
+    params = np.atleast_1d(np.asarray(params, dtype=float))
+    if abs_floor is None:
+        # Only a guard against a literally zero step -- it must never exceed a
+        # relative step, or it reintroduces the absolute-step bug it replaced.
+        abs_floor = np.finfo(float).tiny
+    steps = epsilon * np.abs(params)
+    # Parameters sitting exactly at zero have no scale of their own; fall back
+    # to the typical magnitude of the rest of the vector.
+    nonzero = np.abs(params[np.abs(params) > 0])
+    fallback = epsilon * (float(np.median(nonzero)) if nonzero.size else 1.0)
+    steps[steps <= 0] = max(fallback, abs_floor)
+    return np.maximum(steps, abs_floor)
+
+
+def compute_hessian_batched(nll_batch, params, epsilon=1e-4):
+    """Central-difference Hessian evaluated as one batch.
+
+    The stencil is fixed in advance -- 1 centre, 2k diagonal points and 4 points
+    per off-diagonal pair -- so every evaluation can be submitted at once
+    instead of trickling through numdifftools one call at a time. That is
+    2k^2 + 1 evaluations with no dependencies, which is exactly what the pool
+    is for.
+    """
+    params = np.atleast_1d(np.asarray(params, dtype=float))
+    n = params.size
+    steps = _finite_difference_steps(params, epsilon)
+
+    points = [params.copy()]           # index 0: centre
+    index = {}
+
+    for i in range(n):
+        p_plus = params.copy(); p_plus[i] += steps[i]
+        p_minus = params.copy(); p_minus[i] -= steps[i]
+        index[("d", i)] = (len(points), len(points) + 1)
+        points += [p_plus, p_minus]
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            pp = params.copy(); pp[i] += steps[i]; pp[j] += steps[j]
+            pm = params.copy(); pm[i] += steps[i]; pm[j] -= steps[j]
+            mp = params.copy(); mp[i] -= steps[i]; mp[j] += steps[j]
+            mm = params.copy(); mm[i] -= steps[i]; mm[j] -= steps[j]
+            index[("o", i, j)] = tuple(range(len(points), len(points) + 4))
+            points += [pp, pm, mp, mm]
+
+    vals = np.asarray(nll_batch(points, label="hessian"), dtype=float)
+    f0 = vals[0]
+
+    hessian = np.zeros((n, n))
+    for i in range(n):
+        a, b = index[("d", i)]
+        hessian[i, i] = (vals[a] - 2.0 * f0 + vals[b]) / (steps[i] ** 2)
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b, c, d = index[("o", i, j)]
+            val = (vals[a] - vals[b] - vals[c] + vals[d]) / (4.0 * steps[i] * steps[j])
+            hessian[i, j] = hessian[j, i] = val
+    return hessian
+
+
+def compute_hessian_manual(func, params, epsilon=1e-4):
     n = len(params)
     hessian = np.zeros((n, n))
     f0 = func(params)
+    steps = _finite_difference_steps(params, epsilon)
     for i in range(n):
         params_plus  = np.array(params, copy=True)
         params_minus = np.array(params, copy=True)
-        step = epsilon * max(abs(params[i]), 1.0)
+        step = steps[i]
         params_plus[i]  += step
         params_minus[i] -= step
         hessian[i, i] = (func(params_plus) - 2*f0 + func(params_minus)) / (step**2)
@@ -775,8 +982,8 @@ def compute_hessian_manual(func, params, epsilon=1e-5):
         for j in range(i+1, n):
             pp = np.array(params, copy=True); pm = np.array(params, copy=True)
             mp = np.array(params, copy=True); mm = np.array(params, copy=True)
-            si = epsilon * max(abs(params[i]), 1.0)
-            sj = epsilon * max(abs(params[j]), 1.0)
+            si = steps[i]
+            sj = steps[j]
             pp[i] += si; pp[j] += sj
             pm[i] += si; pm[j] -= sj
             mp[i] -= si; mp[j] += sj
@@ -796,6 +1003,360 @@ def compute_parameter_correlations(cov_matrix):
         return None
 
 
+def compute_wald_uncertainty(nll_func, x, bounds=None, loss_scale=1.0, alpha=0.05,
+                             nll_batch=None):
+    """
+    Wald standard errors and confidence intervals from the numerically
+    differentiated Hessian of *nll_func* at *x*.
+
+    The Hessian of the negative log-likelihood is the observed Fisher
+    information, so the covariance matrix is its inverse.  A non-positive-
+    definite Hessian means at least one direction in parameter space is flat or
+    confounded; rather than giving up entirely we fall back to a pseudo-inverse,
+    which keeps usable SEs for the well-determined parameters and produces huge
+    or NaN SEs for the degenerate ones.  That is the informative answer — a
+    parameter whose SE cannot be computed is itself the finding.
+
+    Parameters
+    ----------
+    nll_func : callable(array) -> float
+        Proper joint NLL, i.e. ``nll_func_fixed`` with sigmas frozen at the
+        optimum.  Passing the optimizer's rescaled objective instead would give
+        SEs in the wrong units.
+    x : array
+        Parameter vector at the optimum, in whatever space *nll_func* expects.
+    bounds : sequence of (lo, hi) or None
+        Used only to clip the reported CIs; a clipped bound is reported so the
+        caller can tell a genuinely tight interval from a truncated one.
+    loss_scale : float
+        Divides the Fisher information.  Leave at 1.0 when *nll_func* is a true
+        NLL; set it when the objective is a known multiple of the NLL.
+    alpha : float
+        1 - confidence level.  0.05 gives the 95% interval.
+
+    Returns
+    -------
+    (cov, se, ci)
+        ``cov`` is the (k, k) covariance matrix or None; ``se`` is a length-k
+        array (entries may be NaN) or None; ``ci`` is always a length-k list of
+        (lo, hi) tuples, NaN-filled where the SE is unavailable.
+    """
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    k = x.size
+    nan_ci = [(float("nan"), float("nan"))] * k
+
+    n_evals = 2 * k * k + 2 * k + 1
+    print(f"\n[Wald] Computing Hessian for {k} parameter(s) "
+          f"(~{n_evals} silent NLL evaluations)...")
+
+    try:
+        if nll_batch is not None:
+            hessian_raw = compute_hessian_batched(nll_batch, x)
+        else:
+            hessian_raw = compute_hessian_numdifftools(nll_func, x)
+    except Exception as exc:
+        print(f"[Wald] Hessian computation failed: {exc}")
+        return None, None, nan_ci
+
+    hessian = np.asarray(hessian_raw, dtype=float)
+    if hessian.shape != (k, k):
+        print(f"[Wald] Hessian has unexpected shape {hessian.shape}, expected {(k, k)}.")
+        return None, None, nan_ci
+    if not np.all(np.isfinite(hessian)):
+        print("[Wald] Hessian contains non-finite entries — the NLL is probably "
+              "hitting a failure sentinel near the optimum. Cannot compute SEs.")
+        return None, None, nan_ci
+
+    # Symmetrize: finite differences make H slightly asymmetric.
+    fisher = 0.5 * (hessian + hessian.T) / float(loss_scale)
+
+    eigvals, eigvecs = np.linalg.eigh(fisher)
+    scale_ref = max(float(np.max(np.abs(eigvals))), 1e-300)
+    # Directions whose curvature is negligible relative to the stiffest one are
+    # unconstrained by the data: flat or exactly confounded.
+    null_mask = eigvals <= 1e-8 * scale_ref
+    unconstrained = np.zeros(k, dtype=bool)
+
+    if np.any(null_mask):
+        print(f"[Wald] Hessian is NOT positive definite / is rank deficient "
+              f"(min eigenvalue {eigvals.min():.4g}, largest {scale_ref:.4g}) — "
+              f"{int(null_mask.sum())} of {k} direction(s) are flat or confounded.")
+        # A pseudo-inverse would hand back a finite, minimum-norm variance for
+        # those directions, which reads as a tight CI for a parameter the data
+        # cannot pin down at all. Identify which parameters participate in the
+        # null space and report no SE for them instead.
+        involvement = np.sqrt(np.sum(eigvecs[:, null_mask] ** 2, axis=1))
+        unconstrained = involvement > 0.1
+        cov = np.linalg.pinv(fisher)
+    else:
+        try:
+            cov = np.linalg.inv(fisher)
+        except np.linalg.LinAlgError as exc:
+            print(f"[Wald] Hessian inversion failed ({exc}); using pseudo-inverse.")
+            cov = np.linalg.pinv(fisher)
+
+    diag = np.asarray(np.diag(cov), dtype=float)
+    se = np.full(k, np.nan)
+    negative = diag < 0
+    if np.any(negative):
+        print(f"[Wald] Negative variance for parameter index/indices "
+              f"{np.flatnonzero(negative).tolist()} — no SE for those.")
+    if np.any(unconstrained):
+        print(f"[Wald] Parameter index/indices {np.flatnonzero(unconstrained).tolist()} "
+              f"lie in a flat/confounded direction — reporting no SE rather than a "
+              f"pseudo-inverse value that would look deceptively tight.")
+    ok = ~negative & ~unconstrained & np.isfinite(diag)
+    se[ok] = np.sqrt(diag[ok])
+
+    cv = stats.norm.ppf(1.0 - alpha / 2.0)
+    ci = []
+    clipped = []
+    for i in range(k):
+        if not np.isfinite(se[i]):
+            ci.append((float("nan"), float("nan")))
+            continue
+        lo = x[i] - cv * se[i]
+        hi = x[i] + cv * se[i]
+        if bounds is not None and i < len(bounds) and bounds[i] is not None:
+            b_lo, b_hi = bounds[i]
+            if b_lo is not None and lo < b_lo:
+                lo = b_lo
+                clipped.append(i)
+            if b_hi is not None and hi > b_hi:
+                hi = b_hi
+                clipped.append(i)
+        ci.append((float(lo), float(hi)))
+
+    if clipped:
+        print(f"[Wald] CI clipped at the declared bounds for parameter "
+              f"index/indices {sorted(set(clipped))} — the interval is at least "
+              f"this wide, so widen the bounds if you need the true extent.")
+
+    return cov, se, ci
+
+
+def _attach_wald_stats(out, nll_func, x, bounds, param_names=None, scales=None,
+                       nll_batch=None):
+    """Compute Wald statistics and store them in ``out["stats"]``.
+
+    Shared by all optimization routes so they cannot drift apart again.  When
+    *scales* is given the Hessian is taken in the optimizer's (possibly log10)
+    space and the results are converted back to linear units for reporting —
+    see :func:`_transform_wald_to_linear`.
+    """
+    try:
+        cov, se, ci = compute_wald_uncertainty(nll_func, x, bounds=bounds,
+                                               nll_batch=nll_batch)
+        corr = compute_parameter_correlations(cov) if cov is not None else None
+        if scales is not None:
+            se, ci = _transform_wald_to_linear(se, ci, x, scales)
+        out["stats"]["wald_cov"] = cov
+        out["stats"]["wald_se"] = se
+        out["stats"]["wald_ci"] = ci
+        if corr is not None:
+            out["stats"]["wald_correlation"] = corr
+        if se is not None and param_names is not None:
+            n_bad = int(np.sum(~np.isfinite(np.asarray(se, dtype=float))))
+            if n_bad:
+                bad_names = [
+                    p for p, s in zip(param_names, np.asarray(se, dtype=float))
+                    if not np.isfinite(s)
+                ]
+                print(f"[Wald] No usable SE for {n_bad} parameter(s): {bad_names}")
+    except Exception as e:
+        print(f"Error computing Wald statistics: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Parameter scaling (linear / log10)
+# ---------------------------------------------------------------------------
+#
+# PBPK/QSP rate constants routinely span many orders of magnitude, and the
+# bounds in Optimizer_settings.py are multiplicative (val/10, val*10).  Fitting
+# log10(p) instead of p makes those bounds symmetric, conditions the problem so
+# Nelder-Mead and L-BFGS-B both behave, makes a "+/-10%" probe scale-free, and
+# removes the p <= 0 cliff entirely because 10**q is positive by construction.
+#
+# The optimizer, the Hessian, the slice and the profile walkers all work in
+# "opt space"; everything reported to the user -- opt["x"], plots, CIs, CSV and
+# JSON -- is converted back to linear units first.  Default is "lin" so specs
+# that say nothing behave exactly as before.
+
+_VALID_SCALES = ("lin", "log10")
+_LN10 = np.log(10.0)
+
+_VALID_FIT_MODES = ("optimize", "evaluate_x0")
+
+# Keys authors may place in optimizer_kwargs that configure the engine rather
+# than scipy. They must be stripped before any call to scipy.optimize.
+_ENGINE_ONLY_OPTIMIZER_KEYS = (
+    "events_depend_on_opt_param",
+    "profile_without_opt",      # deprecated, superseded by run_settings["fit_mode"]
+    "profile_method",
+    "profile_optimizer_kwargs",
+)
+
+
+def _resolve_fit_mode(fit_mode, optimizer_kwargs):
+    """Decide whether to run the optimizer or just evaluate the starting point.
+
+    ``fit_mode`` belongs to run_settings -- it is a per-run decision ("today,
+    skip the fit and just profile the stored parameters"), not a property of the
+    optimization spec, and it is not a scipy argument.  The old
+    ``profile_without_opt`` key inside optimizer_kwargs is still honoured, with a
+    notice, so existing specs keep working.
+    """
+    legacy = bool((optimizer_kwargs or {}).get("profile_without_opt", False))
+    if fit_mode is None:
+        if legacy:
+            print("[opt] NOTE: 'profile_without_opt' in optimizer_kwargs is deprecated. "
+                  "Set run_settings[\"fit_mode\"] = \"evaluate_x0\", or pass --no-fit, "
+                  "so the choice lives with the run rather than the spec.")
+            return "evaluate_x0"
+        return "optimize"
+    if fit_mode not in _VALID_FIT_MODES:
+        raise ValueError(
+            f"Unknown fit_mode {fit_mode!r}; expected one of {_VALID_FIT_MODES}"
+        )
+    if legacy and fit_mode == "optimize":
+        print("[opt] NOTE: fit_mode='optimize' from run_settings overrides the "
+              "deprecated profile_without_opt=True in this spec.")
+    return fit_mode
+
+
+def _resolve_profile_optimizer(method, optimizer_kwargs):
+    """Method and kwargs for the profile-likelihood nuisance re-optimization.
+
+    Defaults to the spec's own ``method`` rather than a hardcoded L-BFGS-B: a
+    gradient method reads the 1e10 failure sentinel as a cliff and stalls at the
+    start point, which looks exactly like an unidentifiable parameter.  Override
+    per spec with ``profile_method`` / ``profile_optimizer_kwargs`` inside
+    optimizer_kwargs.
+    """
+    kw = optimizer_kwargs or {}
+    profile_method = kw.get("profile_method") or method or "Nelder-Mead"
+    profile_kwargs = kw.get("profile_optimizer_kwargs") or {}
+    return profile_method, profile_kwargs
+
+
+def _resolve_scales(parameter_scale, param_names):
+    """Normalize a ``parameter_scale`` spec to a list of per-parameter scales.
+
+    Accepts None (all linear), a single string applied to every parameter, a
+    {name: scale} dict (unlisted names default to "lin"), or an explicit
+    per-parameter sequence.
+    """
+    k = len(param_names)
+    if parameter_scale is None:
+        return ["lin"] * k
+    if isinstance(parameter_scale, str):
+        scales = [parameter_scale] * k
+    elif isinstance(parameter_scale, dict):
+        unknown = set(parameter_scale) - set(param_names)
+        if unknown:
+            raise ValueError(
+                f"parameter_scale names not in param_names: {sorted(unknown)}"
+            )
+        scales = [parameter_scale.get(name, "lin") for name in param_names]
+    else:
+        scales = list(parameter_scale)
+        if len(scales) != k:
+            raise ValueError(
+                f"parameter_scale has {len(scales)} entries but there are "
+                f"{k} parameters"
+            )
+    bad = [s for s in scales if s not in _VALID_SCALES]
+    if bad:
+        raise ValueError(
+            f"Unknown parameter scale(s) {bad}; valid options are {_VALID_SCALES}"
+        )
+    return scales
+
+
+def _any_log(scales):
+    return any(s == "log10" for s in scales)
+
+
+def _to_opt_space(x_lin, scales):
+    """Linear parameter values -> optimizer space."""
+    x_lin = np.atleast_1d(np.asarray(x_lin, dtype=float))
+    out = np.array(x_lin, dtype=float, copy=True)
+    for i, s in enumerate(scales):
+        if s == "log10":
+            if x_lin[i] <= 0:
+                raise ValueError(
+                    f"Parameter index {i} has value {x_lin[i]!r}, which cannot be "
+                    f"fitted on a log10 scale. Use scale 'lin' for parameters "
+                    f"that can reach zero or go negative."
+                )
+            out[i] = np.log10(x_lin[i])
+    return out
+
+
+def _to_linear(x_opt, scales):
+    """Optimizer space -> linear parameter values."""
+    x_opt = np.atleast_1d(np.asarray(x_opt, dtype=float))
+    out = np.array(x_opt, dtype=float, copy=True)
+    for i, s in enumerate(scales):
+        if s == "log10":
+            out[i] = 10.0 ** x_opt[i]
+    return out
+
+
+def _bounds_to_opt_space(bounds, scales):
+    """Transform a scipy-style bounds list into optimizer space."""
+    if bounds is None:
+        return None
+    out = []
+    for i, b in enumerate(bounds):
+        if b is None:
+            out.append(None)
+            continue
+        lo, hi = b
+        if scales[i] == "log10":
+            if lo is not None and lo <= 0:
+                raise ValueError(
+                    f"Parameter index {i} has lower bound {lo!r}, which is invalid "
+                    f"on a log10 scale. Raise the bound above zero or use 'lin'."
+                )
+            lo = None if lo is None else np.log10(lo)
+            hi = None if hi is None else np.log10(hi)
+        out.append((lo, hi))
+    return out
+
+
+def _transform_wald_to_linear(se_opt, ci_opt, x_opt, scales):
+    """Convert Wald SEs and CIs from optimizer space to linear units.
+
+    SEs use the delta method: for q = log10(p), dp/dq = p * ln(10), so
+    se_p = se_q * p * ln(10).  CI endpoints are transformed directly (10**q),
+    which is exact rather than a local approximation and keeps the interval
+    positive and asymmetric as it should be on a log scale.
+    """
+    if not _any_log(scales):
+        return se_opt, ci_opt
+
+    x_lin = _to_linear(x_opt, scales)
+
+    se_lin = None
+    if se_opt is not None:
+        se_lin = np.array(np.asarray(se_opt, dtype=float), copy=True)
+        for i, s in enumerate(scales):
+            if s == "log10" and np.isfinite(se_lin[i]):
+                se_lin[i] = se_lin[i] * x_lin[i] * _LN10
+
+    ci_lin = None
+    if ci_opt is not None:
+        ci_lin = []
+        for i, (lo, hi) in enumerate(ci_opt):
+            if scales[i] == "log10":
+                lo = 10.0 ** lo if np.isfinite(lo) else lo
+                hi = 10.0 ** hi if np.isfinite(hi) else hi
+            ci_lin.append((float(lo), float(hi)))
+
+    return se_lin, ci_lin
+
+
 # ---------------------------------------------------------------------------
 # Global optimization dispatcher (Enhancement 8)
 # ---------------------------------------------------------------------------
@@ -811,8 +1372,10 @@ _GLOBAL_METHODS = frozenset({
 def _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol):
     """Integrate fast, maxiter, and tol settings into optimizer_kwargs."""
     kwargs = dict(optimizer_kwargs or {})
-    kwargs.pop("events_depend_on_opt_param", None)  # Remove our custom parameter so minimize() doesn't fail
-    kwargs.pop("profile_without_opt", None)  # Remove custom parameter for skipping optimization
+    # Engine-level keys live in the same dict for author convenience but are not
+    # scipy arguments, so strip them all in one place.
+    for _engine_key in _ENGINE_ONLY_OPTIMIZER_KEYS:
+        kwargs.pop(_engine_key, None)
     m = method.lower()
     
     if fast:
@@ -905,6 +1468,198 @@ def _run_global_optimization(objective, x0, bounds, method, kwargs):
 # ---------------------------------------------------------------------------
 # Profile-likelihood helpers (module-level so fork/thread workers can call them)
 # ---------------------------------------------------------------------------
+
+_PROFILE_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
+
+
+def _profile_nuisance_defaults(method):
+    """Convergence options appropriate to *method*.
+
+    scipy rejects unknown option keys per method, so "ftol" cannot simply be
+    handed to Nelder-Mead.  Gradient-free methods also need a larger iteration
+    budget to reach comparable accuracy.
+    """
+    m = (method or "").lower()
+    if m in ("l-bfgs-b", "tnc", "slsqp"):
+        return {"maxiter": 50, "ftol": 1e-4}
+    if m == "nelder-mead":
+        return {"maxiter": 200, "fatol": 1e-4, "xatol": 1e-4}
+    if m == "powell":
+        return {"maxiter": 200, "ftol": 1e-4, "xtol": 1e-4}
+    return {"maxiter": 100}
+
+
+def _minimize_nuisance(fun, x0, args, method, bounds, optimizer_kwargs=None):
+    """Minimize over the nuisance parameters with the caller's chosen method.
+
+    Falls back to Nelder-Mead if *method* cannot handle the problem (for
+    example a gradient method that scipy refuses for these bounds), so a
+    profile run degrades rather than dying.
+    """
+    import scipy.optimize as opt
+
+    kwargs = dict(optimizer_kwargs or {})
+    options = dict(_profile_nuisance_defaults(method))
+    options.update(kwargs.pop("options", {}) or {})
+    for key in _ENGINE_ONLY_OPTIMIZER_KEYS:
+        kwargs.pop(key, None)
+
+    try:
+        return opt.minimize(fun, x0, args=args, method=method,
+                            bounds=bounds, options=options, **kwargs)
+    except (ValueError, TypeError) as exc:
+        print(f"    [profile] method {method!r} failed ({exc}); "
+              f"retrying with Nelder-Mead.", flush=True)
+        return opt.minimize(fun, x0, args=args, method="Nelder-Mead",
+                            bounds=bounds,
+                            options=_profile_nuisance_defaults("Nelder-Mead"))
+
+
+def _try_build_evaluator(model_text, paths, models, active_replicates, param_names,
+                         scales, optimization_spec, fixed_sigmas, events_dynamic,
+                         n_workers):
+    """Build a ParallelEvaluator, or return None with the reason printed.
+
+    Every failure mode here is recoverable by running serially, so this never
+    raises -- a diagnostics run that cannot parallelize should still produce
+    numbers, just more slowly.
+    """
+    try:
+        from Engine.Evaluator import (
+            build_eval_spec, check_spec_serializable, ParallelEvaluator,
+            default_worker_count,
+        )
+    except Exception as exc:
+        print(f"[pool] Evaluator unavailable ({exc}); evaluating serially.")
+        return None
+
+    n = default_worker_count(n_workers)
+    if n <= 1:
+        print("[pool] one worker requested; evaluating serially.")
+        return None
+
+    try:
+        spec = build_eval_spec(
+            model_text=model_text,
+            paths=paths,
+            events={name: models[name].get("events", "") for name in active_replicates},
+            replicates=active_replicates,
+            param_names=param_names,
+            scales=scales,
+            groups=optimization_spec.groups,
+            group_normalization=optimization_spec.group_normalization,
+            fixed_sigmas=fixed_sigmas,
+            events_dynamic=events_dynamic,
+        )
+    except Exception as exc:
+        print(f"[pool] could not build an eval spec ({exc}); evaluating serially.")
+        return None
+
+    ok, _size, _msg = check_spec_serializable(spec)
+    if not ok:
+        return None
+
+    try:
+        return ParallelEvaluator(spec, n_workers=n).start()
+    except Exception as exc:
+        print(f"[pool] failed to start workers ({exc}); evaluating serially.")
+        return None
+
+
+def _slice_grid(param_idx, res_x, param_names, n_points, range_factor, scales):
+    """Parameter values to sample for one slice, in optimizer space."""
+    is_log = scales[param_idx] == "log10"
+    p_val = res_x[param_idx]
+    if is_log:
+        offset = np.log10(range_factor)
+        return np.linspace(p_val - offset, p_val + offset, n_points), is_log
+    return np.linspace(p_val / range_factor, p_val * range_factor, n_points), is_log
+
+
+def _run_likelihood_slice_all(
+    nll_batch, res_x, nll_at_optimum, param_names,
+    n_points=20, range_factor=2.0, scales=None
+):
+    """Every parameter's slice as a single batch.
+
+    A slice has no dependencies between points, so all k x n_points evaluations
+    can go out at once -- this is the cheapest possible use of the pool and the
+    reason slice analysis was worth parallelizing first.
+    Returns {param_name: (param_vals_linear, dnll)}.
+    """
+    scales = scales if scales is not None else ["lin"] * len(param_names)
+    grids, is_logs, xs = [], [], []
+    for i in range(len(param_names)):
+        grid, is_log = _slice_grid(i, res_x, param_names, n_points, range_factor, scales)
+        grids.append(grid)
+        is_logs.append(is_log)
+        mask = np.arange(len(res_x)) == i
+        xs.extend(np.where(mask, v, res_x) for v in grid)
+
+    print(f"\n[slice] {len(param_names)} parameter(s) x {n_points} points "
+          f"= {len(xs)} evaluations, submitted as one batch")
+    vals = nll_batch(xs, label="slice")
+
+    out = {}
+    pos = 0
+    for i, name in enumerate(param_names):
+        chunk = np.asarray(vals[pos:pos + n_points], dtype=float)
+        pos += n_points
+        grid = 10.0 ** grids[i] if is_logs[i] else grids[i]
+        out[name] = (grid, chunk - nll_at_optimum)
+    return out
+
+
+def _run_likelihood_slice_single(
+    param_idx, nll_func, res_x, nll_at_optimum, param_names,
+    n_points=20, range_factor=2.0, scales=None, nll_batch=None
+):
+    """Likelihood slice for one parameter: vary it, hold the others fixed.
+
+    No nuisance re-optimization, so this is a cross-section rather than a
+    profile -- cheap, and a useful sanity check that the NLL responds to the
+    parameter at all.  Returns parameter values in linear units.
+    """
+    scales = scales if scales is not None else ["lin"] * len(param_names)
+    pname = param_names[param_idx]
+    param_vals, is_log = _slice_grid(
+        param_idx, res_x, param_names, n_points, range_factor, scales
+    )
+    idx_mask = np.arange(len(res_x)) == param_idx
+    xs = [np.where(idx_mask, v, res_x) for v in param_vals]
+
+    if nll_batch is not None:
+        print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
+        nll_vals = nll_batch(xs, label=f"slice:{pname}")
+    else:
+        width = len(str(n_points))
+        print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
+        nll_vals = []
+        for i, (val, x) in enumerate(zip(param_vals, xs)):
+            nll = nll_func(x)
+            shown = 10.0 ** val if is_log else val
+            print(f"  [{i+1:{width}d}/{n_points}]  {pname}={shown:.4g}  nll={nll:.6g}")
+            nll_vals.append(nll)
+
+    if is_log:
+        param_vals = 10.0 ** param_vals
+
+    return param_vals, np.array(nll_vals, dtype=float) - nll_at_optimum
+
+
+def _make_nuisance_objective(nll_func, param_idx, n_params):
+    """Build f(x_nuisance, fixed_val) -> NLL with parameter *param_idx* pinned."""
+    def nuisance_objective(x_nuisance, fixed_val):
+        x_full = np.empty(n_params)
+        idx = 0
+        for i in range(n_params):
+            if i == param_idx:
+                x_full[i] = fixed_val
+            else:
+                x_full[i] = x_nuisance[idx]
+                idx += 1
+        return nll_func(x_full)
+    return nuisance_objective
 
 def _old_run_pypesto_profile_single(
     param_idx, nll_func, bounds, res_x, nll_at_optimum, param_names,
@@ -1024,41 +1779,48 @@ def _old_run_pypesto_profile_single(
 
 def _run_pypesto_profile_single(
     param_idx, nll_func, bounds, res_x, nll_at_optimum, param_names,
-    n_points=20, range_factor=2.0, fallback_func=None, wald_se_val=None
+    n_points=20, range_factor=2.0, fallback_func=None, wald_se_val=None,
+    method="L-BFGS-B", optimizer_kwargs=None, scales=None
 ):
-    """Run an adaptive true profile likelihood for one parameter; return (param_vals, nll_vals_rel)."""
-    import scipy.optimize as opt
-    import numpy as np
+    """Run an adaptive true profile likelihood for one parameter.
 
+    Works in whatever space *nll_func* expects (opt space, which may be log10)
+    but returns parameter values in **linear** units so callers can plot and
+    interpolate CIs consistently.  The nuisance re-optimization uses *method*,
+    defaulting to the spec's own optimizer rather than a hardcoded L-BFGS-B.
+    """
     pname = param_names[param_idx]
     p_opt = res_x[param_idx]
-    
-    if bounds is not None:
+    scales = scales if scales is not None else ["lin"] * len(param_names)
+    is_log = scales[param_idx] == "log10"
+
+    if bounds is not None and bounds[param_idx] is not None:
         lb_bound, ub_bound = bounds[param_idx]
+        lb_bound = -np.inf if lb_bound is None else lb_bound
+        ub_bound = np.inf if ub_bound is None else ub_bound
     else:
         lb_bound = -np.inf
         ub_bound = np.inf
 
-    target_1 = p_opt / range_factor
-    target_2 = p_opt * range_factor
-    lb_target = min(target_1, target_2)
-    ub_target = max(target_1, target_2)
+    # range_factor is multiplicative in linear space, which is an additive
+    # offset of log10(range_factor) once the parameter is fitted in log space.
+    if is_log:
+        offset = np.log10(range_factor)
+        lb_target, ub_target = p_opt - offset, p_opt + offset
+    else:
+        lb_target = min(p_opt / range_factor, p_opt * range_factor)
+        ub_target = max(p_opt / range_factor, p_opt * range_factor)
 
     lb = max(lb_target, lb_bound)
     ub = min(ub_target, ub_bound)
 
-    print(f"\n[true profile] {pname}  (adaptive stepping between {lb:.4g} and {ub:.4g}, re-optimizing nuisance params)", flush=True)
-    
-    def nuisance_objective(x_nuisance, fixed_val):
-        x_full = np.zeros(len(param_names))
-        idx_nuisance = 0
-        for i in range(len(param_names)):
-            if i == param_idx:
-                x_full[i] = fixed_val
-            else:
-                x_full[i] = x_nuisance[idx_nuisance]
-                idx_nuisance += 1
-        return nll_func(x_full)
+    def _lin(v):
+        return 10.0 ** v if is_log else v
+
+    print(f"\n[true profile] {pname}  (adaptive stepping between {_lin(lb):.4g} and "
+          f"{_lin(ub):.4g}, re-optimizing nuisance params with {method})", flush=True)
+
+    nuisance_objective = _make_nuisance_objective(nll_func, param_idx, len(param_names))
 
     if bounds is not None:
         nuisance_bounds = bounds[:param_idx] + bounds[param_idx+1:]
@@ -1072,23 +1834,20 @@ def _run_pypesto_profile_single(
         evaluated = [(p_opt, 0.0, np.delete(res_x, param_idx))]
         
         def evaluate_pt(x_target, x_nuisance_guess):
+            tag = 'left ' if direction_sign == -1 else 'right'
             if len(x_nuisance_guess) == 0:
                 # No nuisance parameters to re-optimize (single-parameter fit):
                 # the profile value at x_target is just the objective itself.
                 # scipy.optimize.minimize errors on a length-0 x0, so skip it.
                 nll_rel = nuisance_objective(x_nuisance_guess, x_target) - nll_at_optimum
-                print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={x_target:.4g}  dNLL={nll_rel:.6g}", flush=True)
+                print(f"  [{tag}]  {pname}={_lin(x_target):.4g}  dNLL={nll_rel:.6g}", flush=True)
                 return nll_rel, x_nuisance_guess
-            res = opt.minimize(
-                nuisance_objective,
-                x_nuisance_guess,
-                args=(x_target,),
-                method='L-BFGS-B',
-                bounds=nuisance_bounds,
-                options={'maxiter': 50, 'ftol': 1e-4}
+            res = _minimize_nuisance(
+                nuisance_objective, x_nuisance_guess, (x_target,),
+                method, nuisance_bounds, optimizer_kwargs,
             )
             nll_rel = res.fun - nll_at_optimum
-            print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={x_target:.4g}  dNLL={nll_rel:.6g}", flush=True)
+            print(f"  [{tag}]  {pname}={_lin(x_target):.4g}  dNLL={nll_rel:.6g}", flush=True)
             return nll_rel, res.x
             
         coarse_steps = max(3, n_points // 4)
@@ -1100,7 +1859,7 @@ def _run_pypesto_profile_single(
             nll_rel, x_nuisance = evaluate_pt(x_target, last_nuisance)
             evaluated.append((x_target, nll_rel, x_nuisance))
             
-            if nll_rel > 1.92:
+            if nll_rel > _PROFILE_THRESHOLD:
                 crossed = True
                 print(f"  Reached 95% CI threshold. Bracketing first crossing...", flush=True)
                 break
@@ -1114,7 +1873,7 @@ def _run_pypesto_profile_single(
                 nll_mid, nuisance_mid = evaluate_pt(x_mid, nuisance_in)
                 evaluated.append((x_mid, nll_mid, nuisance_mid))
                 
-                if nll_mid > 1.92:
+                if nll_mid > _PROFILE_THRESHOLD:
                     x_out, nll_out, nuisance_out = x_mid, nll_mid, nuisance_mid
                 else:
                     x_in, nll_in, nuisance_in = x_mid, nll_mid, nuisance_mid
@@ -1144,7 +1903,7 @@ def _run_pypesto_profile_single(
                 
                 score = gap_x / range_width
                 if gap_nll > 0.5:
-                    score += min(gap_nll, 5.0) / 1.92
+                    score += min(gap_nll, 5.0) / _PROFILE_THRESHOLD
                     
                 if score > max_score and gap_x > 1e-8:
                     max_score = score
@@ -1175,8 +1934,445 @@ def _run_pypesto_profile_single(
     
     all_vals = np.array(left_vals[::-1] + [p_opt] + right_vals)
     all_nlls = np.array(left_nlls[::-1] + [0.0] + right_nlls)
-    
+
+    if is_log:
+        all_vals = 10.0 ** all_vals
+
     return all_vals, all_nlls
+
+
+def _profile_grid_for(param_idx, res_x, bounds, scales, wald_se, n_grid,
+                      range_factor, se_span):
+    """Grid of fixed values for one parameter, both directions, in opt space.
+
+    Seeded from the Wald standard error when one is available: the profile
+    crossing sits near 1.96 SE, so spanning a few SE puts most points where the
+    threshold actually is instead of spreading them over a range_factor window
+    that may be far too wide or far too narrow. Falls back to the multiplicative
+    range_factor when no SE exists (a flat or confounded direction).
+    """
+    p_opt = res_x[param_idx]
+    is_log = scales[param_idx] == "log10"
+
+    if bounds is not None and param_idx < len(bounds) and bounds[param_idx] is not None:
+        lb, ub = bounds[param_idx]
+        lb = -np.inf if lb is None else lb
+        ub = np.inf if ub is None else ub
+    else:
+        lb, ub = -np.inf, np.inf
+
+    se = None
+    if wald_se is not None:
+        try:
+            cand = float(np.atleast_1d(wald_se)[param_idx])
+            if np.isfinite(cand) and cand > 0:
+                se = cand
+        except (IndexError, TypeError, ValueError):
+            se = None
+
+    if se is not None:
+        half = se_span * se
+        lo_target, hi_target = p_opt - half, p_opt + half
+    elif is_log:
+        off = np.log10(range_factor)
+        lo_target, hi_target = p_opt - off, p_opt + off
+    else:
+        lo_target = min(p_opt / range_factor, p_opt * range_factor)
+        hi_target = max(p_opt / range_factor, p_opt * range_factor)
+
+    lo = max(lo_target, lb)
+    hi = min(hi_target, ub)
+
+    left = [v for v in np.linspace(p_opt, lo, n_grid + 1)[1:] if v < p_opt]
+    right = [v for v in np.linspace(p_opt, hi, n_grid + 1)[1:] if v > p_opt]
+    return left, right, (lb, ub), is_log
+
+
+def run_parallel_profile(
+    nll_batch_profile, res_x, nll_at_optimum, param_names, bounds, scales,
+    method="Nelder-Mead", optimizer_kwargs=None, wald_se=None,
+    n_grid=5, range_factor=2.0, se_span=4.0, n_refine=2,
+    checkpoint=None, threshold=_PROFILE_THRESHOLD,
+):
+    """Profile likelihood for every parameter as parallel batches.
+
+    The sequential adaptive walker cannot be parallelized: each point warm-starts
+    from the previous one. This trades that dependency for width -- a
+    predetermined grid whose points are all independent, so 2k x n_grid nuisance
+    optimizations go out at once (144 for a 12-parameter fit at n_grid=6).
+
+    Two passes:
+      1. coarse grid, cold-started from the optimum, fully parallel;
+      2. refinement only in the bracket that straddles the threshold, probing
+         the predicted crossing via sqrt(dNLL) interpolation (which is linear in
+         distance for a locally quadratic NLL) rather than bisecting blindly.
+
+    Cold-starting pass 1 costs more iterations per point than warm-starting
+    would, and that is the deliberate trade: on 40 cores, width beats per-point
+    efficiency.
+
+    Returns {param_name: (param_vals_linear, dnll)}, matching the sequential
+    walkers so plotting and CI extraction are unchanged.
+    """
+    n_params = len(param_names)
+    completed = checkpoint.load(param_names) if checkpoint is not None else \
+        {n: {} for n in param_names}
+
+    def _lin(v, is_log):
+        return 10.0 ** v if is_log else v
+
+    def make_job(i, x_fixed, is_log, nb, phase=1, direction=0):
+        return {
+            "param_idx": i,
+            "param_name": param_names[i],
+            "x_fixed": float(x_fixed),
+            "x_fixed_linear": float(_lin(x_fixed, is_log)),
+            "x_start": np.delete(res_x, i).tolist(),
+            "nuisance_bounds": nb,
+            "method": method,
+            "optimizer_kwargs": optimizer_kwargs,
+            # phase/direction are recorded so a resume can tell how much
+            # refinement a side already has and stop, instead of adding another
+            # probe on every launch.
+            "phase": phase,
+            "direction": direction,
+        }
+
+    def nuisance_bounds_for(i):
+        if bounds is None:
+            return None
+        return [list(b) if b is not None else None
+                for b in (list(bounds[:i]) + list(bounds[i + 1:]))]
+
+    # ── Pass 1: coarse grid ───────────────────────────────────────────────
+    jobs = []
+    meta = {}
+    for i, name in enumerate(param_names):
+        left, right, _b, is_log = _profile_grid_for(
+            i, res_x, bounds, scales, wald_se, n_grid, range_factor, se_span
+        )
+        meta[i] = {"is_log": is_log}
+        nb = nuisance_bounds_for(i)
+        for v in left + right:
+            if ProfileCheckpointKey(v) in completed.get(name, {}):
+                continue
+            jobs.append(make_job(i, v, is_log, nb))
+
+    n_cached = sum(len(v) for v in completed.values())
+    if n_cached:
+        print(f"\n[profile] resuming: {n_cached} point(s) already computed, "
+              f"{len(jobs)} to run")
+    print(f"\n[profile] pass 1: {len(jobs)} independent nuisance optimizations "
+          f"across {n_params} parameter(s)")
+
+    def record(res):
+        res["dnll"] = (float(res["nll"]) - nll_at_optimum
+                       if res.get("nll") is not None else float("nan"))
+        if checkpoint is not None and res.get("status") == "ok":
+            checkpoint.append(res)
+        name = res["param_name"]
+        completed.setdefault(name, {})[ProfileCheckpointKey(res["x_fixed"])] = res
+
+    if jobs:
+        nll_batch_profile(jobs, on_result=record, label="profile-pass1")
+
+    # ── Pass 2: refine the threshold crossing ─────────────────────────────
+    # n_refine rounds, each a single wide batch across every parameter and
+    # direction that still needs work. Rounds are sequential because each probe
+    # depends on the previous bracket, but every round is still ~2k wide, so the
+    # pool stays busy. Doing all rounds here (rather than one per launch) means
+    # a completed run resumes as a genuine no-op.
+    for _round in range(max(int(n_refine), 0)):
+        refine_jobs = _build_refinement_jobs(
+            param_names, completed, res_x, meta, nuisance_bounds_for, make_job,
+            threshold, n_refine,
+        )
+        if not refine_jobs:
+            break
+        print(f"\n[profile] pass 2 (round {_round + 1}): refining "
+              f"{len(refine_jobs)} threshold crossing(s)")
+        nll_batch_profile(refine_jobs, on_result=record,
+                          label=f"profile-refine{_round + 1}")
+
+    return _assemble_profile_traces(param_names, completed, res_x, meta)
+
+
+def _build_refinement_jobs(param_names, completed, res_x, meta,
+                           nuisance_bounds_for, make_job, threshold, n_refine):
+    """Probes at the predicted threshold crossing for each parameter/direction."""
+    jobs = []
+    for i, name in enumerate(param_names):
+        pts = sorted(completed.get(name, {}).values(), key=lambda r: r["x_fixed"])
+        if not pts:
+            continue
+        is_log = meta[i]["is_log"]
+        nb = nuisance_bounds_for(i)
+        p_opt = res_x[i]
+        for sign in (-1, +1):
+            side = [r for r in pts
+                    if (r["x_fixed"] < p_opt if sign < 0 else r["x_fixed"] > p_opt)]
+            # n_refine caps the total refinement per side across all launches,
+            # so resuming a finished run is a no-op rather than adding a probe
+            # every time.
+            n_done = sum(1 for r in side
+                         if int(r.get("phase", 1)) == 2
+                         and int(r.get("direction", 0)) == sign)
+            if n_done >= n_refine:
+                continue
+            side.sort(key=lambda r: abs(r["x_fixed"] - p_opt))
+            inner_x, inner_d = p_opt, 0.0
+            for r in side:
+                d = r.get("dnll")
+                if d is None or not np.isfinite(d):
+                    continue
+                if d > threshold:
+                    # Bracket found: probe the predicted crossing. One probe per
+                    # launch keeps pass 2 a single wide batch -- iterating here
+                    # would serialize what we just made parallel.
+                    r_in, r_out = np.sqrt(max(inner_d, 0.0)), np.sqrt(d)
+                    x_in, x_out = inner_x, r["x_fixed"]
+                    if r_out > r_in + 1e-12:
+                        frac = (np.sqrt(threshold) - r_in) / (r_out - r_in)
+                        frac = min(max(frac, 0.05), 0.95)
+                    else:
+                        frac = 0.5
+                    x_probe = x_in + frac * (x_out - x_in)
+                    if ProfileCheckpointKey(x_probe) not in completed.get(name, {}):
+                        jobs.append(
+                            make_job(i, x_probe, is_log, nb, phase=2, direction=sign)
+                        )
+                    break
+                inner_x, inner_d = r["x_fixed"], d
+    return jobs
+
+
+def _assemble_profile_traces(param_names, completed, res_x, meta):
+    """Turn completed points into {name: (param_vals_linear, dnll)} traces."""
+    out = {}
+    for i, name in enumerate(param_names):
+        is_log = meta.get(i, {}).get("is_log", False)
+        pts = [r for r in completed.get(name, {}).values()
+               if r.get("dnll") is not None and np.isfinite(r["dnll"])]
+        xs = [res_x[i]] + [r["x_fixed"] for r in pts]
+        ys = [0.0] + [float(r["dnll"]) for r in pts]
+        order = np.argsort(xs)
+        xs = np.asarray(xs, dtype=float)[order]
+        ys = np.asarray(ys, dtype=float)[order]
+        if is_log:
+            xs = 10.0 ** xs
+        out[name] = (xs, ys)
+    return out
+
+
+def ProfileCheckpointKey(x):
+    """Grid-point identity, rounded so float noise cannot duplicate a point."""
+    try:
+        return round(float(x), 12)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_parallel_profile_with_checkpoint(
+    evaluator, res_x, nll_at_optimum, param_names, bounds, scales, groups,
+    model_text, paths, method, optimizer_kwargs, wald_se,
+    n_grid, range_factor, se_span, n_refine, run_id, checkpoint_enabled=True,
+):
+    """Wire the pool, the checkpoint store and run_parallel_profile together."""
+    from Engine.Profile_checkpoint import (
+        ProfileCheckpoint, spec_fingerprint, default_run_id,
+    )
+
+    model_hash, spec_hash = spec_fingerprint(
+        param_names, res_x, groups, scales, model_text
+    )
+    # run_id must be stable across launches or resuming can never happen.
+    run_id = default_run_id(run_id, model_hash, spec_hash)
+    root = paths.get("plot_path") if checkpoint_enabled else None
+    ckpt = ProfileCheckpoint(root, run_id, model_hash, spec_hash,
+                             enabled=bool(root))
+    if ckpt.dir:
+        print(f"\n[profile] checkpointing to {ckpt.dir}")
+
+    try:
+        traces = run_parallel_profile(
+            evaluator.profile_batch, res_x, nll_at_optimum, param_names,
+            bounds, scales, method=method, optimizer_kwargs=optimizer_kwargs,
+            wald_se=wald_se, n_grid=n_grid, range_factor=range_factor,
+            se_span=se_span, n_refine=n_refine, checkpoint=ckpt,
+        )
+        if ckpt.n_skipped_stale:
+            print(f"[profile] ignored {ckpt.n_skipped_stale} checkpoint record(s) "
+                  f"from a different model or spec")
+        return traces
+    finally:
+        ckpt.close()
+
+
+def _run_fast_profile_likelihood_single(
+    param_idx, nll_func, bounds, res_x, nll_at_optimum, param_names,
+    variation_pct=0.10, method="L-BFGS-B", optimizer_kwargs=None, scales=None,
+    max_points_per_side=6, growth=2.0, n_bisections=2, stats_out=None
+):
+    """
+    Fast profile likelihood for one parameter: step outward from the optimum,
+    growing the step geometrically until dNLL brackets the 95% threshold.
+
+    The previous implementation probed a fixed -10%/+10% and could therefore
+    never cross dNLL = 1.92, which made the extracted CI (nan, nan) by
+    construction.  Growing the step means a genuine CI comes out of typically
+    4-6 nuisance optimizations per side rather than the ~13 the full adaptive
+    walker uses -- which is what makes this the cheap baseline it was meant to be.
+
+    *variation_pct* sets the first step only.  If *stats_out* is a dict, a
+    curvature-based standard error estimated from the innermost points is stored
+    under "curvature_se" -- useful as a Wald cross-check and as a step-size seed.
+
+    Returns (param_vals, dnll_vals) with parameter values in linear units.
+    """
+    pname = param_names[param_idx]
+    p_opt = res_x[param_idx]
+    scales = scales if scales is not None else ["lin"] * len(param_names)
+    is_log = scales[param_idx] == "log10"
+
+    if bounds is not None and bounds[param_idx] is not None:
+        lb_bound, ub_bound = bounds[param_idx]
+        lb_bound = -np.inf if lb_bound is None else lb_bound
+        ub_bound = np.inf if ub_bound is None else ub_bound
+    else:
+        lb_bound = -np.inf
+        ub_bound = np.inf
+
+    def _lin(v):
+        return 10.0 ** v if is_log else v
+
+    # First step: variation_pct is multiplicative in linear space, so in log
+    # space it becomes the additive offset log10(1 + variation_pct).
+    if is_log:
+        step0 = np.log10(1.0 + variation_pct)
+    else:
+        step0 = abs(p_opt) * variation_pct
+        if step0 <= 0:
+            step0 = max(variation_pct, 1e-8)
+
+    pct_str = f"{int(round(variation_pct * 100))}%"
+    print(f"\n[fast profile] {pname} (adaptive: first step {pct_str}, growing x{growth} "
+          f"until dNLL > {_PROFILE_THRESHOLD:.3g}, nuisance method {method})", flush=True)
+
+    nuisance_objective = _make_nuisance_objective(nll_func, param_idx, len(param_names))
+
+    if bounds is not None:
+        nuisance_bounds = bounds[:param_idx] + bounds[param_idx+1:]
+    else:
+        nuisance_bounds = None
+
+    x_nuisance_initial = np.delete(res_x, param_idx)
+
+    def evaluate(x_target):
+        if len(x_nuisance_initial) == 0:
+            return nuisance_objective(x_nuisance_initial, x_target) - nll_at_optimum
+        res = _minimize_nuisance(
+            nuisance_objective, x_nuisance_initial, (x_target,),
+            method, nuisance_bounds, optimizer_kwargs,
+        )
+        return res.fun - nll_at_optimum
+
+    def walk(direction_sign, bound):
+        vals, dnlls = [], []
+        step = step0
+        tag = "left " if direction_sign < 0 else "right"
+        crossed = False
+        for _ in range(max_points_per_side):
+            x_target = p_opt + direction_sign * step
+            hit_bound = False
+            if direction_sign < 0 and x_target <= bound:
+                x_target, hit_bound = bound, True
+            elif direction_sign > 0 and x_target >= bound:
+                x_target, hit_bound = bound, True
+            if not np.isfinite(x_target):
+                break
+
+            dnll = evaluate(x_target)
+            print(f"  [{tag}]  {pname}={_lin(x_target):.4g}  dNLL={dnll:.6g}", flush=True)
+            vals.append(x_target)
+            dnlls.append(dnll)
+
+            if dnll > _PROFILE_THRESHOLD:
+                crossed = True
+                break
+            if hit_bound:
+                break
+            step *= growth
+
+        # Refine the crossing. Without this the CI is interpolated linearly
+        # across one geometric step, which overstates the curvature near the
+        # optimum and yields an interval that is too narrow -- an under-covering
+        # CI is worse than an obviously missing one.
+        #
+        # Probe at the predicted crossing rather than the midpoint: for a locally
+        # quadratic NLL, sqrt(dNLL) is linear in the distance from the optimum,
+        # so interpolating there lands near the threshold in one or two steps
+        # even when the first geometric step overshot badly (dNLL in the hundreds).
+        if crossed and n_bisections > 0:
+            x_in = vals[-2] if len(vals) >= 2 else p_opt
+            d_in = dnlls[-2] if len(dnlls) >= 2 else 0.0
+            x_out, d_out = vals[-1], dnlls[-1]
+            root_target = np.sqrt(_PROFILE_THRESHOLD)
+            for _ in range(n_bisections):
+                r_in = np.sqrt(max(d_in, 0.0))
+                r_out = np.sqrt(max(d_out, 0.0))
+                if r_out > r_in + 1e-12:
+                    frac = (root_target - r_in) / (r_out - r_in)
+                    frac = min(max(frac, 0.05), 0.95)  # stay strictly inside
+                else:
+                    frac = 0.5
+                x_probe = x_in + frac * (x_out - x_in)
+                d_probe = evaluate(x_probe)
+                print(f"  [{tag}*] {pname}={_lin(x_probe):.4g}  dNLL={d_probe:.6g}", flush=True)
+                vals.append(x_probe)
+                dnlls.append(d_probe)
+                if d_probe > _PROFILE_THRESHOLD:
+                    x_out, d_out = x_probe, d_probe
+                else:
+                    x_in, d_in = x_probe, d_probe
+
+            # Keep the returned trace monotonic in x so _extract_profile_ci can
+            # walk outward from the optimum correctly.
+            order = np.argsort([direction_sign * v for v in vals])
+            vals = [vals[i] for i in order]
+            dnlls = [dnlls[i] for i in order]
+
+        return vals, dnlls
+
+    left_vals, left_dnlls = walk(-1, lb_bound)
+    right_vals, right_dnlls = walk(+1, ub_bound)
+
+    param_vals = np.array(left_vals[::-1] + [p_opt] + right_vals)
+    dnll_vals = np.array(left_dnlls[::-1] + [0.0] + right_dnlls)
+
+    # Curvature SE from the innermost point either side: dNLL ~ (dp)^2 / (2*se^2)
+    # so se = dp / sqrt(2*dNLL).  Reported in linear units.
+    if stats_out is not None:
+        se_est = float("nan")
+        candidates = []
+        if left_vals and left_dnlls[0] > 0:
+            candidates.append((abs(p_opt - left_vals[0]), left_dnlls[0]))
+        if right_vals and right_dnlls[0] > 0:
+            candidates.append((abs(right_vals[0] - p_opt), right_dnlls[0]))
+        if candidates:
+            ses = [dp / np.sqrt(2.0 * d) for dp, d in candidates]
+            se_est = float(np.mean(ses))
+            if is_log:
+                # delta method back to linear units
+                se_est = se_est * _lin(p_opt) * _LN10
+        # Keyed by parameter: this helper runs once per parameter, so a scalar
+        # would just be overwritten by the last one.
+        stats_out.setdefault("curvature_se", {})[pname] = se_est
+        print(f"  curvature SE estimate for {pname}: {se_est:.4g}", flush=True)
+
+    if is_log:
+        param_vals = 10.0 ** param_vals
+
+    return param_vals, dnll_vals
 
 
 # ---------------------------------------------------------------------------
@@ -1194,6 +2390,7 @@ def run_optimization(
     wald_analysis=False,
     slice_analysis=False,
     profile_likelihood_analysis=False,
+    fast_profile_likelihood_analysis=False,
     sobol_analysis=False,
     sobol_kwargs=None,
     method="Nelder-Mead",
@@ -1201,9 +2398,12 @@ def run_optimization(
     fast=False,
     maxiter=None,
     tol=None,
+    fit_mode=None,
+    n_workers=None,
 ):
-    if profile_likelihood_analysis and not wald_analysis:
-        print("Note: profile_likelihood_analysis is True, automatically enabling wald_analysis to seed step sizes.")
+    if (profile_likelihood_analysis or fast_profile_likelihood_analysis) and not wald_analysis:
+        print("Note: profile likelihood requested — also enabling wald_analysis so the "
+              "Hessian-based CI is available as an independent cross-check.")
         wald_analysis = True
 
     from datetime import datetime
@@ -1215,6 +2415,13 @@ def run_optimization(
         raise ImportError("scipy is required for run_optimization") from None
 
     data_path = paths["data_path"]
+
+    # This route takes a flat settings dict with no parameter_scale field, so it
+    # is linear-only. Log-space fitting is available via the nested Optimization
+    # spec (run_optimization_from_groups).
+    scales = ["lin"] * len(param_names)
+    fit_mode = _resolve_fit_mode(fit_mode, optimizer_kwargs)
+    profile_method, profile_opt_kwargs = _resolve_profile_optimizer(method, optimizer_kwargs)
 
     # r_ic is only used when events depend on optimizer parameters (dynamic
     # event rebuild path). Skip the second model compile when it is not needed.
@@ -1294,11 +2501,14 @@ def run_optimization(
 
     opt_kw = _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol)
     
-    profile_without_opt = optimizer_kwargs.get("profile_without_opt", False) if optimizer_kwargs else False
-    if profile_without_opt:
+    if fit_mode == "evaluate_x0":
         from scipy.optimize import OptimizeResult
+        print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
+              "so diagnostics run against the supplied parameters.")
         x0_arr = np.array(x0)
-        res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True, message="Optimization bypassed", nit=0, nfev=1)
+        res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
+                             message="Optimization bypassed (fit_mode=evaluate_x0)",
+                             nit=0, nfev=1)
     elif method.lower() in _GLOBAL_METHODS:
         res = _run_global_optimization(objective, x0, bounds, method, opt_kw)
     else:
@@ -1444,62 +2654,41 @@ def run_optimization(
             out["stats"]["nll_proper"] = nll_proper
 
         if wald_analysis:
-            try:
-                print(f"\n[Wald] Computing Hessian matrix for {k} parameters... (this requires many silent evaluations)")
-                hessian_raw  = compute_hessian_numdifftools(nll_func_fixed, res.x)
-                fisher_info  = (hessian_raw + hessian_raw.T) / 2.0
-                eigenvalues  = np.linalg.eigvals(fisher_info)
-                if np.any(eigenvalues <= 1e-10):
-                    print("Warning: Hessian is NOT positive definite.")
-                    cov_matrix       = None
-                    standard_errors  = None
-                else:
-                    cov_matrix      = np.linalg.inv(fisher_info)
-                    diag_elements   = np.diag(cov_matrix)
-                    standard_errors = (None if np.any(diag_elements < 0)
-                                       else np.sqrt(diag_elements))
-                out["stats"]["wald_fisher_info"]  = fisher_info
-                out["stats"]["wald_covariance"]   = cov_matrix
-                out["stats"]["wald_se"]           = standard_errors
-                if standard_errors is not None:
-                    cv = stats.norm.ppf(1 - 0.05/2)
-                    out["stats"]["wald_ci"] = [
-                        (p_val - cv * se, p_val + cv * se)
-                        for p_val, se in zip(res.x, standard_errors)
-                    ]
-                if cov_matrix is not None:
-                    out["stats"]["wald_correlation"] = compute_parameter_correlations(cov_matrix)
-            except Exception as e:
-                print(f"Error computing Wald statistics: {e}")
+            _attach_wald_stats(out, nll_func_fixed, res.x, bounds, param_names)
 
-        if slice_analysis or profile_likelihood_analysis:
+        if slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis:
             nll_at_optimum = nll_func_fixed(res.x)
             out["stats"]["nll_at_optimum"] = nll_at_optimum
 
             def likelihood_slice_func(param_idx, n_points=20, range_factor=2.0):
-                p_val      = res.x[param_idx]
-                pname      = param_names[param_idx]
-                param_vals = np.linspace(p_val / range_factor, p_val * range_factor, n_points)
-                width      = len(str(n_points))
-                print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
-                nll_vals = []
-                for i, val in enumerate(param_vals):
-                    nll = nll_func_fixed(np.where(np.arange(len(res.x)) == param_idx, val, res.x))
-                    print(f"  [{i+1:{width}d}/{n_points}]  {pname}={val:.4g}  nll={nll:.6g}")
-                    nll_vals.append(nll)
-                return param_vals, np.array(nll_vals) - nll_at_optimum
+                return _run_likelihood_slice_single(
+                    param_idx, nll_func_fixed, res.x, nll_at_optimum, param_names,
+                    n_points=n_points, range_factor=range_factor, scales=scales,
+                )
 
             if slice_analysis:
                 out["stats"]["likelihood_slice"] = likelihood_slice_func
 
-            if profile_likelihood_analysis:
+            if fast_profile_likelihood_analysis:
+                def fast_profile_likelihood_func(param_idx, n_points=3, range_factor=1.1, variation_pct=0.10):
+                    return _run_fast_profile_likelihood_single(
+                        param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
+                        param_names, variation_pct=variation_pct,
+                        method=profile_method, optimizer_kwargs=profile_opt_kwargs,
+                        scales=scales, stats_out=out["stats"],
+                    )
+
+                out["stats"]["profile_likelihood"] = fast_profile_likelihood_func
+            elif profile_likelihood_analysis:
                 def true_profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
                     se_array = out["stats"].get("wald_se")
                     wald_se_val = se_array[param_idx] if se_array is not None else None
                     return _run_pypesto_profile_single(
                         param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
                         param_names, n_points=n_points, range_factor=range_factor,
-                        fallback_func=likelihood_slice_func, wald_se_val=wald_se_val
+                        fallback_func=likelihood_slice_func, wald_se_val=wald_se_val,
+                        method=profile_method, optimizer_kwargs=profile_opt_kwargs,
+                        scales=scales,
                     )
 
                 out["stats"]["profile_likelihood"]  = true_profile_likelihood_func
@@ -1532,18 +2721,33 @@ def run_optimization_from_groups(
     wald_analysis=False,
     slice_analysis=False,
     profile_likelihood_analysis=False,
+    fast_profile_likelihood_analysis=False,
     sobol_analysis=False,
     sobol_kwargs=None,
     fast=False,
     maxiter=None,
     tol=None,
     optimization_spec=None,
+    fit_mode=None,
+    n_workers=None,
+    profile_checkpoint=True,
 ):
     """
     Optimize shared parameters using ``experiment.opt_groups`` or ``optimization_spec``.
+
+    fit_mode : "optimize" (default) runs the optimizer; "evaluate_x0" skips the
+        fit and evaluates the starting point, so diagnostics can be run against
+        stored parameters.  Supersedes the deprecated ``profile_without_opt``.
+    n_workers : processes used for the diagnostics (Wald / slice / Sobol).
+        None uses all cores but one; 1 forces serial evaluation.  The fit itself
+        is serial regardless -- Nelder-Mead is inherently sequential.
+    profile_checkpoint : write each completed profile point to
+        results/<MODEL>/profiles/<run_id>/<param>.jsonl so a killed run resumes
+        instead of restarting.  Set False to disable.
     """
-    if profile_likelihood_analysis and not wald_analysis:
-        print("Note: profile_likelihood_analysis is True, automatically enabling wald_analysis to seed step sizes.")
+    if (profile_likelihood_analysis or fast_profile_likelihood_analysis) and not wald_analysis:
+        print("Note: profile likelihood requested — also enabling wald_analysis so the "
+              "Hessian-based CI is available as an independent cross-check.")
         wald_analysis = True
 
     from datetime import datetime
@@ -1561,26 +2765,55 @@ def run_optimization_from_groups(
     # =========================================================================
     if optimization_spec is not None:
         param_names = optimization_spec.param_names
-        x0 = optimization_spec.x0
-        bounds = optimization_spec.bounds
+        x0_lin = optimization_spec.x0
+        bounds_lin = optimization_spec.bounds
         method = optimization_spec.method
         optimizer_kwargs = optimization_spec.optimizer_kwargs or {}
         selected_group_names = set(optimization_spec.groups.keys())
         groups_tag = "_".join(sorted(selected_group_names))
 
-        unique_sim_names = set()
+        # ── Parameter scaling ─────────────────────────────────────────────
+        # The optimizer, Hessian, slice and profile all work in "opt space";
+        # everything reported back to the caller is converted to linear units.
+        scales = _resolve_scales(
+            getattr(optimization_spec, "parameter_scale", None), param_names
+        )
+        x0 = _to_opt_space(x0_lin, scales)
+        bounds = _bounds_to_opt_space(bounds_lin, scales)
+        if _any_log(scales):
+            logged = [p for p, s in zip(param_names, scales) if s == "log10"]
+            print(f"[opt] Fitting {len(logged)}/{len(param_names)} parameter(s) on a "
+                  f"log10 scale: {logged}")
+
+        fit_mode = _resolve_fit_mode(fit_mode, optimizer_kwargs)
+        profile_method, profile_opt_kwargs = _resolve_profile_optimizer(
+            method, optimizer_kwargs
+        )
+        settings_checkpoint = profile_checkpoint
+
+        # ── Which simulations are needed, and which only for plotting ─────
+        # Active simulations contribute to the loss and must be integrated on
+        # every evaluation. Passive ones exist solely so the plot function gets
+        # complete curves, so they are integrated once, after the fit.
+        active_sim_names = set()
         for g_name, g_config in optimization_spec.groups.items():
             for elem in g_config.get("loss_elements", []):
                 is_composite = elem.get("type") == "composite" or "simulations" in elem
                 if is_composite:
                     sub_sims = elem.get("simulations", [])
-                    unique_sim_names.update(sub_sims)
+                    active_sim_names.update(sub_sims)
                     data_sim = elem.get("data_simulation") or (sub_sims[0] if sub_sims else None)
                     if data_sim:
-                        unique_sim_names.add(data_sim)
+                        active_sim_names.add(data_sim)
                 else:
-                    unique_sim_names.add(elem.get("simulation"))
-        unique_sim_names.update(optimization_spec.passive_simulations)
+                    active_sim_names.add(elem.get("simulation"))
+        active_sim_names.discard(None)
+        passive_sim_names = set(optimization_spec.passive_simulations) - active_sim_names
+        unique_sim_names = active_sim_names | passive_sim_names
+        if passive_sim_names:
+            print(f"[opt] {len(active_sim_names)} simulation(s) in the objective; "
+                  f"{len(passive_sim_names)} passive simulation(s) deferred to "
+                  f"after the fit: {sorted(passive_sim_names)}")
 
         _events_dynamic = (optimizer_kwargs.get("events_depend_on_opt_param", False)
                            if optimizer_kwargs else False)
@@ -1613,31 +2846,16 @@ def run_optimization_from_groups(
             r_proxy = OptRoadRunnerProxy(r, param_names)
             replicate["Update_parameters"](r_proxy, replicate)
 
-            models[sim_name] = {"r_ic": r_ic, "r": r, "df_dict": df_dict}
+            # events_str is retained so pool workers rebuild the *same* model
+            # rather than regenerating events from data themselves.
+            models[sim_name] = {"r_ic": r_ic, "r": r, "df_dict": df_dict,
+                                "events": events_str}
             replicates[sim_name] = replicate
 
-        n_points_by_key = {}
-        for g_name, g_config in optimization_spec.groups.items():
-            for elem in g_config.get("loss_elements", []):
-                lc_fn = elem.get("loss_config")
-                is_composite = elem.get("type") == "composite" or "simulations" in elem
-                if is_composite:
-                    sub_sims = elem.get("simulations", [])
-                    data_sim = elem.get("data_simulation") or (sub_sims[0] if sub_sims else None)
-                    if data_sim in models:
-                        lc = lc_fn(replicates[data_sim]) if callable(lc_fn) else lc_fn
-                        print(f"[debug_n_points] composite g_name={g_name} data_sim={data_sim} type(lc)={type(lc)} lc={lc}")
-                        n_points_by_key[g_name + "_composite"] = _count_replicate_data_points(
-                            models[data_sim]["df_dict"], lc
-                        )
-                else:
-                    sim = elem.get("simulation")
-                    if sim in models:
-                        lc = lc_fn(replicates[sim]) if callable(lc_fn) else lc_fn
-                        print(f"[debug_n_points] sim={sim} type(lc)={type(lc)} lc={lc} lc_fn={lc_fn}")
-                        n_points_by_key[sim] = _count_replicate_data_points(
-                            models[sim]["df_dict"], lc
-                        )
+        # Active replicates only: passive ones are simulated once after the fit.
+        active_replicates = {
+            name: rep for name, rep in replicates.items() if name in active_sim_names
+        }
 
         _debug_calls = [0]
         _progress = {"best": float("inf"), "t0": None}
@@ -1650,15 +2868,18 @@ def run_optimization_from_groups(
             do_debug = call_n < 3
             if call_n == 0:
                 _progress["t0"] = time.time()
+
+            # x arrives in opt space; the model always gets linear values.
+            x_lin = _to_linear(x, scales)
             if do_debug:
                 print(f"\n[opt debug] call #{call_n + 1}  "
-                      + "  ".join(f"{n}={v:.4g}" for n, v in zip(param_names, x.tolist())))
+                      + "  ".join(f"{n}={v:.4g}" for n, v in zip(param_names, x_lin.tolist())))
 
-            x_dict = dict(zip(param_names, np.atleast_1d(x).tolist()))
+            x_dict = dict(zip(param_names, x_lin.tolist()))
             events_dynamic = optimizer_kwargs.get("events_depend_on_opt_param", False) if optimizer_kwargs else False
 
             sim_results = {}
-            for sim_name, replicate in replicates.items():
+            for sim_name, replicate in active_replicates.items():
                 m = models[sim_name]
                 if events_dynamic:
                     r_ic = m["r_ic"]
@@ -1713,7 +2934,7 @@ def run_optimization_from_groups(
 
                         lc = lc_fn(replicates[data_sim]) if callable(lc_fn) else lc_fn
                         loss_val = loss_function_composite(
-                            x, sub_results, sim_results[data_sim]["data"],
+                            x_lin, sub_results, sim_results[data_sim]["data"],
                             f"{g_name}_composite_{idx}", elem, param_names,
                             loss_config=lc, trace_collector=trace_collector
                         )
@@ -1772,7 +2993,7 @@ def run_optimization_from_groups(
                     _render_progress_overlay(
                         trace_collector, total_loss, _progress["best"],
                         n, paths.get("plot_path"),
-                        param_names=param_names, param_values=x,
+                        param_names=param_names, param_values=x_lin,
                         model_name=paths.get("MODEL_NAME", ""),
                         experiment_id=groups_tag, method=method
                     )
@@ -1780,11 +3001,14 @@ def run_optimization_from_groups(
             return total_loss
 
         opt_kw = _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol)
-        profile_without_opt = optimizer_kwargs.get("profile_without_opt", False) if optimizer_kwargs else False
-        if profile_without_opt:
+        if fit_mode == "evaluate_x0":
             from scipy.optimize import OptimizeResult
+            print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
+                  "so diagnostics run against the supplied parameters.")
             x0_arr = np.array(x0)
-            res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True, message="Optimization bypassed", nit=0, nfev=1)
+            res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
+                                 message="Optimization bypassed (fit_mode=evaluate_x0)",
+                                 nit=0, nfev=1)
         elif method.lower() in _GLOBAL_METHODS:
             res = _run_global_optimization(objective, x0, bounds, method, opt_kw)
         else:
@@ -1795,22 +3019,29 @@ def run_optimization_from_groups(
             print(f"\n  [opt] done — {_debug_calls[0]} evals in {elapsed:.0f}s"
                   f"  best={_progress['best']:.5g}")
 
+        # res.x is in opt space; everything reported out is linear.
+        x_lin_opt = _to_linear(res.x, scales)
+
         out = {
-            "x": res.x, "fun": res.fun, "success": res.success,
+            "x": x_lin_opt, "fun": res.fun, "success": res.success,
             "message": res.message, "stats": {},
             "groups": sorted(selected_group_names),
             "nit":  getattr(res, "nit",  None),
             "nfev": getattr(res, "nfev", None),
             "timestamp": _progress_overlay_state.get("timestamp"),
+            "parameter_scale": list(scales),
+            "x0": list(np.asarray(x0_lin, dtype=float)),
+            "fit_mode": fit_mode,
         }
 
-        param_dict = dict(zip(param_names, res.x.tolist()))
+        param_dict = dict(zip(param_names, x_lin_opt.tolist()))
         best_results = {}
         fixed_sigmas = {}
         total_n = 0
         k = len(param_names)
 
-        # Build passive simulations in results for figure drawing
+        # Simulate every replicate once at the optimum -- this is where passive
+        # (plot-only) simulations get their curves, instead of on every eval.
         for sim_name, replicate in replicates.items():
             m = models[sim_name]
             res_dict = run_all(m["r"], sim_name, replicate, m["df_dict"],
@@ -1943,145 +3174,154 @@ def run_optimization_from_groups(
                         total_n += len(residuals)
 
         def nll_func_fixed(p):
-            p_dict = dict(zip(param_names, np.atleast_1d(p).tolist()))
-            fixed_results = {}
-            for sim_name, replicate in replicates.items():
-                m = models[sim_name]
-                m["r"].reset()
-                run_res = run_all(m["r"], sim_name, replicate, m["df_dict"],
-                                  set_parameters=set_params, parameters=p_dict)
-                fixed_results[sim_name] = run_res[sim_name]
-
-            total_nll = 0.0
-            for g_name, g_config in optimization_spec.groups.items():
-                g_loss_sum = 0.0
-                g_weight_sum = 0.0
-                for idx, elem in enumerate(g_config.get("loss_elements", [])):
-                    elem_weight = elem.get("weight", 1.0)
-                    lc_fn = elem.get("loss_config")
-
-                    is_composite = elem.get("type") == "composite" or "simulations" in elem
-                    if is_composite:
-                        sub_sims = elem.get("simulations", [])
-                        sub_results = [
-                            {
-                                "results": fixed_results[s]["results"],
-                                "replicate": replicates[s],
-                                "df_dict": fixed_results[s]["data"]
-                            }
-                            for s in sub_sims if s in fixed_results
-                        ]
-                        data_sim = elem.get("data_simulation") or (sub_sims[0] if sub_sims else None)
-                        if not sub_results or data_sim not in fixed_results:
-                            continue
-                        lc = lc_fn(replicates[data_sim]) if callable(lc_fn) else lc_fn
-                        loss_val = loss_function_composite(
-                            p, sub_results, fixed_results[data_sim]["data"],
-                            f"{g_name}_composite_{idx}", elem, param_names,
-                            loss_config=lc, fixed_sigmas=fixed_sigmas
-                        )
-                    else:
-                        sim = elem.get("simulation")
-                        if sim not in fixed_results:
-                            continue
-                        lc = lc_fn(replicates[sim]) if callable(lc_fn) else lc_fn
-                        loss_val = loss_function_evaluated(
-                            p_dict, {sim: fixed_results[sim]}, param_names,
-                            loss_config=lc, fixed_sigmas=fixed_sigmas
-                        )
-                    g_loss_sum += loss_val * elem_weight
-                    g_weight_sum += elem_weight
-
-                if g_weight_sum > 0:
-                    if optimization_spec.group_normalization == "mean_over_groups":
-                        g_loss = g_loss_sum / g_weight_sum
-                    else:
-                        g_loss = g_loss_sum
-                else:
-                    g_loss = 0.0
-                total_nll += g_loss * g_config.get("group_weight", 1.0)
-            return total_nll
+            return evaluate_nll_fixed(
+                p, models, active_replicates, param_names, scales,
+                optimization_spec.groups, optimization_spec.group_normalization,
+                fixed_sigmas, model_text=model_text, paths=paths,
+                events_dynamic=_events_dynamic,
+            )
 
         out["results_dict"] = best_results
 
-        if wald_analysis or slice_analysis or profile_likelihood_analysis or sobol_analysis:
-            nll_proper = nll_func_fixed(res.x)
-            aic = 2 * k + 2 * nll_proper
-            bic = k * np.log(max(total_n, 1)) + 2 * nll_proper
-            out["stats"]["aic"] = aic
-            out["stats"]["bic"] = bic
-            out["stats"]["nll_proper"] = nll_proper
+        _needs_diagnostics = (wald_analysis or slice_analysis
+                              or profile_likelihood_analysis
+                              or fast_profile_likelihood_analysis or sobol_analysis)
 
-        if wald_analysis:
-            try:
-                print(f"\n[Wald] Computing Hessian matrix for {k} parameters... (this requires many silent evaluations)")
-                hessian_raw = compute_hessian_numdifftools(nll_func_fixed, res.x)
-                fisher_info = (hessian_raw + hessian_raw.T) / 2.0
-                eigenvalues = np.linalg.eigvals(fisher_info)
-                if np.any(eigenvalues <= 1e-10):
-                    print("Warning: Hessian is NOT positive definite.")
-                    cov_matrix      = None
-                    standard_errors = None
-                else:
-                    cov_matrix      = np.linalg.inv(fisher_info)
-                    diag_elements   = np.diag(cov_matrix)
-                    standard_errors = (None if np.any(diag_elements < 0)
-                                       else np.sqrt(diag_elements))
-                out["stats"]["wald_fisher_info"] = fisher_info
-                out["stats"]["wald_covariance"]  = cov_matrix
-                out["stats"]["wald_se"]          = standard_errors
-                if standard_errors is not None:
-                    cv = stats.norm.ppf(1 - 0.05 / 2)
-                    out["stats"]["wald_ci"] = [
-                        (p_val - cv * se, p_val + cv * se)
-                        for p_val, se in zip(res.x, standard_errors)
-                    ]
-                if cov_matrix is not None:
-                    out["stats"]["wald_correlation"] = compute_parameter_correlations(cov_matrix)
-            except Exception as e:
-                print(f"Error computing Wald statistics: {e}")
+        # ── Parallel evaluation pool ──────────────────────────────────────
+        # Every diagnostic below is a large batch of independent nll_func_fixed
+        # calls, so it runs on a worker pool when one can be built. Falls back
+        # to serial silently-but-loudly: the reason is always printed.
+        evaluator = None
+        if _needs_diagnostics and n_workers != 1:
+            evaluator = _try_build_evaluator(
+                model_text, paths, models, active_replicates, param_names, scales,
+                optimization_spec, fixed_sigmas, _events_dynamic, n_workers,
+            )
+        out["stats"]["parallel"] = evaluator is not None
 
-        if slice_analysis or profile_likelihood_analysis:
-            try:
+        _pool_state = {"evaluator": evaluator}
+
+        def nll_batch(xs, label=None):
+            """Evaluate many parameter vectors, in parallel when available.
+
+            If the pool breaks mid-run — a worker segfaulting in the integrator
+            leaves ProcessPoolExecutor permanently broken — fall back to serial
+            for this and every later batch rather than losing hours of work.
+            """
+            ev = _pool_state["evaluator"]
+            if ev is not None:
+                try:
+                    return ev.evaluate_batch(xs, label=label)
+                except Exception as exc:
+                    print(f"[pool] batch failed ({type(exc).__name__}: {exc}); "
+                          f"falling back to serial evaluation for the rest of "
+                          f"this run.")
+                    try:
+                        ev.shutdown()
+                    except Exception:
+                        pass
+                    _pool_state["evaluator"] = None
+                    out["stats"]["parallel"] = False
+            return [nll_func_fixed(np.asarray(x, dtype=float)) for x in xs]
+
+        try:
+            if _needs_diagnostics:
+                nll_proper = nll_func_fixed(res.x)
+                aic = 2 * k + 2 * nll_proper
+                bic = k * np.log(max(total_n, 1)) + 2 * nll_proper
+                out["stats"]["aic"] = aic
+                out["stats"]["bic"] = bic
+                out["stats"]["nll_proper"] = nll_proper
+
+            if wald_analysis:
+                _attach_wald_stats(out, nll_func_fixed, res.x, bounds, param_names,
+                                   scales=scales, nll_batch=nll_batch)
+
+            if slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis:
                 nll_at_optimum = nll_func_fixed(res.x)
                 out["stats"]["nll_at_optimum"] = nll_at_optimum
                 out["stats"]["fixed_sigmas"]   = fixed_sigmas
 
                 def likelihood_slice_func(param_idx, n_points=20, range_factor=2.0):
-                    p_val      = res.x[param_idx]
-                    pname      = param_names[param_idx]
-                    param_vals = np.linspace(p_val / range_factor, p_val * range_factor, n_points)
-                    width      = len(str(n_points))
-                    print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
-                    nll_vals = []
-                    for i, val in enumerate(param_vals):
-                        nll = nll_func_fixed(np.where(np.arange(len(res.x)) == param_idx, val, res.x))
-                        print(f"  [{i+1:{width}d}/{n_points}]  {pname}={val:.4g}  nll={nll:.6g}")
-                        nll_vals.append(nll)
-                    return param_vals, np.array(nll_vals) - nll_at_optimum
+                    return _run_likelihood_slice_single(
+                        param_idx, nll_func_fixed, res.x, nll_at_optimum, param_names,
+                        n_points=n_points, range_factor=range_factor, scales=scales,
+                        nll_batch=nll_batch,
+                    )
 
                 if slice_analysis:
                     out["stats"]["likelihood_slice"] = likelihood_slice_func
+                    # All parameters at once is the whole point: k x n_points
+                    # independent evaluations with no dependencies between them.
+                    out["stats"]["likelihood_slice_all"] = (
+                        lambda n_points=20, range_factor=2.0:
+                        _run_likelihood_slice_all(
+                            nll_batch, res.x, nll_at_optimum, param_names,
+                            n_points=n_points, range_factor=range_factor, scales=scales,
+                        )
+                    )
 
-                if profile_likelihood_analysis:
+                if fast_profile_likelihood_analysis:
+                    def fast_profile_likelihood_func(param_idx, n_points=3, range_factor=1.1, variation_pct=0.10):
+                        return _run_fast_profile_likelihood_single(
+                            param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
+                            param_names, variation_pct=variation_pct,
+                            method=profile_method, optimizer_kwargs=profile_opt_kwargs,
+                            scales=scales, stats_out=out["stats"],
+                        )
+
+                    out["stats"]["profile_likelihood"] = fast_profile_likelihood_func
+                elif profile_likelihood_analysis:
                     def true_profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
                         se_array = out["stats"].get("wald_se")
                         wald_se_val = se_array[param_idx] if se_array is not None else None
                         return _run_pypesto_profile_single(
                             param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
                             param_names, n_points=n_points, range_factor=range_factor,
-                            fallback_func=likelihood_slice_func, wald_se_val=wald_se_val
+                            fallback_func=likelihood_slice_func, wald_se_val=wald_se_val,
+                            method=profile_method, optimizer_kwargs=profile_opt_kwargs,
+                            scales=scales,
                         )
                     out["stats"]["profile_likelihood"]  = true_profile_likelihood_func
-            except Exception as e:
-                print(f"Warning: likelihood analysis setup failed: {e}")
 
-        if sobol_analysis:
-            from Engine.Sensitivity_analysis import run_sobol_analysis
-            skwargs = sobol_kwargs or {}
-            out["stats"]["sobol"] = run_sobol_analysis(
-                nll_func_fixed, param_names, bounds, res.x, **skwargs
-            )
+                    # Parallel, checkpointed alternative to the sequential
+                    # walker. Model_optimize prefers this when a pool exists.
+                    if _pool_state["evaluator"] is not None:
+                        out["stats"]["profile_likelihood_all"] = (
+                            lambda n_grid=5, range_factor=2.0, se_span=4.0,
+                            n_refine=2, run_id=None:
+                            _run_parallel_profile_with_checkpoint(
+                                _pool_state["evaluator"], res.x, nll_at_optimum,
+                                param_names, bounds, scales,
+                                groups=optimization_spec.groups,
+                                model_text=model_text, paths=paths,
+                                method=profile_method,
+                                optimizer_kwargs=profile_opt_kwargs,
+                                wald_se=out["stats"].get("wald_se"),
+                                n_grid=n_grid, range_factor=range_factor,
+                                se_span=se_span, n_refine=n_refine,
+                                run_id=run_id or groups_tag,
+                                checkpoint_enabled=settings_checkpoint,
+                            )
+                        )
+
+            if sobol_analysis:
+                from Engine.Sensitivity_analysis import run_sobol_analysis
+                skwargs = sobol_kwargs or {}
+                out["stats"]["sobol"] = run_sobol_analysis(
+                    nll_func_fixed, param_names, bounds, res.x,
+                    nll_batch=nll_batch, **skwargs
+                )
+        except Exception as e:
+            import traceback
+            print(f"Warning: diagnostics failed: {e}")
+            traceback.print_exc()
+        finally:
+            # The closures above are consumed by Model_optimize *after* this
+            # function returns, so the pool cannot be torn down here. Hand it to
+            # the caller and let it close the pool once plotting is done.
+            if _pool_state["evaluator"] is not None:
+                out["stats"]["_evaluator"] = _pool_state["evaluator"]
 
         out["r"] = list(models.values())[0]["r"] if models else None
         return out
@@ -2089,6 +3329,11 @@ def run_optimization_from_groups(
     # =========================================================================
     # LEGACY / FLAT REPLICATE ROUTE
     # =========================================================================
+
+    # Legacy dict-based route: linear-only (no parameter_scale field exists here).
+    scales = ["lin"] * len(param_names)
+    fit_mode = _resolve_fit_mode(fit_mode, optimizer_kwargs)
+    profile_method, profile_opt_kwargs = _resolve_profile_optimizer(method, optimizer_kwargs)
 
     opt_groups = experiment.opt_groups  # {opt_group: [key, ...]}
     if group_names is None:
@@ -2275,11 +3520,14 @@ def run_optimization_from_groups(
 
     opt_kw = _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol)
     
-    profile_without_opt = optimizer_kwargs.get("profile_without_opt", False) if optimizer_kwargs else False
-    if profile_without_opt:
+    if fit_mode == "evaluate_x0":
         from scipy.optimize import OptimizeResult
+        print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
+              "so diagnostics run against the supplied parameters.")
         x0_arr = np.array(x0)
-        res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True, message="Optimization bypassed", nit=0, nfev=1)
+        res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
+                             message="Optimization bypassed (fit_mode=evaluate_x0)",
+                             nit=0, nfev=1)
     elif method.lower() in _GLOBAL_METHODS:
         res = _run_global_optimization(objective, x0, bounds, method, opt_kw)
     else:
@@ -2479,7 +3727,7 @@ def run_optimization_from_groups(
 
     out["results_dict"] = best_results
 
-    if wald_analysis or slice_analysis or profile_likelihood_analysis or sobol_analysis:
+    if wald_analysis or slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis or sobol_analysis:
         nll_proper = nll_func_fixed(res.x)
         aic = 2 * k + 2 * nll_proper
         bic = k * np.log(max(total_n, 1)) + 2 * nll_proper
@@ -2488,35 +3736,9 @@ def run_optimization_from_groups(
         out["stats"]["nll_proper"] = nll_proper
 
     if wald_analysis:
-        try:
-            print(f"\n[Wald] Computing Hessian matrix for {k} parameters... (this requires many silent evaluations)")
-            hessian_raw = compute_hessian_numdifftools(nll_func_fixed, res.x)
-            fisher_info = (hessian_raw + hessian_raw.T) / 2.0
-            eigenvalues = np.linalg.eigvals(fisher_info)
-            if np.any(eigenvalues <= 1e-10):
-                print("Warning: Hessian is NOT positive definite.")
-                cov_matrix      = None
-                standard_errors = None
-            else:
-                cov_matrix      = np.linalg.inv(fisher_info)
-                diag_elements   = np.diag(cov_matrix)
-                standard_errors = (None if np.any(diag_elements < 0)
-                                   else np.sqrt(diag_elements))
-            out["stats"]["wald_fisher_info"] = fisher_info
-            out["stats"]["wald_covariance"]  = cov_matrix
-            out["stats"]["wald_se"]          = standard_errors
-            if standard_errors is not None:
-                cv = stats.norm.ppf(1 - 0.05 / 2)
-                out["stats"]["wald_ci"] = [
-                    (p_val - cv * se, p_val + cv * se)
-                    for p_val, se in zip(res.x, standard_errors)
-                ]
-            if cov_matrix is not None:
-                out["stats"]["wald_correlation"] = compute_parameter_correlations(cov_matrix)
-        except Exception as e:
-            print(f"Error computing Wald statistics: {e}")
+        _attach_wald_stats(out, nll_func_fixed, res.x, bounds, param_names)
 
-    if slice_analysis or profile_likelihood_analysis:
+    if slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis:
         try:
             nll_at_optimum = nll_func_fixed(res.x)
             out["stats"]["nll_at_optimum"] = nll_at_optimum
@@ -2538,29 +3760,34 @@ def run_optimization_from_groups(
                 print(f"    {_pname}: {nll_at_optimum:.6g} -> {_nll_test:.6g}  (delta={_nll_test - nll_at_optimum:+.6g})")
 
             def likelihood_slice_func(param_idx, n_points=20, range_factor=2.0):
-                p_val      = res.x[param_idx]
-                pname      = param_names[param_idx]
-                param_vals = np.linspace(p_val / range_factor, p_val * range_factor, n_points)
-                width      = len(str(n_points))
-                print(f"\n[slice] {pname}  ({n_points} points, x{range_factor} range)")
-                nll_vals = []
-                for i, val in enumerate(param_vals):
-                    nll = nll_func_fixed(np.where(np.arange(len(res.x)) == param_idx, val, res.x))
-                    print(f"  [{i+1:{width}d}/{n_points}]  {pname}={val:.4g}  nll={nll:.6g}")
-                    nll_vals.append(nll)
-                return param_vals, np.array(nll_vals) - nll_at_optimum
+                return _run_likelihood_slice_single(
+                    param_idx, nll_func_fixed, res.x, nll_at_optimum, param_names,
+                    n_points=n_points, range_factor=range_factor, scales=scales,
+                )
 
             if slice_analysis:
                 out["stats"]["likelihood_slice"] = likelihood_slice_func
 
-            if profile_likelihood_analysis:
+            if fast_profile_likelihood_analysis:
+                def fast_profile_likelihood_func(param_idx, n_points=3, range_factor=1.1, variation_pct=0.10):
+                    return _run_fast_profile_likelihood_single(
+                        param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
+                        param_names, variation_pct=variation_pct,
+                        method=profile_method, optimizer_kwargs=profile_opt_kwargs,
+                        scales=scales, stats_out=out["stats"],
+                    )
+
+                out["stats"]["profile_likelihood"] = fast_profile_likelihood_func
+            elif profile_likelihood_analysis:
                 def true_profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
                     se_array = out["stats"].get("wald_se")
                     wald_se_val = se_array[param_idx] if se_array is not None else None
                     return _run_pypesto_profile_single(
                         param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
                         param_names, n_points=n_points, range_factor=range_factor,
-                        fallback_func=likelihood_slice_func, wald_se_val=wald_se_val
+                        fallback_func=likelihood_slice_func, wald_se_val=wald_se_val,
+                        method=profile_method, optimizer_kwargs=profile_opt_kwargs,
+                        scales=scales,
                     )
 
                 out["stats"]["profile_likelihood"]  = true_profile_likelihood_func

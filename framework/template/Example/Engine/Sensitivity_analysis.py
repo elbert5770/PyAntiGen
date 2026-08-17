@@ -11,7 +11,8 @@ except ImportError:
     _SALIB_AVAILABLE = False
 
 
-def run_sobol_analysis(nll_func, param_names, bounds, res_x, N=128, range_factor=2.0, mode='loss'):
+def run_sobol_analysis(nll_func, param_names, bounds, res_x, N=128, range_factor=2.0,
+                       mode='loss', nll_batch=None):
     """
     Run Sobol Global Sensitivity Analysis on the Negative Log-Likelihood (NLL).
     This tests the identifiability of parameters against the experimental data.
@@ -62,21 +63,29 @@ def run_sobol_analysis(nll_func, param_names, bounds, res_x, N=128, range_factor
     num_samples = param_values.shape[0]
     
     print(f"[Sobol {mode.capitalize()}] Evaluating {num_samples} samples...")
-    Y = np.zeros(num_samples)
-    
+
     import time
     t0 = time.time()
-    for i, sample in enumerate(param_values):
-        try:
-            Y[i] = nll_func(sample)
-        except Exception:
-            Y[i] = np.nan
-            
-        if (i+1) % 100 == 0 or (i+1) == num_samples:
-            elapsed = time.time() - t0
-            rate = (i+1) / elapsed if elapsed > 0 else 0
-            print(f"  [{i+1}/{num_samples}]  {elapsed:.1f}s  ({rate:.1f} evals/s)", end='\r', flush=True)
-            
+
+    if nll_batch is not None:
+        # Saltelli samples are independent by construction, so the whole design
+        # goes out as one batch -- the single largest parallel win available here.
+        Y = np.asarray(nll_batch(list(param_values), label="sobol"), dtype=float)
+        print(f"[Sobol {mode.capitalize()}] {num_samples} samples in "
+              f"{time.time() - t0:.1f}s")
+    else:
+        Y = np.zeros(num_samples)
+        for i, sample in enumerate(param_values):
+            try:
+                Y[i] = nll_func(sample)
+            except Exception:
+                Y[i] = np.nan
+
+            if (i+1) % 100 == 0 or (i+1) == num_samples:
+                elapsed = time.time() - t0
+                rate = (i+1) / elapsed if elapsed > 0 else 0
+                print(f"  [{i+1}/{num_samples}]  {elapsed:.1f}s  ({rate:.1f} evals/s)", end='\r', flush=True)
+
     print(f"\n[Sobol {mode.capitalize()}] Done. Running SALib analysis...")
     
     valid_mask = np.isfinite(Y)
