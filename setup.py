@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='pyantigen',
-    version='1.0.6',
+    version='1.0.7',
     description='A declarative framework for building compartmental Antimony models',
     author='Open Source Contributor',
     packages=find_packages(include=['framework*']),
