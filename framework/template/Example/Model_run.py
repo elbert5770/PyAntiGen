@@ -2,7 +2,16 @@ import os
 import sys
 
 from Engine.Model_simulate import setup_simulation
-from Engine.Model_optimize import setup_optimization_from_groups
+from Engine.Model_optimize import (
+    setup_optimization_from_groups,
+    _FULL_DIAGNOSTICS,
+    _SLICE_ONLY,
+    _PROFILE_ONLY,
+    _SOBOL_ONLY,
+    _FAST_PROFILE_ONLY,
+    _NO_DIAGNOSTICS,
+    DIAGNOSTICS_PRESETS,
+)
 from Modules.Plots import *
 from Modules.Experiment import get_EXPERIMENT
 from Modules.Optimizer_settings import get_OPTIMIZATION
@@ -13,36 +22,7 @@ EXPERIMENT_dict = {
     "Example": {'EXPERIMENT': get_EXPERIMENT('EXPERIMENT_Example'), 'plot': plot_results, 'opt_settings_key': 'Example'},
 }
 
-_FULL_DIAGNOSTICS = {
-    "wald_analysis": True,
-    "slice_analysis": True,
-    "profile_likelihood_analysis": True,
-    "sobol_analysis": True,
-    "sobol_N": 128,
-}
-
-_SLICE_ONLY = {
-    "wald_analysis": False,
-    "slice_analysis": True,
-    "profile_likelihood_analysis": False,
-    "sobol_analysis": False,
-}
-
-_PROFILE_ONLY = {
-    "wald_analysis": True,
-    "slice_analysis": False,
-    "profile_likelihood_analysis": True,
-    "sobol_analysis": False,
-}
-
-_SOBOL_ONLY = {
-    "wald_analysis": False,
-    "slice_analysis": False,
-    "profile_likelihood_analysis": False,
-    "sobol_analysis": True,
-}
-
-
+diagnostics = _NO_DIAGNOSTICS
 
 OPTIMIZATION_REGISTRY = {
     # One CLI selection can run multiple independent Optimization specs in
@@ -79,6 +59,9 @@ if __name__ == "__main__":
                         help="Optimization mode")
     parser.add_argument("--simulate", type=str, choices=list(EXPERIMENT_dict.keys()),
                         help="Simulation mode")
+    parser.add_argument("--diagnostics", type=str, default="_NO_DIAGNOSTICS",
+                        choices=list(DIAGNOSTICS_PRESETS.keys()),
+                        help="Diagnostics settings preset to run (default: _NO_DIAGNOSTICS)")
     parser.add_argument("--no-fit", action="store_true", dest="no_fit",
                         help="Skip the optimizer and evaluate the spec's x0 instead, "
                              "then run the requested diagnostics against it.")
@@ -104,7 +87,11 @@ if __name__ == "__main__":
             "slice_analysis": False,
             "fit_mode": "evaluate_x0" if args.no_fit else "optimize",
         }
-        run_settings.update(opt_info.get("diagnostics", {}))
+        selected_diagnostics = DIAGNOSTICS_PRESETS.get(args.diagnostics, _NO_DIAGNOSTICS)
+        run_settings.update(selected_diagnostics)
+        if "diagnostics" in opt_info:
+            run_settings.update(opt_info["diagnostics"])
+
 
         # Retrieve experiment object & optimization spec(s)
         exp_obj = get_EXPERIMENT(opt_info["experiment"])

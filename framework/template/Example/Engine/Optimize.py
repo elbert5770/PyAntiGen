@@ -141,7 +141,8 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
             ax.set_ylim(ylo - pad, yhi + pad)
 
         rep, obs = key
-        ax.set_title(f"{rep} · {obs}\ncontrib={tr['contrib']:.4g}", fontsize=9)
+        ax.set_title(f"{_short_obs_label(rep, 28)} · {_short_obs_label(obs, 28)}"
+                     f"\ncontrib={tr['contrib']:.4g}", fontsize=9)
         ax.grid(True, alpha=0.3)
         if i == 0:
             ax.legend(fontsize=7, loc="best")
@@ -157,6 +158,87 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
     out = os.path.join(plot_path, f"optimization_progress_{opt_timestamp}.png")
     fig.savefig(out, dpi=100, bbox_inches="tight")
     _progress_overlay_state["last_render"] = now
+
+
+def evaluate_observable(obs, result, param_dict=None, on_error="raise"):
+    """Evaluate an observable against a simulation result.
+
+    ``obs`` may be a callable, a bare output name ("MFL42", "[AB42_SP3]"), or a
+    Python **expression** over the output columns
+    (e.g. "np.log10(Total_Plasma_Antibody/V_Plasma)").
+
+    This exists because the expression case was previously handled in the loss
+    but *not* in the sigma-estimation block, which silently substituted zeros
+    for anything that was not a literal column name. Sigma was then the RMS of
+    the data rather than of the residuals -- inflating it by ~100x for log-scale
+    PK data, which suppressed every dNLL built on it by ~10^4 and made profile
+    likelihood useless for expression-valued observables. One resolver, used
+    everywhere, is what keeps that from recurring.
+
+    ``on_error="zeros"`` returns zeros instead of raising, for callers that must
+    not fail; it logs, because silently returning zeros is what caused the bug.
+
+    **Not used by the loss functions on purpose.** ``loss_function_evaluated``
+    and ``loss_function_composite`` build the same namespace once per result and
+    reuse it across observables (``_ensure_eval_context``). They run millions of
+    times per fit, so rebuilding the column namespace per call there would cost
+    real time. This resolver is for the once-per-fit paths -- sigma estimation
+    and diagnostics -- where clarity matters and the cost does not. If the two
+    ever need to converge, cache inside this function rather than removing the
+    caching from the hot loop.
+    """
+    if callable(obs):
+        return np.asarray(obs(result))
+
+    if not isinstance(obs, str):
+        raise ValueError(f"Invalid observable type: {type(obs)}")
+
+    cols = (result.colnames if hasattr(result, "colnames")
+            else (result.dtype.names if hasattr(result, "dtype") and result.dtype.names
+                  else []))
+    if obs in cols:
+        return np.asarray(result[obs])
+
+    # Expression: build a namespace of every output column, with [X] aliased to X.
+    local_dict = {"np": np, "numpy": np, "time": np.asarray(result["time"])}
+    for col in cols:
+        local_dict[col] = np.asarray(result[col])
+        if col.startswith("[") and col.endswith("]"):
+            local_dict[col[1:-1]] = np.asarray(result[col])
+    if param_dict:
+        local_dict.update(param_dict)
+
+    eval_obs = str(obs)
+    for col in cols:
+        if col.startswith("[") and col.endswith("]"):
+            eval_obs = eval_obs.replace(col, col[1:-1])
+    try:
+        return np.asarray(eval(eval_obs, {"__builtins__": {}}, local_dict))
+    except Exception as exc:
+        if on_error == "zeros":
+            print(f"  [observable] could not evaluate {_short_obs_label(obs)!r}: "
+                  f"{exc}. Returning zeros — any sigma or loss derived from this "
+                  f"will be meaningless.")
+            return np.zeros_like(np.asarray(result["time"]))
+        raise RuntimeError(f"Failed to evaluate observable '{obs}': {exc}") from exc
+
+
+def _short_obs_label(obs, max_len=32):
+    """Compact, stable display name for an observable.
+
+    Observables may be bare column names, callables, or long inline
+    expressions. Plot titles and checkpoint records want something readable, so
+    long expressions are elided in the middle -- keeping both ends, which is
+    where the distinguishing part of an expression usually lives.
+    """
+    name = getattr(obs, "__name__", None)
+    if name:
+        return name
+    text = str(obs).strip()
+    if len(text) <= max_len:
+        return text
+    keep = (max_len - 3) // 2
+    return f"{text[:keep]}...{text[-keep:]}"
 
 
 class OptRoadRunnerProxy:
@@ -432,7 +514,7 @@ def loss_function_evaluated(
             total_loss += contrib
 
             if trace_collector is not None:
-                obs_label = getattr(obs, '__name__', str(obs))
+                obs_label = _short_obs_label(obs)
                 trace_collector[(str(exp_id), obs_label)] = {
                     "t_data":  np.asarray(t_data),
                     "y_data":  np.asarray(y_data),
@@ -442,7 +524,7 @@ def loss_function_evaluated(
                 }
 
             if debug:
-                obs_label = getattr(obs, '__name__', str(obs))
+                obs_label = _short_obs_label(obs)
                 print(f"  [loss] rep={exp_id}  obs='{obs_label}'")
                 print(f" Params: {param_dict}")
                 print(f"    t_sim : [{t_sim.min():.6g}, {t_sim.max():.6g}]  n={len(t_sim)}")
@@ -676,7 +758,7 @@ def loss_function_composite(
         total_loss += contrib
 
         if trace_collector is not None:
-            obs_label = getattr(obs, '__name__', str(obs))
+            obs_label = _short_obs_label(obs)
             res_0 = results_list[0]["results"] if results_list and isinstance(results_list[0], dict) else (results_list[0] if results_list else None)
             t_sim_first = np.asarray(res_0["time"]) if res_0 is not None else t_data
             trace_collector[(str(exp_id), obs_label)] = {
@@ -688,7 +770,7 @@ def loss_function_composite(
             }
 
         if debug:
-            obs_label = getattr(obs, '__name__', str(obs))
+            obs_label = _short_obs_label(obs)
             print(f"  [composite loss] group={exp_id}  obs='{obs_label}'")
             print(f" Params: {param_dict}")
             print(f"    t_data: {np.array2string(t_data, precision=6, max_line_width=120)}")
@@ -794,14 +876,33 @@ def simulate_active_replicates(
 def accumulate_group_nll(
     sim_results, groups, group_normalization, replicates, param_names,
     p_lin, p_dict, fixed_sigmas=None, trace_collector=None, loss_components=None,
+    use_weights=True,
 ):
-    """Combine per-simulation losses into the group-weighted total."""
+    """Combine per-simulation losses into a single scalar.
+
+    Two different quantities are built here, and conflating them was a real bug:
+
+    * **The fitting objective** (``use_weights=True`` with the spec's
+      ``group_normalization``). Averaging over loss elements stops the optimizer
+      chasing whichever condition contributed the most replicates, and the
+      element/group weights express the author's judgement about relative
+      importance. Both are legitimate ways to shape a fit.
+    * **The joint log-likelihood** (``use_weights=False`` and
+      ``group_normalization="sum_over_groups"``). Inference needs the plain sum
+      of per-observable NLL terms. Averaging divides every dNLL by the number of
+      loss elements, and weights scale it arbitrarily, so a dNLL built from the
+      objective cannot be compared with the chi-square threshold of 1.9207 --
+      the confidence intervals come out too wide by roughly the square root of
+      that factor, and AIC/BIC and the Wald standard errors are shifted with them.
+
+    Use :func:`evaluate_nll_fixed` with ``for_inference=True`` to get the second.
+    """
     total = 0.0
     for g_name, g_config in groups.items():
         g_loss_sum = 0.0
         g_weight_sum = 0.0
         for idx, elem in enumerate(g_config.get("loss_elements", [])):
-            elem_weight = elem.get("weight", 1.0)
+            elem_weight = elem.get("weight", 1.0) if use_weights else 1.0
             lc_fn = elem.get("loss_config")
 
             is_composite = elem.get("type") == "composite" or "simulations" in elem
@@ -848,19 +949,28 @@ def accumulate_group_nll(
                       if group_normalization == "mean_over_groups" else g_loss_sum)
         else:
             g_loss = 0.0
-        total += g_loss * g_config.get("group_weight", 1.0)
+        total += g_loss * (g_config.get("group_weight", 1.0) if use_weights else 1.0)
     return total
 
 
 def evaluate_nll_fixed(
     p, models, replicates, param_names, scales, groups, group_normalization,
     fixed_sigmas, model_text=None, paths=None, events_dynamic=False,
-    failure_value=1e10,
+    failure_value=1e10, for_inference=True,
 ):
-    """Proper joint NLL at *p* (optimizer space) with sigmas frozen at the optimum.
+    """Joint NLL at *p* (optimizer space) with sigmas frozen at the optimum.
 
     This is the function every diagnostic consumes -- Wald, slice, profile,
-    Sobol -- and the one the parallel pool evaluates in worker processes.
+    Sobol, AIC/BIC -- and the one the parallel pool evaluates in workers.
+
+    ``for_inference=True`` (the default) forces the plain sum over loss elements
+    with unit weights, i.e. the actual joint log-likelihood, regardless of the
+    ``group_normalization`` and weights the *fit* used. Those are objective-
+    shaping choices; letting them through to inference divides every dNLL by the
+    number of loss elements per group and scales it by the weights, which makes
+    a dNLL of 1.9207 mean something other than a 95% interval.
+
+    Pass ``for_inference=False`` to reproduce the objective's own scaling.
     """
     p_lin = _to_linear(p, scales)
     p_dict = dict(zip(param_names, p_lin.tolist()))
@@ -870,10 +980,150 @@ def evaluate_nll_fixed(
     )
     if sim_results is None:
         return failure_value
+    if for_inference:
+        group_normalization = "sum_over_groups"
     return accumulate_group_nll(
         sim_results, groups, group_normalization, replicates, param_names,
         p_lin, p_dict, fixed_sigmas=fixed_sigmas,
+        use_weights=not for_inference,
     )
+
+
+# ---------------------------------------------------------------------------
+# NLL decomposition (what is dNLL actually made of?)
+# ---------------------------------------------------------------------------
+
+def describe_nll_terms(p_vec, models, replicates, param_names, scales, groups,
+                       group_normalization, fixed_sigmas):
+    """Per-observable breakdown of the joint NLL at *p_vec*.
+
+    Answers the three questions that matter when a dNLL looks wrong:
+
+    * **Which branch fired?** ``sigma_source`` is "fixed" only when the
+      (simulation, observable) key was found in ``fixed_sigmas``. Anything else
+      means the proper likelihood was skipped and a data-scale heuristic was
+      used instead -- with a further division by the point count -- so the
+      number is a normalized residual, not a log-likelihood.
+    * **What sigma was actually used?** Reported per observable, so an inferred
+      sigma can be checked rather than assumed.
+    * **Where does the change live?** Call at two parameter vectors and diff the
+      ``sum_sq`` / ``contrib`` columns to see which observables move.
+
+    Returns a list of dicts, one per (simulation, observable).
+    """
+    p_lin = _to_linear(p_vec, scales)
+    p_dict = dict(zip(param_names, p_lin.tolist()))
+    sim_results = simulate_active_replicates(p_dict, models, replicates, param_names)
+    if sim_results is None:
+        return []
+
+    rows = []
+    for g_name, g_cfg in groups.items():
+        for idx, elem in enumerate(g_cfg.get("loss_elements", [])):
+            sim = elem.get("simulation")
+            if sim is None or sim not in sim_results:
+                continue
+            lc_fn = elem.get("loss_config")
+            lc = lc_fn(replicates[sim]) if callable(lc_fn) else lc_fn
+            item = sim_results[sim]
+            result, item_df = item["results"], item["data"]
+            t_sim = np.asarray(result["time"])
+
+            for obs_cfg in (lc or {}).get("observables", []):
+                obs = obs_cfg["observed_variable"]
+                d_col, t_col = obs_cfg["data_column"], obs_cfg["time_column"]
+                obs_df = _resolve_obs_df(item_df, obs_cfg)
+                if obs_df is None or d_col not in obs_df.columns:
+                    rows.append({"group": g_name, "sim": sim,
+                                 "obs": _short_obs_label(obs), "n": 0,
+                                 "sigma_source": "unresolved-data"})
+                    continue
+                y_data = np.asarray(obs_df[d_col])
+                t_data = np.asarray(obs_df[t_col])
+                try:
+                    # Shared resolver: a diagnostic that silently measured the
+                    # data against zeros would report the very error it exists
+                    # to detect.
+                    y_sim = evaluate_observable(obs, result, p_dict)
+                except Exception as exc:
+                    rows.append({"group": g_name, "sim": sim,
+                                 "obs": _short_obs_label(obs), "n": 0,
+                                 "sigma_source": f"unevaluable: {exc}"})
+                    continue
+                y_pred = np.interp(t_data, t_sim, y_sim)
+                valid = np.isfinite(y_pred) & np.isfinite(y_data)
+                if not valid.any():
+                    continue
+                res = y_data[valid] - y_pred[valid]
+                n = int(valid.sum())
+
+                key_hit = (fixed_sigmas is not None
+                           and (sim, obs) in fixed_sigmas)
+                if key_hit:
+                    sigma = float(fixed_sigmas[(sim, obs)])
+                    source = "fixed"
+                    contrib = float(-np.sum(stats.norm.logpdf(
+                        y_data[valid], loc=y_pred[valid], scale=sigma)))
+                else:
+                    sm = obs_cfg.get("sigma_method", "max_mean_std")
+                    yv = y_data[valid]
+                    if sm == "mean_y_data":
+                        sigma = max(float(np.mean(np.abs(yv))), 1e-6)
+                    elif sm == "std_y_data":
+                        sigma = max(float(np.std(yv)) if n > 1 else abs(float(yv[0])), 1e-6)
+                    elif sm == "fixed":
+                        sigma = max(float(obs_cfg.get("sigma_value", 1.0)), 1e-6)
+                    else:
+                        sigma = max(float(np.mean(np.abs(yv))),
+                                    float(np.std(yv)) if n > 1 else 0.0, 1e-6)
+                    source = f"heuristic:{sm}"
+                    contrib = float(0.5 * np.sum((res / sigma) ** 2) / n)
+
+                rows.append({
+                    "group": g_name, "sim": sim, "obs": _short_obs_label(obs),
+                    "n": n, "sigma": sigma, "sigma_source": source,
+                    "sum_sq": float(np.sum(res ** 2)),
+                    "mean_sq": float(np.mean(res ** 2)),
+                    "rms": float(np.sqrt(np.mean(res ** 2))),
+                    "contrib": contrib,
+                    "elem_weight": float(elem.get("weight", 1.0)),
+                    "group_weight": float(g_cfg.get("group_weight", 1.0)),
+                    "n_elems_in_group": len(g_cfg.get("loss_elements", [])),
+                })
+    return rows
+
+
+def print_nll_decomposition(rows, title="NLL decomposition"):
+    """Human-readable table from :func:`describe_nll_terms`."""
+    print("\n" + "=" * 108)
+    print(title)
+    print("=" * 108)
+    hdr = (f"{'group':<12} {'simulation':<22} {'observable':<20} {'n':>4} "
+           f"{'sigma':>11} {'source':<20} {'sum r^2':>11} {'contrib':>11}")
+    print(hdr)
+    print("-" * 108)
+    n_fixed = n_other = 0
+    for r in rows:
+        if r.get("n", 0) == 0:
+            print(f"{r['group']:<12} {r['sim']:<22} {r['obs']:<20} "
+                  f"{'--':>4} {'--':>11} {r['sigma_source']:<20}")
+            n_other += 1
+            continue
+        if r["sigma_source"] == "fixed":
+            n_fixed += 1
+        else:
+            n_other += 1
+        print(f"{r['group']:<12} {r['sim']:<22} {r['obs']:<20} {r['n']:>4} "
+              f"{r['sigma']:>11.4g} {r['sigma_source']:<20} "
+              f"{r['sum_sq']:>11.4g} {r['contrib']:>11.4g}")
+    print("-" * 108)
+    if n_other:
+        print(f"WARNING: {n_other} observable(s) did NOT use the fixed-sigma "
+              f"likelihood. Their contributions are point-averaged normalized "
+              f"residuals, not log-likelihood terms, so any dNLL built from them "
+              f"cannot be compared against the chi-square threshold of 1.9207.")
+    else:
+        print(f"All {n_fixed} observable(s) used the fixed-sigma likelihood.")
 
 
 # ---------------------------------------------------------------------------
@@ -2176,6 +2426,7 @@ def _run_parallel_profile_with_checkpoint(
     evaluator, res_x, nll_at_optimum, param_names, bounds, scales, groups,
     model_text, paths, method, optimizer_kwargs, wald_se,
     n_grid, range_factor, se_span, n_refine, run_id, checkpoint_enabled=True,
+    fixed_sigmas=None,
 ):
     """Wire the pool, the checkpoint store and run_parallel_profile together."""
     from Engine.Profile_checkpoint import (
@@ -2183,7 +2434,7 @@ def _run_parallel_profile_with_checkpoint(
     )
 
     model_hash, spec_hash = spec_fingerprint(
-        param_names, res_x, groups, scales, model_text
+        param_names, res_x, groups, scales, model_text, fixed_sigmas=fixed_sigmas
     )
     # run_id must be stable across launches or resuming can never happen.
     run_id = default_run_id(run_id, model_hash, spec_hash)
@@ -3109,16 +3360,11 @@ def run_optimization_from_groups(
 
                             t_data_s = np.asarray(obs_df_s[t_col])
 
-                            if callable(obs_s):
-                                y_sim = np.asarray(obs_s(result))
-                            elif isinstance(obs_s, str):
-                                cols = (result.colnames if hasattr(result, "colnames")
-                                        else (result.dtype.names if hasattr(result, "dtype") else []))
-                                if obs_s in cols:
-                                    y_sim = np.asarray(result[obs_s])
-                                else:
-                                    y_sim = np.zeros_like(t_sim)
-                            else:
+                            try:
+                                # Composite path: same shared resolver, for the same reason.
+                                y_sim = evaluate_observable(obs_s, result, param_dict)
+                            except Exception as exc:
+                                print(f"  [sigma] skipping {_short_obs_label(obs_s)}: {exc}")
                                 continue
                             y_pred_subs.append(np.interp(t_data_s, t_sim, y_sim))
 
@@ -3153,16 +3399,12 @@ def run_optimization_from_groups(
                             continue
                         y_data = np.asarray(obs_df[d_col])
                         t_data = np.asarray(obs_df[t_col])
-                        if callable(obs):
-                            y_sim = np.asarray(obs(result))
-                        elif isinstance(obs, str):
-                            cols = (result.colnames if hasattr(result, "colnames")
-                                    else (result.dtype.names if hasattr(result, "dtype") else []))
-                            if obs in cols:
-                                y_sim = np.asarray(result[obs])
-                            else:
-                                y_sim = np.zeros_like(t_sim)
-                        else:
+                        try:
+                            # Same resolver the loss uses, so an expression observable gets
+                            # evaluated here too instead of silently becoming zeros.
+                            y_sim = evaluate_observable(obs, result, param_dict)
+                        except Exception as exc:
+                            print(f"  [sigma] skipping {_short_obs_label(obs)}: {exc}")
                             continue
                         y_pred = np.interp(t_data, t_sim, y_sim)
                         valid = np.isfinite(y_pred) & np.isfinite(y_data)
@@ -3172,6 +3414,33 @@ def run_optimization_from_groups(
                         sigma = np.sqrt(np.sum(residuals**2) / max(1, len(residuals) - k/max(1, len(observables))))
                         fixed_sigmas[(sim, obs)] = max(sigma, 1e-6)
                         total_n += len(residuals)
+
+        # A silent fixed_sigmas miss is the difference between profiling a
+        # likelihood and profiling a normalized residual, so say so loudly.
+        _n_active_obs = 0
+        for _g in optimization_spec.groups.values():
+            for _e in _g.get("loss_elements", []):
+                _sim = _e.get("simulation")
+                if _sim not in replicates:
+                    continue
+                _lcf = _e.get("loss_config")
+                _lc = _lcf(replicates[_sim]) if callable(_lcf) else _lcf
+                _n_active_obs += len((_lc or {}).get("observables", []))
+
+        if not fixed_sigmas:
+            print()
+            print("*** WARNING: fixed_sigmas is EMPTY. Every diagnostic falls back to "
+                  "the point-averaged heuristic loss, which is NOT a log-likelihood, "
+                  "so dNLL cannot be compared against the 1.9207 threshold. ***")
+            print()
+        elif _n_active_obs and len(fixed_sigmas) < _n_active_obs:
+            print()
+            print(f"*** WARNING: fixed_sigmas covers {len(fixed_sigmas)} of "
+                  f"{_n_active_obs} active observable(s). The unmatched ones fall back "
+                  f"to the point-averaged heuristic loss, so dNLL mixes likelihood and "
+                  f"non-likelihood terms. Use Engine.Optimize.describe_nll_terms to see "
+                  f"which. ***")
+            print()
 
         def nll_func_fixed(p):
             return evaluate_nll_fixed(
@@ -3302,6 +3571,7 @@ def run_optimization_from_groups(
                                 se_span=se_span, n_refine=n_refine,
                                 run_id=run_id or groups_tag,
                                 checkpoint_enabled=settings_checkpoint,
+                                fixed_sigmas=fixed_sigmas,
                             )
                         )
 
@@ -3702,8 +3972,10 @@ def run_optimization_from_groups(
                 r_proxy = OptRoadRunnerProxy(r_new, param_names)
                 replicate["Update_parameters"](r_proxy, replicate)
                 
-                rep_weight = effective_lc.get("replicate_weight", 1.0)
-                total_nll += rep_weight * loss_function(
+                # Unweighted: replicate_weight shapes the fit, but the joint
+                # log-likelihood is the plain sum. Weighting it would rescale
+                # every dNLL and invalidate the 1.9207 threshold.
+                total_nll += loss_function(
                     p, r_new, key, replicate,
                     m["df_dict"], param_names,
                     effective_lc, fixed_sigmas=fixed_sigmas,
@@ -3720,8 +3992,8 @@ def run_optimization_from_groups(
                 except Exception as e:
                     print(f"Error evaluating fixed replicate {key}: {e}")
                     return 1e10
-                rep_weight = effective_lc.get("replicate_weight", 1.0)
-                total_nll += loss_val * rep_weight
+                # Unweighted, for the same reason as above.
+                total_nll += loss_val
 
         return total_nll
 

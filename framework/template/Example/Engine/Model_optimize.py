@@ -28,6 +28,77 @@ from Engine.Petab_export import export_petab
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics Presets
+# ---------------------------------------------------------------------------
+
+_FULL_DIAGNOSTICS = {
+    "wald_analysis": True,
+    "slice_analysis": True,
+    "profile_likelihood_analysis": True,
+    "sobol_analysis": True,
+    "sobol_N": 128,
+}
+
+_SLICE_ONLY = {
+    "wald_analysis": False,
+    "slice_analysis": True,
+    "profile_likelihood_analysis": False,
+    "sobol_analysis": False,
+}
+
+_PROFILE_ONLY = {
+    "wald_analysis": True,
+    "slice_analysis": False,
+    "profile_likelihood_analysis": True,
+    "sobol_analysis": False,
+}
+
+_SOBOL_ONLY = {
+    "wald_analysis": False,
+    "slice_analysis": False,
+    "profile_likelihood_analysis": False,
+    "sobol_analysis": True,
+}
+
+_FAST_PROFILE_ONLY = {
+    "wald_analysis": False,
+    "slice_analysis": False,
+    "profile_likelihood_analysis": False,
+    "fast_profile_likelihood_analysis": True,
+    "sobol_analysis": False,
+}
+
+_NO_DIAGNOSTICS = {
+    "wald_analysis": False,
+    "slice_analysis": False,
+    "profile_likelihood_analysis": False,
+    "sobol_analysis": False,
+}
+
+DIAGNOSTICS_PRESETS = {
+    "_NO_DIAGNOSTICS": _NO_DIAGNOSTICS,
+    "_FULL_DIAGNOSTICS": _FULL_DIAGNOSTICS,
+    "_SLICE_ONLY": _SLICE_ONLY,
+    "_PROFILE_ONLY": _PROFILE_ONLY,
+    "_SOBOL_ONLY": _SOBOL_ONLY,
+    "_FAST_PROFILE_ONLY": _FAST_PROFILE_ONLY,
+    "NO_DIAGNOSTICS": _NO_DIAGNOSTICS,
+    "FULL_DIAGNOSTICS": _FULL_DIAGNOSTICS,
+    "SLICE_ONLY": _SLICE_ONLY,
+    "PROFILE_ONLY": _PROFILE_ONLY,
+    "SOBOL_ONLY": _SOBOL_ONLY,
+    "FAST_PROFILE_ONLY": _FAST_PROFILE_ONLY,
+    "FULL": _FULL_DIAGNOSTICS,
+    "SLICE": _SLICE_ONLY,
+    "PROFILE": _PROFILE_ONLY,
+    "SOBOL": _SOBOL_ONLY,
+    "FAST_PROFILE": _FAST_PROFILE_ONLY,
+    "NO": _NO_DIAGNOSTICS,
+}
+
+
+
+# ---------------------------------------------------------------------------
 # Fork-safe worker (module-level so it is accessible in forked child memory)
 # ---------------------------------------------------------------------------
 

@@ -46,7 +46,8 @@ def _round_sig(x, sig=6):
     return round(x, sig - 1 - int(np.floor(np.log10(abs(x)))))
 
 
-def spec_fingerprint(param_names, x_opt, groups, scales, model_text):
+def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
+                     fixed_sigmas=None):
     """Stable hashes identifying what a set of profile points belongs to.
 
     Points computed against a different model, parameter set, or optimum must
@@ -65,6 +66,19 @@ def spec_fingerprint(param_names, x_opt, groups, scales, model_text):
             "x_opt": [_round_sig(v) for v in np.atleast_1d(x_opt)],
             "scales": list(scales),
             "groups": sorted(groups.keys()) if hasattr(groups, "keys") else None,
+            # Bumped when the meaning of a stored dNLL changes. v2 = the joint
+            # log-likelihood (plain sum, unit weights); v1 carried the
+            # objective's group averaging and weights, so its dNLL values are on
+            # a different scale and must not be resumed into a v2 run.
+            "likelihood_convention": "v2-summed-unweighted",
+            # dNLL is computed against these sigmas, so a point stored under
+            # different ones is not comparable. Including them means a corrected
+            # sigma estimate invalidates stale checkpoints automatically instead
+            # of silently resuming numbers from a previous convention.
+            "sigmas": sorted(
+                (str(k), round(float(v), 12))
+                for k, v in (fixed_sigmas or {}).items()
+            ),
         },
         sort_keys=True,
     )

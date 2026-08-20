@@ -100,6 +100,10 @@ class EvalSpec:
     fixed_sigmas: dict
     events_dynamic: bool = False
     data_path: str = None
+    # Workers must compute exactly what the parent computes. True means the
+    # joint log-likelihood (plain sum over loss elements, unit weights); False
+    # reproduces the objective's own normalization and weighting.
+    for_inference: bool = True
     # Reserved for future use by the profile grid (Stage 2).
     meta: dict = field(default_factory=dict)
 
@@ -156,6 +160,7 @@ def _worker_nll(x):
         spec.groups, spec.group_normalization, spec.fixed_sigmas,
         model_text=spec.model_text, paths=spec.paths,
         events_dynamic=spec.events_dynamic, failure_value=FAILURE_VALUE,
+        for_inference=getattr(spec, "for_inference", True),
     )
 
 
@@ -481,6 +486,7 @@ class ParallelEvaluator:
 def build_eval_spec(
     model_text, paths, events, replicates, param_names, scales, groups,
     group_normalization, fixed_sigmas, events_dynamic=False, data_path=None,
+    for_inference=True,
 ):
     """Convenience constructor mirroring the spec-route local variables."""
     return EvalSpec(
@@ -495,6 +501,7 @@ def build_eval_spec(
         fixed_sigmas=dict(fixed_sigmas or {}),
         events_dynamic=bool(events_dynamic),
         data_path=data_path or paths.get("data_path"),
+        for_inference=bool(for_inference),
     )
 
 
