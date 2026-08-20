@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyAntiGen"
-version = "v1.0.5"
+version = "1.0.7"
 description = "Short one-line description of what PyAntiGen does"
 readme = "README.md"
 license = { text = "MIT" }          # adjust if needed
