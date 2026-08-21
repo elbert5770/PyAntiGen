@@ -66,6 +66,26 @@ def create_project():
                             
                             # Add the reaction to the model
                             self.add_reaction(Reaction_name, Reactants, Products, Rate_type, Rate_eqtn_prototype)
+
+
+                    class BasicChainReaction(PyAntiGenModule):
+                        \"\"\"
+                        Adds the second step of the chain A -> B -> C.
+                        With k_B_to_C = 0 (the default in Example_parameters.csv) the
+                        model behaves exactly like the single-step A -> B examples;
+                        Example4/Example5 fit k_B_to_C to demonstrate flip-flop
+                        bimodality.
+                        \"\"\"
+                        def build(self):
+                            Compartments = ['Comp1']
+                            for Comp in Compartments:
+                                Reaction_name = f"Basic_B_to_C_{{Comp}}"
+                                Reactants = f"[B_{{Comp}}]"
+                                Products = f"[C_{{Comp}}]"
+                                Rate_type = "MA"
+                                Rate_eqtn_prototype = "k_B_to_C"
+
+                            self.add_reaction(Reaction_name, Reactants, Products, Rate_type, Rate_eqtn_prototype)
                 """))
         print(f"  Created folder: {d}/")
 
@@ -126,6 +146,7 @@ def create_project():
     with open(param_csv_path, "w") as f:
         f.write("Parameter,Value,Units,Comment\n")
         f.write("k_A_to_B,0.1,,Default rate constant for A to B\n")
+        f.write("k_B_to_C,0.0,,Default rate constant for B to C (0 disables the chain step)\n")
         f.write("V_Comp1,1.0,,Default compartment volume\n")
     print("  Created file: antimony_models/Example/Example_parameters.csv")
 
@@ -134,6 +155,7 @@ def create_project():
         f.write("Species,InitialCondition,Units,Comment\n")
         f.write("A_Comp1,0.0,,Initial amount of A\n")
         f.write("B_Comp1,0.0,,Initial amount of B\n")
+        f.write("C_Comp1,0.0,,Initial amount of C\n")
     print("  Created file: antimony_models/Example/Example_InitialConditions.csv")
 
     init_cond_path = os.path.join(example_antimony_dir, "Example_manual.txt")

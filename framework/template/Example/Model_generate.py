@@ -8,12 +8,15 @@ import AntiGen_paths
 
 
 from framework.pyantigen import PyAntiGen
-from antimony_modules.Basic.ma_reaction import BasicMAReaction
+from antimony_modules.Basic.ma_reaction import BasicMAReaction, BasicChainReaction
 
 def generate_antimony_model(Isotopes=['']):
     MODEL_NAME = AntiGen_paths.MODEL_NAME
     model = PyAntiGen(name=MODEL_NAME, isotopes=Isotopes)
     BasicMAReaction(model)
+    # Second chain step B -> C. Inert for Example1-3 (k_B_to_C defaults to 0);
+    # fit by Example4/Example5 to create flip-flop bimodality.
+    BasicChainReaction(model)
 
     print(f"Reactions generated: {model.counter}")
     print(f"Rules generated: {len(model.rules)}")

@@ -33,4 +33,31 @@ def load_ad_data(replicate, data_path):
     return data_dict
 
 
+def load_flipflop_data(replicate, data_path):
+    """Load the synthetic flip-flop dataset (see data/make_flipflop_data.py).
+
+    Returns log10-scale data: for each treatment a stacked frame of the three
+    logB replicate columns, plus a separate sparse frame of the noisy logA
+    observations (Early treatment only), keyed "<label>_A". The logA points are
+    what break the flip-flop swap symmetry and set the height of the second
+    likelihood mode.
+    """
+    def stack_logB(df):
+        return pd.concat([
+            df[['time', 'logB1']].rename(columns={'logB1': 'logB'}),
+            df[['time', 'logB2']].rename(columns={'logB2': 'logB'}),
+            df[['time', 'logB3']].rename(columns={'logB3': 'logB'})
+        ], ignore_index=True)
+
+    df = pd.read_csv(os.path.join(data_path, 'Flipflop.csv'))
+    data_dict = {}
+    for treatment in ('Early', 'Late'):
+        sub = df[df['Treatment'] == treatment]
+        data_dict[f"Flipflop_{treatment}"] = stack_logB(sub)
+        logA = sub[sub['logA'].notna()][['time', 'logA']].reset_index(drop=True)
+        if len(logA):
+            data_dict[f"Flipflop_{treatment}_A"] = logA
+    return data_dict
+
+
 

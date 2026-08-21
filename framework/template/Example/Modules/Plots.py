@@ -49,3 +49,37 @@ def plot_results(paths, results_dict):
     print(f"Plot saved to: {plot_name}")
     plt.show()
 
+
+
+def plot_flipflop(paths, results_dict):
+    """Plot the flip-flop example on a log scale (the scale the loss uses)."""
+    plot_path = paths["plot_path"]
+    MODEL_NAME = paths["MODEL_NAME"]
+    colors = ["tab:blue", "tab:red", "tab:green", "tab:orange"]
+    fig, ax = plt.subplots(figsize=(9, 6))
+    for i, (label, item) in enumerate(results_dict.items()):
+        results = item["results"]
+        data_dict = item["data"]
+        c = colors[i % len(colors)]
+        ax.semilogy(results["time"], np.maximum(results["predicted_B"], 1e-12),
+                    color=c, label=f"predicted_B {label}")
+        ax.semilogy(results["time"], np.maximum(results["predicted_A"], 1e-12),
+                    color=c, linestyle=":", label=f"predicted_A {label}")
+        data_B = data_dict.get(label)
+        if data_B is not None and "logB" in data_B.columns:
+            ax.scatter(data_B["time"], 10.0 ** data_B["logB"], color=c, s=20,
+                       zorder=5, label=f"logB data {label}")
+        data_A = data_dict.get(f"{label}_A")
+        if data_A is not None and "logA" in data_A.columns:
+            ax.scatter(data_A["time"], 10.0 ** data_A["logA"], color=c, s=40,
+                       marker="x", zorder=5, label=f"logA data {label}")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Output (log scale)")
+    ax.set_ylim(1e-3, 30)
+    ax.set_title("Flip-flop example: " + MODEL_NAME)
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
+    plt.subplots_adjust(right=0.62)
+    plot_name = os.path.join(plot_path, MODEL_NAME + "_flipflop.png")
+    plt.savefig(plot_name, bbox_inches="tight")
+    print(f"Plot saved to: {plot_name}")
+    plt.show()

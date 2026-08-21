@@ -20,6 +20,7 @@ from Model_generate import update_antimony_model
 
 EXPERIMENT_dict = {
     "Example": {'EXPERIMENT': get_EXPERIMENT('EXPERIMENT_Example'), 'plot': plot_results, 'opt_settings_key': 'Example'},
+    "Flipflop": {'EXPERIMENT': get_EXPERIMENT('EXPERIMENT_Flipflop'), 'plot': plot_flipflop, 'opt_settings_key': 'Flipflop'},
 }
 
 diagnostics = _NO_DIAGNOSTICS
@@ -39,6 +40,30 @@ OPTIMIZATION_REGISTRY = {
         # diagnostics turned on to confirm both fits are well-identified.
         'opt_key': ['OPTIMIZATION_Example1_ADpos', 'OPTIMIZATION_Example1_ADneg'],
         'experiment': 'EXPERIMENT_Example',
+        'diagnostics': _FULL_DIAGNOSTICS,
+    },
+    "Example4": {
+        # Multimodal example: flip-flop kinetics (A -> B -> C with fitted
+        # scale factor) under a log10 objective. Started in the true-mode
+        # basin. The likelihood has a second local minimum at the swapped
+        # parameters with a known height; accurate profiles must dip to
+        # ~ -2.12 near the fit point (fitting objective != inference NLL)
+        # and show the second mode at ~ +0.8, making the correct 95%
+        # confidence set disjoint. Slices see none of this. Compare against
+        # Flipflop_reference.py (closed-form, framework-independent).
+        'opt_key': ['OPTIMIZATION_Example4_flipflop'],
+        'experiment': 'EXPERIMENT_Flipflop',
+        'diagnostics': _FULL_DIAGNOSTICS,
+    },
+    "Example5": {
+        # Same problem started in the swapped (wrong) basin: the fit lands on
+        # the local minimum, sigmas are frozen there (inflating sigma_logA and
+        # deflating every dNLL), and an accurate profile must dip to NEGATIVE
+        # dNLL (~ -0.98) at the true mode. Both modes then sit below the 95%
+        # threshold, so the correct confidence set is DISJOINT. Compare
+        # against Flipflop_reference.py --anchor swapped.
+        'opt_key': ['OPTIMIZATION_Example5_flipflop_swapped'],
+        'experiment': 'EXPERIMENT_Flipflop',
         'diagnostics': _FULL_DIAGNOSTICS,
     },
     "Example3": {

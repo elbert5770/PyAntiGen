@@ -135,6 +135,124 @@ def _build_example3_joint():
 
 OPTIMIZATION_Example3_joint = _build_example3_joint()
 
+
+def _flipflop_groups():
+    return {
+        "Flipflop": {
+            "group_weight": 1.0,
+            "loss_elements": [
+                {"simulation": "Flipflop_Early", "loss_config": Flipflop_loss_config, "weight": 1.0},
+                {"simulation": "Flipflop_Late",  "loss_config": Flipflop_loss_config, "weight": 1.0},
+            ],
+        }
+    }
+
+
+def _build_example4_flipflop():
+    """
+    MULTIMODAL EXAMPLE: tests the *accuracy* of profile likelihood dNLL, not
+    just its ability to flag a flat direction (which Example3 covers).
+
+    The model is the chain A -> B -> C (rates k_A_to_B, k_B_to_C) observed
+    through predicted_B := SF*B_Comp1/V_Comp1 on a log10 scale. Since
+
+        B(t) = dose * k_A_to_B * (exp(-k_A_to_B*t) - exp(-k_B_to_C*t))
+               / (k_B_to_C - k_A_to_B),
+
+    swapping the two rate constants rescales B by a constant factor that the
+    fitted SF absorbs exactly: (k1, k2, SF) and (k2, k1, SF*k1/k2) produce
+    IDENTICAL predicted_B trajectories (pharmacokinetic "flip-flop"). Four
+    deliberately noisy predicted_A points on the Early treatment break the
+    symmetry by a small, known amount: relative to the NLL optimum the
+    swapped mode is a genuine local minimum at dNLL ~ 2.4, just above the
+    95% threshold of 1.9207 (printed by data/make_flipflop_data.py).
+
+    What accurate diagnostics must show here (numbers from
+    Flipflop_reference.py, which replicates the full pipeline):
+      * likelihood slices: a single sharp minimum — slices cannot see the
+        second mode at all, because reaching it requires the OTHER two
+        parameters to move (k_B_to_C and SF swap along with k_A_to_B).
+      * every true profile dips to dNLL ~ -2.12 next to the fit point. That
+        is not an error: the FITTING objective averages each observable's
+        chi-square over its own points, which upweights the 4 noisy logA
+        points ~11x against 45 logB points, so the fit optimum (k_A_to_B ~
+        0.363) sits measurably away from the NLL optimum (~0.324) that
+        diagnostics are anchored to. A profile that does not dip is wrong.
+      * true profile likelihood for each parameter: TWO minima. Because of
+        that anchor offset, the swapped mode (k_A_to_B ~ 0.074, k_B_to_C ~
+        0.32, SF ~ 7.2) reports at dNLL ~ +0.8 — BELOW the threshold — so
+        the correct 95% confidence set is a union of two disjoint intervals
+        even though the fit started in the right basin. A profile walker
+        that stops at the first threshold crossing never discovers the
+        second mode, and a first-crossing CI extractor cannot represent the
+        disjoint set; both failures make the reported CI silently
+        conditional on the wrong assumption of unimodality. And if the dNLL
+        scale is off (the log10-objective sigma pitfalls described in
+        Flipflop_loss_config), everything above shifts across the threshold
+        and the CI changes shape entirely.
+
+    Flipflop_reference.py recomputes the exact profiles from the closed-form
+    solution with scipy (no RoadRunner, no framework loss code) under the same
+    frozen-sigma convention — run it and overlay the two sets of curves. Any
+    disagreement is an error in the profile machinery, not in the model.
+    """
+    return Optimization(
+        param_names=["k_A_to_B", "k_B_to_C", "SF"],
+        x0=[0.3, 0.08, 1.5],  # inside the true-mode basin (k_A_to_B > k_B_to_C)
+        bounds=[(0.005, 5.0), (0.005, 5.0), (0.05, 50.0)],
+        method="Nelder-Mead",
+        optimizer_kwargs={"options": {"maxiter": 2000, "xatol": 1e-8, "fatol": 1e-10}},
+        group_normalization="sum_over_groups",
+        parameter_scale="log10",
+        groups=_flipflop_groups(),
+        passive_simulations=[],
+    )
+
+
+def _build_example5_flipflop_swapped():
+    """
+    Same problem as Example4 but started inside the WRONG basin
+    (k_A_to_B < k_B_to_C), so Nelder-Mead converges to the swapped local
+    minimum. This stresses the diagnostics in the way multimodal problems
+    stress them in practice, where nobody tells you the optimizer found the
+    wrong mode:
+
+      * every sigma is frozen by MLE at the *local* optimum. The logA sigma
+        absorbs the swapped mode's A-misfit (~1.73 dex instead of ~0.92), and
+        that inflation deflates every dNLL built on it — the same
+        log10-objective sigma sensitivity described in Flipflop_loss_config,
+        arising here from mode choice rather than from a heuristic;
+      * an accurate profile must go NEGATIVE — dropping to dNLL ~ -0.98 at
+        the true mode (not the -2.4 the true-mode sigmas would give: the
+        inflated sigma has already flattened the landscape). A negative
+        profile minimum is the unambiguous signature that the fit missed the
+        global optimum, and the analysis must report it rather than clip,
+        re-anchor, or hide it;
+      * with the true mode at -0.98, BOTH modes lie below the 1.9207
+        threshold: the correct 95% confidence set for every parameter is a
+        union of two disjoint intervals (e.g. k_A_to_B in [0.072, 0.076] U
+        [0.284, 0.363]), which a first-threshold-crossing CI extractor
+        cannot represent — it reports the narrow interval around the wrong
+        mode and silently discards the one containing the truth.
+
+    Compare against Flipflop_reference.py --anchor swapped, which computes
+    the reference profiles anchored at the same wrong mode.
+    """
+    return Optimization(
+        param_names=["k_A_to_B", "k_B_to_C", "SF"],
+        x0=[0.06, 0.4, 7.0],  # inside the swapped-mode basin
+        bounds=[(0.005, 5.0), (0.005, 5.0), (0.05, 50.0)],
+        method="Nelder-Mead",
+        optimizer_kwargs={"options": {"maxiter": 2000, "xatol": 1e-8, "fatol": 1e-10}},
+        group_normalization="sum_over_groups",
+        parameter_scale="log10",
+        groups=_flipflop_groups(),
+        passive_simulations=[],
+    )
+
+OPTIMIZATION_Example4_flipflop = _build_example4_flipflop()
+OPTIMIZATION_Example5_flipflop_swapped = _build_example5_flipflop_swapped()
+
 def get_OPTIMIZATION(name):
     """Returns a single Optimization configuration by name."""
     return globals().get(name)

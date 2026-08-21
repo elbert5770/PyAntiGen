@@ -28,6 +28,16 @@
 def update_no_parameters(r, replicate):
     return
 
+def update_flipflop(r, replicate):
+    # Ground-truth values used to generate data/Flipflop.csv
+    # (see data/make_flipflop_data.py). During optimization these are
+    # overwritten every evaluation by the fitted parameters; for --simulate
+    # they make the model reproduce the data-generating truth.
+    r['k_A_to_B'] = 0.35
+    r['k_B_to_C'] = 0.07
+    r['SF'] = 1.6
+    return
+
 def update_Example(r, replicate):
     
     if replicate["amyloid_positive"]:

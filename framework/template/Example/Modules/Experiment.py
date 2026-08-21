@@ -143,6 +143,40 @@ def _build_experiment():
 
 EXPERIMENT_Example = _build_experiment()
 
+
+def _build_flipflop_experiment():
+    """Flip-flop identifiability experiment (Example4/Example5).
+
+    Two treatments of the A -> B -> C chain, dosed by the same event style as
+    the base example, observed through predicted_B on a log10 scale. The Early
+    treatment additionally carries four very noisy predicted_A observations
+    ("has_A_data") — without them the likelihood would have two *exactly*
+    equal modes; with them the swapped mode sits at a known dNLL of ~2.4
+    (printed by data/make_flipflop_data.py when regenerating the data).
+    """
+    exp = Experiment()
+    treatments = {
+        "Early": {"params": {"dose": 10, "delay": 5, "has_A_data": True}},
+        "Late":  {"params": {"dose": 5, "delay": 10, "has_A_data": False}},
+    }
+    for treatment_name, treatment_data in treatments.items():
+        key = f"Flipflop_{treatment_name}"
+        exp.replicates[key] = make_replicate(
+            {
+                "Label":                 key,
+                "Events":                Example_event,
+                "Data":                  load_flipflop_data,
+                "Observed_species":      all_species,
+                "Solver_settings":       solver_settings_Example,
+                "Update_opt_parameters": update_opt_no_parameters,
+                "Update_parameters":     update_flipflop,
+            },
+            **treatment_data.get("params", {}),
+        )
+    return exp
+
+EXPERIMENT_Flipflop = _build_flipflop_experiment()
+
 # ***************************************************************************
 # END USER DEFINED EXPERIMENTS
 # ***************************************************************************
