@@ -39,12 +39,15 @@ def plot_results(paths, results_dict):
             
 
             
+    # plot_tag carries the run label + group names (e.g. "Example1_ADpos") so
+    # each example/group writes its own figure instead of overwriting one file.
+    tag = paths.get("plot_tag")
     ax.set_xlabel("Time")
     ax.set_ylabel("Concentration")
-    ax.set_title("Simulation Results for " + MODEL_NAME)
+    ax.set_title("Simulation Results for " + MODEL_NAME + (f" — {tag}" if tag else ""))
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))
     plt.subplots_adjust(right=0.65)
-    plot_name = os.path.join(plot_path, MODEL_NAME + ".png")
+    plot_name = os.path.join(plot_path, MODEL_NAME + (f"_{tag}" if tag else "") + ".png")
     plt.savefig(plot_name, bbox_inches="tight")
     print(f"Plot saved to: {plot_name}")
     plt.show()
@@ -73,13 +76,14 @@ def plot_flipflop(paths, results_dict):
         if data_A is not None and "logA" in data_A.columns:
             ax.scatter(data_A["time"], 10.0 ** data_A["logA"], color=c, s=40,
                        marker="x", zorder=5, label=f"logA data {label}")
+    tag = paths.get("plot_tag")
     ax.set_xlabel("Time")
     ax.set_ylabel("Output (log scale)")
     ax.set_ylim(1e-3, 30)
-    ax.set_title("Flip-flop example: " + MODEL_NAME)
+    ax.set_title("Flip-flop example: " + MODEL_NAME + (f" — {tag}" if tag else ""))
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
     plt.subplots_adjust(right=0.62)
-    plot_name = os.path.join(plot_path, MODEL_NAME + "_flipflop.png")
+    plot_name = os.path.join(plot_path, MODEL_NAME + (f"_{tag}" if tag else "") + "_flipflop.png")
     plt.savefig(plot_name, bbox_inches="tight")
     print(f"Plot saved to: {plot_name}")
     plt.show()

@@ -145,6 +145,18 @@ def _run_steady_state(model_text, paths, settings):
 _PROFILE_CI_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
 
 
+def _make_tag(settings, groups):
+    """Build the file tag for figures/CSVs from the run label and group names.
+
+    Prefixing with run_label (the registry selection, e.g. "Example4") keeps
+    runs that share group names — Example1 vs Example2, Example4 vs Example5 —
+    from overwriting each other's output files.
+    """
+    groups_tag = "_".join(groups) if not isinstance(groups, str) else groups
+    run_label = settings.get("run_label")
+    return f"{run_label}_{groups_tag}" if run_label else groups_tag
+
+
 def _shutdown_evaluator(opt):
     """Close the worker pool once the diagnostic closures have been consumed.
 
@@ -289,7 +301,7 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
     ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
     ax.set_xlabel('Parameter Value (relative to optimal)')
     ax.set_ylabel('Δ NLL (relative to minimum)')
-    ax.set_title('Profile Likelihood (Identifiability Check)')
+    ax.set_title(f'Profile Likelihood — {tag} (Identifiability Check)')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0.2, 3.5)
@@ -300,13 +312,13 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
 
     zoom_half = _PROFILE_CI_THRESHOLD * 0.10
     ax.set_ylim(-zoom_half, zoom_half)
-    ax.set_title(f'Profile Likelihood (Identifiability Check, y-axis ±10% CI)')
+    ax.set_title(f'Profile Likelihood — {tag} (y-axis ±10% CI)')
     out_path_zoom = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood_zoom.png")
     plt.savefig(out_path_zoom, bbox_inches="tight")
     print(f"Profile likelihood (zoomed) saved to: {out_path_zoom}")
 
     ax.set_ylim(-_PROFILE_CI_THRESHOLD * 0.10, _PROFILE_CI_THRESHOLD)
-    ax.set_title(f'Profile Likelihood (Identifiability Check, y-axis -10% to +100% CI)')
+    ax.set_title(f'Profile Likelihood — {tag} (y-axis -10% to +100% CI)')
     out_path_zoom2 = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood_zoom2.png")
     plt.savefig(out_path_zoom2, bbox_inches="tight")
     print(f"Profile likelihood (zoomed2) saved to: {out_path_zoom2}")
@@ -373,7 +385,7 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
     ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
     ax.set_xlabel('Parameter Value (relative to optimal)')
     ax.set_ylabel('Δ NLL (relative to minimum)')
-    ax.set_title('Likelihood Slice')
+    ax.set_title(f'Likelihood Slice — {tag}')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0.2, 3.5)
@@ -384,13 +396,13 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
 
     zoom_half = _PROFILE_CI_THRESHOLD * 0.10
     ax.set_ylim(-zoom_half, zoom_half)
-    ax.set_title(f'Likelihood Slice (y-axis ±10% CI)')
+    ax.set_title(f'Likelihood Slice — {tag} (y-axis ±10% CI)')
     out_path_zoom = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice_zoom.png")
     plt.savefig(out_path_zoom, bbox_inches="tight")
     print(f"Likelihood slice (zoomed) saved to: {out_path_zoom}")
 
     ax.set_ylim(-_PROFILE_CI_THRESHOLD * 0.10, _PROFILE_CI_THRESHOLD)
-    ax.set_title(f'Likelihood Slice (y-axis -10% to +100% CI)')
+    ax.set_title(f'Likelihood Slice — {tag} (y-axis -10% to +100% CI)')
     out_path_zoom2 = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice_zoom2.png")
     plt.savefig(out_path_zoom2, bbox_inches="tight")
     print(f"Likelihood slice (zoomed2) saved to: {out_path_zoom2}")
@@ -525,7 +537,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             profile_checkpoint=settings.get("profile_checkpoint", True),
         )
 
-        groups_tag = "_".join(opt.get("groups", ["ALL"]))
+        groups_tag = _make_tag(settings, opt.get("groups", ["ALL"]))
 
         if settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, optimization_settings.param_names, paths["plot_path"],
@@ -545,6 +557,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  model_name=MODEL_NAME, experiment_id=groups_tag, method=optimization_settings.method)
 
         if opt.get("results_dict") is not None and plot_function:
+            paths["plot_tag"] = groups_tag
             plot_function(paths, opt["results_dict"])
         _shutdown_evaluator(opt)
         return opt
@@ -601,17 +614,19 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
             group_optimizations[group_name] = opt
 
+            group_tag = _make_tag(settings, group_name)
+
             # Run analysis plots first so profile_ci is populated before CSV write
             if group_settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
                 _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
-                                            MODEL_NAME, tag=group_name)
+                                            MODEL_NAME, tag=group_tag)
             if (group_settings.get("profile_likelihood_analysis") or group_settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
                 _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
-                                              MODEL_NAME, tag=group_name)
+                                              MODEL_NAME, tag=group_tag)
             if group_settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
                 from Engine.Sensitivity_analysis import save_sobol_plot
                 save_sobol_plot(opt.get("stats", {}).get("sobol"), paths["plot_path"],
-                                MODEL_NAME, tag=group_name)
+                                MODEL_NAME, tag=group_tag)
 
             print(f"\nOptimization Summary for {group_name}:")
             print("-" * 85)
@@ -658,10 +673,10 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
             csv_path = os.path.join(
                 paths["plot_path"],
-                f"{MODEL_NAME}_{group_name}_optimization_results.csv",
+                f"{MODEL_NAME}_{group_tag}_optimization_results.csv",
             )
             log_optimization_results(opt, param_names, csv_path,
-                                     model_name=MODEL_NAME, experiment_id=group_name,
+                                     model_name=MODEL_NAME, experiment_id=group_tag,
                                      method=method)
 
         if optimization_settings.get("petab_export"):
@@ -669,6 +684,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  optimization_settings, group_optimizations)
 
         if all_results and plot_function:
+            paths["plot_tag"] = _make_tag(settings, sorted(group_optimizations.keys()))
             plot_function(paths, all_results)
         for _o in group_optimizations.values():
             _shutdown_evaluator(_o)
@@ -705,7 +721,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             n_workers=optimization_settings.get("n_workers", settings.get("n_workers")),
         )
 
-        groups_tag = "_".join(opt.get("groups", ["ALL"]))
+        groups_tag = _make_tag(settings, opt.get("groups", ["ALL"]))
 
         # Run analysis plots first so profile_ci is populated before CSV write
         if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
@@ -731,6 +747,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  optimization_settings, {"__flat__": opt})
 
         if opt.get("results_dict") is not None and plot_function:
+            paths["plot_tag"] = groups_tag
             plot_function(paths, opt["results_dict"])
         _shutdown_evaluator(opt)
         return opt

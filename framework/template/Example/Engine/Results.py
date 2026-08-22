@@ -150,10 +150,28 @@ def log_optimization_results(
     if iter_str:
         print(iter_str)
     if param_names and len(x_opt) == len(param_names):
-        print(f'\n  {"Parameter":<45} {"Value":>18}')
-        print(f'  {"-" * 63}')
-        for name, val in zip(param_names, x_opt):
-            print(f'  {name:<45} {float(val):>18.8e}')
+        def _fmt_ci(pair):
+            lo, hi = pair
+            if np.isnan(lo) and np.isnan(hi):
+                return "---"
+            return f"[{lo:.4g}, {hi:.4g}]"
+
+        print(f'\n  {"Parameter":<30} {"Value":>14} {"Wald SE":>10} '
+              f'{"Wald 95% CI":>22} {"Profile 95% CI":>22}')
+        print(f'  {"-" * 102}')
+        for i, (name, val) in enumerate(zip(param_names, x_opt)):
+            s = se_arr[i] if i < len(se_arr) else float("nan")
+            se_str = f"{float(s):.4g}" if s is not None and np.isfinite(float(s)) else "---"
+            wald_str = _fmt_ci(ci[i]) if i < len(ci) else "---"
+            prof_str = _fmt_ci(profile_ci[i]) if i < len(profile_ci) else "---"
+            print(f'  {name:<30} {float(val):>14.6g} {se_str:>10} '
+                  f'{wald_str:>22} {prof_str:>22}')
+        if any(np.isnan(lo) and np.isnan(hi) for lo, hi in profile_ci):
+            has_profiles = "profile_traces" in stats
+            if has_profiles:
+                print("\n  NOTE: a profile 95% CI of '---' here means the profile never "
+                      "crossed the\n  threshold on both sides — the parameter is not "
+                      "identifiable from this fit.")
     print(f'{"=" * 80}\n')
 
     # ------------------------------------------------------------------ #
