@@ -21,7 +21,9 @@ from Engine.Optimize import (
     run_optimization,
     run_optimization_from_groups,
     _extract_profile_ci,
+    profile_ci_status,
 )
+from Engine.Identifiability import UnidentifiableParameters
 from Modules.Plots import *
 from Engine.Results import log_optimization_results
 from Engine.Petab_export import export_petab
@@ -37,6 +39,7 @@ _FULL_DIAGNOSTICS = {
     "profile_likelihood_analysis": True,
     "sobol_analysis": True,
     "sobol_N": 128,
+    "profile_se_span": 10,
 }
 
 _SLICE_ONLY = {
@@ -51,6 +54,21 @@ _PROFILE_ONLY = {
     "slice_analysis": False,
     "profile_likelihood_analysis": True,
     "sobol_analysis": False,
+    # 4 SE, which is run_parallel_profile's own default; this preset used to
+    # override it to 10. The crossing being looked for sits at 1.96 SE for a
+    # locally quadratic profile, so a span of 10 spread across n_grid=5 puts
+    # points at 2, 4, 6, 8 and 10 SE -- dNLL of roughly 2, 8, 18, 32 and 50,
+    # with four of the five deep in a tail whose height nobody needs. At 4 the
+    # same five points land at 0.8, 1.6, 2.4, 3.2 and 4.0 SE (dNLL 0.32, 1.28,
+    # 2.88, 5.12, 8.0), straddling the threshold with two below and three
+    # above, which is what pass 3 refines between.
+    #
+    # Widening the span was never the right lever for a parameter whose
+    # crossing lies further out than Wald predicts: it spends points on every
+    # parameter at once, including the ones already answered. max_extend walks
+    # outward only where the threshold has not been reached, which is why it
+    # exists and why tightening the span here is safe.
+    "profile_se_span": 4,
 }
 
 _SOBOL_ONLY = {
@@ -60,12 +78,36 @@ _SOBOL_ONLY = {
     "sobol_analysis": True,
 }
 
+# The Hessian alone: O(k^2) evaluations, minutes rather than days. Worth running
+# before any profile, because a Wald SE that is None says the fit is singular in
+# that direction and the profile will spend its whole budget discovering the
+# same thing -- and an SE wider than the distance to the parameter's bound says
+# the box will truncate the interval before the data does.
+_WALD_ONLY = {
+    "wald_analysis": True,
+    "slice_analysis": False,
+    "profile_likelihood_analysis": False,
+    "sobol_analysis": False,
+}
+
+# One capped profile point per side at the slice crossing, classified into
+# "proven true / likely true / unlikely true / proven false" on the statement
+# "the interval is closed on this side". Hours rather than days, and every
+# point lands in the checkpoint the full profile reads. See Engine.Fast_profile.
+# The Hessian is needed: the screen places its ladder from the Wald SE, and
+# the local compensation factor in the table comes from the covariance.
 _FAST_PROFILE_ONLY = {
-    "wald_analysis": False,
+    "wald_analysis": True,
     "slice_analysis": False,
     "profile_likelihood_analysis": False,
     "fast_profile_likelihood_analysis": True,
     "sobol_analysis": False,
+    # Evaluations per round and rounds per point; None takes the module
+    # defaults (150 x 3). A point stops early once it has a verdict.
+    "fast_profile_round_evals": None,
+    "fast_profile_rounds": None,
+    # dNLL at or below this fraction of the threshold is "near zero".
+    "fast_profile_near_zero_frac": None,
 }
 
 _NO_DIAGNOSTICS = {
@@ -81,6 +123,9 @@ DIAGNOSTICS_PRESETS = {
     "_SLICE_ONLY": _SLICE_ONLY,
     "_PROFILE_ONLY": _PROFILE_ONLY,
     "_SOBOL_ONLY": _SOBOL_ONLY,
+    "_WALD_ONLY": _WALD_ONLY,
+    "WALD_ONLY": _WALD_ONLY,
+    "WALD": _WALD_ONLY,
     "_FAST_PROFILE_ONLY": _FAST_PROFILE_ONLY,
     "NO_DIAGNOSTICS": _NO_DIAGNOSTICS,
     "FULL_DIAGNOSTICS": _FULL_DIAGNOSTICS,
@@ -144,17 +189,16 @@ def _run_steady_state(model_text, paths, settings):
 
 _PROFILE_CI_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
 
+# A profile flatter than this over its whole grid carries no information about
+# the parameter: it is structurally non-identifiable, not merely poorly bounded.
+# Well below the threshold, well above nuisance-optimizer noise.
+_PROFILE_FLAT_TOL = 1e-3
 
-def _make_tag(settings, groups):
-    """Build the file tag for figures/CSVs from the run label and group names.
-
-    Prefixing with run_label (the registry selection, e.g. "Example4") keeps
-    runs that share group names — Example1 vs Example2, Example4 vs Example5 —
-    from overwriting each other's output files.
-    """
-    groups_tag = "_".join(groups) if not isinstance(groups, str) else groups
-    run_label = settings.get("run_label")
-    return f"{run_label}_{groups_tag}" if run_label else groups_tag
+# How far a slice may sit from zero at the fitted point, or below zero anywhere,
+# before it is called out. Same magnitude as the profile's anchor rule, so the
+# two diagnostics agree on what counts as "below the reported optimum", and far
+# enough above solver noise that a converged fit stays quiet.
+_SLICE_DNLL_TOL = 1e-3
 
 
 def _shutdown_evaluator(opt):
@@ -176,7 +220,463 @@ def _shutdown_evaluator(opt):
         print(f"[pool] shutdown warning: {exc}")
 
 
-def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="ALL"):
+# Grid controls for the parallel profile, and the settings key that reaches each.
+# The engine holds the defaults; only keys a run actually sets are forwarded, so
+# there is one place to change a default rather than two.
+_PROFILE_GRID_SETTINGS = {
+    "profile_se_span":       "se_span",
+    "profile_n_grid":        "n_grid",
+    "profile_n_refine":      "n_refine",
+    "profile_range_factor":  "range_factor",
+    "profile_warm_passes":   "warm_passes",
+    "profile_max_extend":    "max_extend",
+    "profile_extend_growth": "extend_growth",
+    "profile_bracket_rtol":  "bracket_rtol",
+}
+
+
+def _profile_kwargs(settings, optimization_spec=None):
+    """Profile grid arguments for this run, from the settings and the spec.
+
+    Two sources, and the spec wins. A run's diagnostics preset says what the
+    operator asked for today; grid density is a property of how expensive one
+    spec's evaluations are, and the two specs sharing ``_PROFILE_ONLY`` differ
+    by an order of magnitude in that cost. A spec states its own under
+    ``optimizer_kwargs["profile_grid"]``, keyed by the engine's own argument
+    names (``n_grid``, ``se_span``, ...). An unknown key is an error rather
+    than a silent no-op: a typo there would otherwise look exactly like a
+    setting that did not help.
+
+    ``max_extend`` is the one to reach for when a CI comes back open. The
+    opening grid is placed from the Wald SE (``se_span``) or, when the Hessian
+    gave no SE, from ``range_factor``; whichever it is, it is a guess about
+    where dNLL reaches 1.9207, and ``max_extend`` bounds how many times a side
+    that guessed short may step further out before giving up. Raising
+    ``se_span`` widens the opening guess for *every* parameter at once, which
+    spends points on the ones already answered; raising ``max_extend`` spends
+    them only where the answer is still missing.
+
+    ``bracket_rtol`` is the opposite control: how precisely a crossing that has
+    been bracketed needs to be located before probing stops. It is a relative
+    precision on the confidence bound, so 0.05 means "to within 5%" -- far finer
+    than identifiability needs, and the budget it releases goes to the sides
+    that have not reached the threshold at all.
+    """
+    out = {}
+    for key, arg in _PROFILE_GRID_SETTINGS.items():
+        value = (settings or {}).get(key)
+        if value is not None:
+            out[arg] = value
+
+    spec_kwargs = getattr(optimization_spec, "optimizer_kwargs", None) or {}
+    known = set(_PROFILE_GRID_SETTINGS.values())
+    for arg, value in (spec_kwargs.get("profile_grid") or {}).items():
+        if arg not in known:
+            raise ValueError(
+                f"profile_grid key {arg!r} is not a profile grid argument; "
+                f"expected one of {sorted(known)}"
+            )
+        if value is not None:
+            out[arg] = value
+    return out
+
+
+_FAST_PROFILE_SETTINGS = {
+    "fast_profile_round_evals":    "round_evals",
+    "fast_profile_rounds":         "n_rounds",
+    "fast_profile_near_zero_frac": "near_zero_frac",
+}
+
+
+def _fast_profile_kwargs(settings, optimization_spec=None):
+    """Arguments for the fast profile pass, from the settings and the spec.
+
+    The round sizes come from the run settings only. The screen's reach comes
+    from the spec's ``profile_grid`` where it states one, so the fast pass and
+    the full profile walk the same distance and their screens are the same
+    file.
+    """
+    out = {}
+    for key, arg in _FAST_PROFILE_SETTINGS.items():
+        value = (settings or {}).get(key)
+        if value is not None:
+            out[arg] = value
+    spec_kwargs = getattr(optimization_spec, "optimizer_kwargs", None) or {}
+    grid = spec_kwargs.get("profile_grid") or {}
+    for arg in ("screen_span_decades", "screen_min_reach_decades"):
+        if grid.get(arg) is not None:
+            out[arg] = grid[arg]
+    return out
+
+
+def _run_fast_profile_report(opt, settings, optimization_spec=None):
+    """Run the fast pass, print its summary table, keep it for the snapshot."""
+    from Engine.Fast_profile import fast_profile_summary, print_fast_profile_report
+
+    fast_all = opt.get("stats", {}).get("fast_profile_all")
+    if fast_all is None:
+        return None
+    try:
+        report = fast_all(**_fast_profile_kwargs(settings, optimization_spec))
+    except Exception as exc:
+        import traceback
+        print(f"  fast profile failed ({exc}).")
+        traceback.print_exc()
+        return None
+    print_fast_profile_report(report)
+    opt["stats"]["fast_profile"] = fast_profile_summary(report)
+    return report
+
+
+# How far past the threshold crossing the profile figure extends, as a fraction
+# of the crossing's own distance from the optimum. Enough to show the curve
+# continuing past the bound without letting a grid that was clipped to a
+# far-away parameter bound dictate the scale.
+_PROFILE_PLOT_MARGIN = 0.25
+
+
+def _profile_plot_x(cache, params_estimated, profile_ci=None,
+                    margin=_PROFILE_PLOT_MARGIN):
+    """The x window for the profile figure, and whether a log axis is usable.
+
+    Returns ``((lo, hi), use_log)``, or ``(None, use_log)`` when there is
+    nothing to plot.
+
+    The window is anchored on the threshold crossings -- the confidence bounds --
+    and extends *margin* beyond them, measured as a fraction of each crossing's
+    own distance from the optimum. That distance is multiplicative on a log
+    axis, so the margin is too.
+
+    Anchoring on the crossing rather than on the data is what keeps the figure
+    readable. Two earlier rules both failed, in opposite directions. The
+    original fixed window of [0.2, 3.5] was too narrow: it pre-dated the outward
+    extension pass, so a crossing at a fifth of the optimum fell off the left
+    edge. Spanning every computed point instead was too wide: a grid clipped to
+    a parameter bound a thousand-fold below the optimum -- which is what the
+    GantenerumabIV and Donanemab specs produce -- pushed the whole informative
+    region, crossings included, into a sliver at the right-hand edge.
+
+    A side with no crossing has no anchor, so it falls back to how far it was
+    actually walked: that a profile ran three decades without reaching the
+    threshold is the finding for that parameter, and cropping it would hide the
+    one thing worth seeing. The window never extends past the computed data
+    either, so it cannot imply points that were never evaluated.
+
+    A log axis is used whenever every plotted ratio is positive, which is nearly
+    always -- these are rate constants, volumes and clearances, and extension
+    walks them over decades, which a linear axis cannot show at all.
+    """
+    import numpy as np
+
+    ci = list(profile_ci or [])
+    lo_all, hi_all = np.inf, -np.inf
+    all_positive = True
+    ratios = {}
+    for idx, cached in cache.items():
+        pv, _nr = cached
+        r = np.asarray(pv, dtype=float) / params_estimated[idx]
+        r = r[np.isfinite(r)]
+        if r.size == 0:
+            continue
+        ratios[idx] = r
+        if np.any(r <= 0):
+            all_positive = False
+        lo_all, hi_all = min(lo_all, r.min()), max(hi_all, r.max())
+
+    if not ratios or not (np.isfinite(lo_all) and np.isfinite(hi_all)):
+        return None, False
+    use_log = all_positive and lo_all > 0
+
+    def dist(ratio, sign):
+        """How far *ratio* lies from the optimum on side *sign*, or None."""
+        if use_log:
+            if ratio <= 0:
+                return None
+            d = -np.log10(ratio) if sign < 0 else np.log10(ratio)
+        else:
+            d = (1.0 - ratio) if sign < 0 else (ratio - 1.0)
+        return float(d) if d > 0 else None
+
+    reach = {-1: 0.0, +1: 0.0}
+    for idx, r in ratios.items():
+        opt_v = float(params_estimated[idx])
+        bounds = ci[idx] if idx < len(ci) else (np.nan, np.nan)
+        for sign, ci_val in ((-1, bounds[0]), (+1, bounds[1])):
+            side = r[r < 1.0] if sign < 0 else r[r > 1.0]
+            d_side = [dist(v, sign) for v in side]
+            d_data = max([d for d in d_side if d is not None], default=0.0)
+            d_ci = None
+            try:
+                if opt_v != 0 and np.isfinite(float(ci_val)):
+                    d_ci = dist(float(ci_val) / opt_v, sign)
+            except (TypeError, ValueError):
+                d_ci = None
+            # Never draw further out than the profile was actually computed.
+            d = min(d_ci * (1.0 + margin), d_data) if d_ci else d_data
+            reach[sign] = max(reach[sign], d)
+
+    if reach[-1] <= 0 and reach[+1] <= 0:
+        # Everything sits on the optimum: give it an interval to be drawn in.
+        return ((lo_all / 1.5, hi_all * 1.5), True) if use_log \
+            else ((lo_all - 0.5, hi_all + 0.5), False)
+
+    if use_log:
+        lo, hi = 10.0 ** -reach[-1], 10.0 ** reach[+1]
+        pad = max((hi / lo) ** 0.03, 1.05)
+        return (lo / pad, hi * pad), True
+    lo, hi = 1.0 - reach[-1], 1.0 + reach[+1]
+    span = max(hi - lo, 1e-12)
+    return (lo - 0.03 * span, hi + 0.03 * span), False
+
+
+def _fmt_g(x, width=0, prec=6):
+    """Format a number for the report, or "n/a" when it is missing.
+
+    The report is printed to a Windows console as well as written to a UTF-8
+    file, and that console is routinely on a codepage where en/em dashes come
+    out as replacement characters, so this whole report stays ASCII.
+    """
+    import numpy as np
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "n/a".rjust(width)
+    if not np.isfinite(v):
+        return "n/a".rjust(width)
+    return f"{v:.{prec}g}".rjust(width)
+
+
+def _profile_report_text(opt, param_names, params_estimated, profile_ci,
+                         profile_ci_state, cache, model_name, tag, stamp,
+                         plot_files=()):
+    """Consolidated profile-likelihood summary: the intervals and what backs them.
+
+    The console reports each interval as it is extracted, interleaved with that
+    parameter's advice. That is the right shape while a run is in progress and
+    the wrong shape afterwards: the question a profile exists to answer -- which
+    parameters are identifiable, and how far each bound can be trusted -- has to
+    be reassembled by eye from lines scattered through thousands of solver
+    messages. This gathers it in one place and writes it next to the figures, so
+    a run's conclusion outlives its terminal scrollback.
+
+    Every number here is one the reader would otherwise have to hunt for or
+    recompute: the interval as a multiple of the optimum (these are rate
+    constants and clearances, where a factor is the meaningful unit, not a
+    difference), how far each side was actually walked and how high it got,
+    whether a missing bound is a result or an unfinished search, and how much of
+    the curve rests on nuisance optimizations that never converged.
+    """
+    import numpy as np
+
+    stats = opt.get("stats", {}) or {}
+    conv = stats.get("profile_convergence") or {}
+    reach = conv.get("reach") or {}
+    per_param = conv.get("per_param") or {}
+    warm = conv.get("warm") or {}
+    anchor = float(stats.get("profile_anchor_gap", 0.0) or 0.0)
+
+    se_raw = stats.get("wald_se")
+    se_arr = (np.atleast_1d(se_raw) if se_raw is not None
+              else np.full(len(param_names), np.nan))
+    wald_ci = stats.get("wald_ci") or [(np.nan, np.nan)] * len(param_names)
+
+    _reach_word = {"crossed": "crossed the threshold",
+                   "bound": "stopped at the parameter bound",
+                   "budget": "ran out of extension steps",
+                   "empty": "no points",
+                   "missing": "not computed"}
+
+    L = []
+    rule = "=" * 78
+    L.append(rule)
+    L.append(f"PROFILE LIKELIHOOD SUMMARY - {model_name}  [{tag}]")
+    L.append(f"generated {stamp}")
+    L.append(rule)
+    L.append("")
+    L.append(f"Threshold          dNLL = {_PROFILE_CI_THRESHOLD:.4f}  "
+             f"(chi2(df=1, p=0.95) / 2)")
+    _running = conv.get("n_interrupted", 0)
+    L.append(f"Profile points     {conv.get('n_points', 0)} total, "
+             f"{conv.get('n_not_converged', 0)} hit the optimizer cap, "
+             f"{conv.get('n_unknown', 0)} unknown"
+             + (f", {_running} still in progress" if _running else ""))
+    if _running:
+        L.append(f"*** INCOMPLETE: {_running} point(s) were stopped by the "
+                 f"wall clock with their state saved, not by the optimizer.")
+        L.append("    Their dNLL is an upper bound, so every interval below is "
+                 "provisional and too narrow. Relaunch to continue.")
+    if warm.get("n_attempted"):
+        L.append(f"Warm continuation  {warm.get('n_improved', 0)} of "
+                 f"{warm['n_attempted']} point(s) improved, "
+                 f"{warm.get('nats_recovered', 0.0):.4g} nats recovered")
+    if anchor < -1e-3:
+        L.append(f"*** The profile found a point {abs(anchor):.4g} nats BELOW "
+                 f"the reported optimum: the fit has not converged, and the")
+        L.append(f"    parameter values above are not the MLE. Refit before "
+                 f"quoting anything here.")
+        bp = conv.get("better_point") or {}
+        if bp:
+            L.append("")
+            L.append(f"    lowest NLL found   {bp['nll']:.10g}")
+            L.append(f"    found while        profiling {bp['parameter']} "
+                     f"= {bp['value']:.8g}")
+            xs, names = bp.get("x"), bp.get("param_names")
+            if xs and names and len(xs) == len(names):
+                L.append("    restart the fit from these values:")
+                width = max(len(n) for n in names)
+                for n, v in zip(names, xs):
+                    L.append(f"      {n:<{width}}  {v:.8e}")
+    else:
+        L.append("Anchor             the fit sits at the profile minimum")
+    L.append("")
+
+    L.append("-" * 78)
+    L.append("PARAMETERS")
+    L.append("-" * 78)
+    for i, pname in enumerate(param_names):
+        opt_val = float(params_estimated[i])
+        lo, hi = profile_ci[i] if i < len(profile_ci) else (np.nan, np.nan)
+        status = (profile_ci_state[i] if i < len(profile_ci_state)
+                  else "missing")
+        sides = reach.get(pname) or {}
+        pp = per_param.get(pname) or {}
+
+        L.append("")
+        L.append(f"{pname}")
+        L.append(f"    optimum          {_fmt_g(opt_val)}")
+        L.append(f"    profile 95% CI   [{_fmt_g(lo)}, {_fmt_g(hi)}]"
+                 f"      status: {status}")
+        # A multiplicative read of the interval. For rate constants and
+        # clearances "between 0.76x and 1.7x of the fitted value" is the
+        # statement a modeller can act on; the absolute bounds above are not.
+        if opt_val > 0 and np.isfinite(lo) and np.isfinite(hi) and lo > 0:
+            L.append(f"    as a factor      [{lo / opt_val:.4g}x, "
+                     f"{hi / opt_val:.4g}x] of the optimum "
+                     f"(spans {hi / lo:.4g}x)")
+        for key in ("lower", "upper"):
+            d = sides.get(key)
+            if not d:
+                continue
+            word = _reach_word.get(d["state"], d["state"])
+            L.append(f"    {key + ' side':<16} {word}; walked to "
+                     f"{_fmt_g(d.get('reach'))}, highest dNLL "
+                     f"{_fmt_g(d.get('max_dnll'), prec=4)}")
+        se_i = float(se_arr[i]) if i < len(se_arr) else np.nan
+        wlo, whi = (wald_ci[i] if i < len(wald_ci) else (np.nan, np.nan))
+        if np.isfinite(se_i):
+            L.append(f"    Wald SE          {_fmt_g(se_i)}      "
+                     f"Wald 95% CI [{_fmt_g(wlo)}, {_fmt_g(whi)}]")
+        else:
+            # Worth saying explicitly: no SE means the Hessian was singular in
+            # this direction, which is also why the opening grid for this
+            # parameter came from range_factor rather than from a curvature
+            # estimate.
+            L.append(f"    Wald SE          none - the Hessian was singular in "
+                     f"this direction")
+        if pp:
+            capped = pp.get("n_not_converged", 0)
+            running = pp.get("n_interrupted", 0)
+            parts = []
+            if capped:
+                # Hitting the evaluation cap is not by itself evidence of
+                # anything. Measured on the engine's own 15-parameter
+                # ill-conditioned quadratic, 79% of points stop on a cap of
+                # 1500 while the intervals they produce are within 0.02% of the
+                # analytic answer: the search had reached the minimum and was
+                # polishing. Reporting "this interval is too narrow" on every
+                # such point cried wolf on healthy runs and buried the real
+                # ones.
+                #
+                # What does measure it is how far the warm pass moved the
+                # point. That is a direct observation of how much the earlier
+                # value was above the profile, so it is what the verdict is
+                # based on when it is available.
+                near = pp.get("warm_gain_near")
+                measured = pp.get("n_warm_measured", 0)
+                if not measured:
+                    verdict = ("not yet re-run warm, so the bias is "
+                               "unmeasured")
+                elif near is None or not np.isfinite(near):
+                    verdict = "bias unmeasured"
+                elif near > 0.1 * _PROFILE_CI_THRESHOLD:
+                    verdict = (f"the warm pass still lowered points near the "
+                               f"crossing by up to {near:.3g} nats, so this "
+                               f"interval is too narrow")
+                elif near > 0:
+                    verdict = (f"but the warm pass moved them by at most "
+                               f"{near:.3g} nats near the crossing, which does "
+                               f"not move the bound")
+                else:
+                    verdict = ("and the warm pass did not lower them, so the "
+                               "cap was polishing a minimum already reached")
+                parts.append(f"{capped} hit the optimizer cap ({verdict})")
+            if running:
+                parts.append(f"{running} still in progress")
+            tail = (", " + ", ".join(parts)) if parts else ""
+            L.append(f"    points           {pp.get('n', 0)}{tail}")
+        if status == "flat":
+            L.append("    NOTE             the profile is flat: this parameter "
+                     "is structurally non-identifiable")
+
+    # ── The verdict, which is the reason anyone opens this file ──────────
+    n_ok = sum(1 for s in profile_ci_state if s == "ok")
+    n_one = sum(1 for s in profile_ci_state if s in ("open_lower", "open_upper"))
+    n_open = sum(1 for s in profile_ci_state if s == "open")
+    n_flat = sum(1 for s in profile_ci_state if s == "flat")
+    at_bound, at_budget = [], []
+    for pname, sides in reach.items():
+        for key, d in sides.items():
+            if d.get("state") == "bound":
+                at_bound.append(f"{pname} ({key})")
+            elif d.get("state") == "budget":
+                at_budget.append(f"{pname} ({key})")
+
+    L.append("")
+    L.append("-" * 78)
+    L.append("IDENTIFIABILITY")
+    L.append("-" * 78)
+    L.append(f"    both bounds found          {n_ok} of {len(param_names)}")
+    if n_one:
+        L.append(f"    one bound only             {n_one}")
+    if n_open:
+        L.append(f"    neither bound found        {n_open}")
+    if n_flat:
+        L.append(f"    flat (non-identifiable)    {n_flat}")
+
+    if at_bound:
+        L.append("")
+        L.append("    Walked to the parameter's own bound without reaching the")
+        L.append("    threshold - not identifiable anywhere it is allowed to go.")
+        L.append("    Widen that bound only if wider values are physical:")
+        for s in at_bound[:20]:
+            L.append(f"      {s}")
+        if len(at_bound) > 20:
+            L.append(f"      ... and {len(at_bound) - 20} more")
+    if at_budget:
+        L.append("")
+        L.append("    Ran out of extension steps - nothing established either")
+        L.append("    way. Raise profile_max_extend and re-run; the checkpoint")
+        L.append("    keeps the points already computed:")
+        for s in at_budget[:20]:
+            L.append(f"      {s}")
+        if len(at_budget) > 20:
+            L.append(f"      ... and {len(at_budget) - 20} more")
+
+    if plot_files:
+        L.append("")
+        L.append("-" * 78)
+        L.append("FIGURES")
+        L.append("-" * 78)
+        for p in plot_files:
+            L.append(f"    {os.path.basename(p)}")
+
+    L.append("")
+    L.append(rule)
+    return "\n".join(L)
+
+
+def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name,
+                                  tag="ALL", profile_kwargs=None):
     """Run profile likelihood once per parameter, extract CIs, and save plot.
 
     Parallelises across parameters on Linux / macOS via fork-based
@@ -188,6 +688,7 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
     can include it in the CSV when called afterwards.
     """
     import sys
+    from datetime import datetime
     import numpy as np
     import matplotlib.pyplot as plt
 
@@ -195,6 +696,13 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
     if not profile_func:
         print("Warning: no profile_likelihood closure in opt['stats'] — skipping plot.")
         return
+
+    # One stamp for every artefact this call produces, so the three figures and
+    # the report are identifiable as one run at a glance. Successive runs used
+    # to overwrite each other's figures, which made comparing a re-run against
+    # the run that motivated it impossible -- the evidence was already gone.
+    stamp = datetime.now()
+    ts = stamp.strftime("%Y%m%d_%H%M%S")
 
     colors  = ['blue', 'green', 'red', 'orange', 'purple', 'brown']
     markers = ['o', 's', '^', 'D', 'v']
@@ -210,7 +718,19 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
     profile_all = opt.get("stats", {}).get("profile_likelihood_all")
     if profile_all is not None:
         try:
-            traces = profile_all()
+            traces, anchor, where, convergence = profile_all(
+                **(profile_kwargs or {}))
+            opt["stats"]["profile_anchor_gap"] = float(anchor)
+            opt["stats"]["profile_convergence"] = convergence
+            if where is not None and anchor < -1e-3:
+                # The engine assembles the full linear vector; keep the raw
+                # nuisance solution beside it for anyone re-entering the
+                # optimizer in its own space.
+                better = dict(convergence.get("better_point") or {})
+                better.setdefault("parameter", where[0])
+                better.setdefault("value", where[1])
+                better["nuisance_x"] = where[2]
+                opt["stats"]["profile_better_point"] = better
             for i, pname in enumerate(param_names):
                 if pname not in traces:
                     continue
@@ -220,8 +740,19 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
                     continue
                 cache[i] = (np.asarray(pv), np.asarray(nr))
                 print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
-                if np.all(np.abs(nr) < 1e-10):
-                    print(f"    *** FLAT: model may not respond to {pname} ***")
+                # Range, not distance from zero: the optimum is no longer
+                # spliced in as a hardcoded 0.0, so a genuinely flat profile
+                # really does have zero range and is detected. The old test
+                # could never fire.
+                if np.ptp(nr) < _PROFILE_FLAT_TOL:
+                    print(f"    *** FLAT: {pname} is structurally non-identifiable "
+                          f"(profile varies by {np.ptp(nr):.3g} over the whole grid) ***")
+        except UnidentifiableParameters:
+            # Not a failure of the parallel path, so there is nothing to fall
+            # back to: the sequential profile would spend days reaching the
+            # same verdict the screen has already proved. It has to travel past
+            # this handler intact or the run would quietly continue.
+            raise
         except Exception as exc:
             import traceback
             print(f"  parallel profile failed ({exc}); falling back.")
@@ -272,18 +803,73 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
 
     # Extract profile CIs and store so Results.py can write them to CSV
     profile_ci = []
+    profile_ci_state = []
     profile_traces = {}
     print("\n  Profile likelihood 95% CIs:")
+    _status_note = {
+        "flat":       "structurally non-identifiable — profile is flat",
+        "open":       "no crossing either side",
+        "open_lower": "no lower crossing",
+        "open_upper": "no upper crossing",
+        "empty":      "no profile points",
+        "missing":    "profile not computed",
+    }
+    # Which sides a status leaves unresolved, so the advice can name what
+    # actually stopped each one rather than always blaming the grid width.
+    _status_sides = {"open": ("lower", "upper"), "open_lower": ("lower",),
+                     "open_upper": ("upper",)}
+    _reach = (opt.get("stats", {}).get("profile_convergence") or {}).get("reach", {})
+
+    def _reach_advice(pname, status):
+        """Why the missing bound is missing: a real answer, or an exhausted budget.
+
+        These call for opposite responses. A side that walked to the parameter's
+        own bound without dNLL reaching 1.9207 has answered the question -- the
+        parameter is not identifiable anywhere it is allowed to go -- and
+        re-running with a wider grid would change nothing, because the bound,
+        not the grid, is the constraint. A side that merely ran out of extension
+        steps has answered nothing and does want a re-run.
+        """
+        sides = _reach.get(pname) or {}
+        notes = []
+        for key in _status_sides.get(status, ()):
+            d = sides.get(key)
+            if not d:
+                continue
+            if d["state"] == "bound":
+                notes.append(f"{key} side reached the parameter bound "
+                             f"({d['reach']:.4g}) at dNLL {d['max_dnll']:.3g} — "
+                             f"not identifiable within its declared bounds")
+            elif d["state"] == "budget":
+                notes.append(f"{key} side stopped at {d['reach']:.4g} with dNLL "
+                             f"{d['max_dnll']:.3g} — raise profile_max_extend")
+        return notes
+
     for i, pname in enumerate(param_names):
         cached = cache.get(i)
         if cached is not None:
             lo, hi = _extract_profile_ci(cached[0], cached[1], threshold=_PROFILE_CI_THRESHOLD)
+            status = profile_ci_status(cached[0], cached[1], lo, hi,
+                                       flat_tol=_PROFILE_FLAT_TOL)
             profile_traces[pname] = {"x": cached[0].tolist(), "y": cached[1].tolist()}
         else:
-            lo, hi = float('nan'), float('nan')
+            lo, hi, status = float('nan'), float('nan'), "missing"
         profile_ci.append((lo, hi))
-        print(f"    {pname}: [{lo:.4g}, {hi:.4g}]")
+        profile_ci_state.append(status)
+        note = f"   [{status}: {_status_note[status]}]" if status != "ok" else ""
+        for advice in _reach_advice(pname, status):
+            note += f"\n        {advice}"
+        # A CI is only as trustworthy as the nuisance optimizations underneath
+        # it, so the caveat belongs on the interval itself rather than only in a
+        # summary further up the log.
+        conv = (opt.get("stats", {}).get("profile_convergence") or {}) \
+            .get("per_param", {}).get(pname)
+        if conv and conv.get("n_not_converged"):
+            note += (f"   [{conv['n_not_converged']}/{conv['n']} point(s) hit "
+                     f"the optimizer cap — interval is too narrow]")
+        print(f"    {pname}: [{lo:.4g}, {hi:.4g}]{note}")
     opt["stats"]["profile_ci"] = profile_ci
+    opt["stats"]["profile_ci_status"] = profile_ci_state
     opt["stats"]["profile_traces"] = profile_traces
 
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -300,33 +886,88 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name, tag="
                label=f'95% CI (Δ NLL = {_PROFILE_CI_THRESHOLD:.2f})')
     ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
     ax.set_xlabel('Parameter Value (relative to optimal)')
-    ax.set_ylabel('Δ NLL (relative to minimum)')
-    ax.set_title(f'Profile Likelihood — {tag} (Identifiability Check)')
+    ax.set_ylabel('Δ NLL (relative to profile minimum)')
+    _gap = opt.get("stats", {}).get("profile_anchor_gap", 0.0)
+    if _gap < -1e-3:
+        # Say it on the figure too — a plot whose optimum line sits off the
+        # minimum is the single most misleading output this code can produce.
+        ax.set_title('Profile Likelihood — WARNING: fit is '
+                     f'{abs(_gap):.3g} nats above the profile minimum')
+    else:
+        ax.set_title('Profile Likelihood (Identifiability Check)')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
-    ax.set_xlim(0.2, 3.5)
+    _xwin, _use_log = _profile_plot_x(cache, params_estimated, profile_ci)
+    if _use_log:
+        ax.set_xscale('log')
+    if _xwin:
+        ax.set_xlim(*_xwin)
     plt.tight_layout()
-    out_path = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood.png")
+    _base = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood")
+    out_path = f"{_base}_{ts}.png"
     plt.savefig(out_path, bbox_inches="tight")
     print(f"Profile likelihood saved to: {out_path}")
 
     zoom_half = _PROFILE_CI_THRESHOLD * 0.10
     ax.set_ylim(-zoom_half, zoom_half)
-    ax.set_title(f'Profile Likelihood — {tag} (y-axis ±10% CI)')
-    out_path_zoom = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood_zoom.png")
+    ax.set_title(f'Profile Likelihood (Identifiability Check, y-axis ±10% CI)')
+    out_path_zoom = f"{_base}_zoom_{ts}.png"
     plt.savefig(out_path_zoom, bbox_inches="tight")
     print(f"Profile likelihood (zoomed) saved to: {out_path_zoom}")
 
     ax.set_ylim(-_PROFILE_CI_THRESHOLD * 0.10, _PROFILE_CI_THRESHOLD)
-    ax.set_title(f'Profile Likelihood — {tag} (y-axis -10% to +100% CI)')
-    out_path_zoom2 = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood_zoom2.png")
+    ax.set_title(f'Profile Likelihood (Identifiability Check, y-axis -10% to +100% CI)')
+    out_path_zoom2 = f"{_base}_zoom2_{ts}.png"
     plt.savefig(out_path_zoom2, bbox_inches="tight")
     print(f"Profile likelihood (zoomed2) saved to: {out_path_zoom2}")
     plt.close(fig)
 
+    # ── Summary report ───────────────────────────────────────────────────
+    report = _profile_report_text(
+        opt, param_names, params_estimated, profile_ci, profile_ci_state,
+        cache, model_name, tag, stamp.strftime("%Y-%m-%d %H:%M:%S"),
+        plot_files=(out_path, out_path_zoom, out_path_zoom2),
+    )
+    report_path = os.path.join(
+        plot_path, f"{model_name}_{tag}_profile_summary_{ts}.txt")
+    try:
+        with open(report_path, "w", encoding="utf-8") as fh:
+            fh.write(report + "\n")
+        print(f"\n{report}")
+        print(f"\nProfile summary saved to: {report_path}")
+    except OSError as exc:
+        # The report is a convenience; losing it must not cost the run the
+        # diagnostics it just spent hours computing.
+        print(f"\n{report}")
+        print(f"\n  [profile] could not write {report_path}: {exc}")
+    opt["stats"]["profile_report"] = report
+    opt["stats"]["profile_report_path"] = report_path
+
+
+def _slice_dnll_at_optimum(param_vals, dnll, opt_val, rtol=1e-6):
+    """The slice's own dNLL at the fitted value, or None if the grid missed it.
+
+    The grid is built to contain the optimum, so this is normally a lookup. It
+    can still come back None for a parameter whose fitted value is zero on a
+    linear scale, or one whose slice errored, and the caller has to survive
+    both.
+    """
+    import numpy as np
+
+    pv = np.asarray(param_vals, dtype=float)
+    y = np.asarray(dnll, dtype=float)
+    if pv.size == 0 or opt_val == 0:
+        return None
+    ratio = np.abs(pv / opt_val - 1.0)
+    i = int(np.argmin(ratio))
+    if ratio[i] > rtol:
+        return None
+    return float(y[i])
+
 
 def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="ALL"):
     """Run likelihood slice once per parameter and save plot."""
+    from datetime import datetime
     import numpy as np
     import matplotlib.pyplot as plt
 
@@ -334,6 +975,11 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
     if not slice_func:
         print("Warning: no likelihood_slice closure in opt['stats'] — skipping plot.")
         return
+
+    # Stamped like the profile figures, and for the same reason: successive runs
+    # used to overwrite each other, so the slice that motivated a change was
+    # gone by the time there was anything to compare it against.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     colors  = ['blue', 'green', 'red', 'orange', 'purple', 'brown']
     markers = ['o', 's', '^', 'D', 'v']
@@ -354,6 +1000,7 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
         except Exception as exc:
             print(f"  batched slice failed ({exc}); falling back per parameter.")
 
+    dnll_at_opt = {}
     for i, pname in enumerate(param_names):
         try:
             if results is not None and pname in results:
@@ -363,12 +1010,35 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
             cache[i] = (pv, nr)
             slice_traces[pname] = {"x": np.asarray(pv).tolist(),
                                    "y": np.asarray(nr).tolist()}
-            print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]")
+            # The optimum is a sampled point, not an assumption, so its dNLL is
+            # worth stating: it should be 0, and anything else means the
+            # diagnostic evaluator and the fit disagree about the fitted point.
+            d0 = _slice_dnll_at_optimum(pv, nr, float(params_estimated[i]))
+            if d0 is not None:
+                dnll_at_opt[pname] = d0
+            at_opt = (f", dNLL at optimum {d0:.4g}" if d0 is not None
+                      else ", optimum not on the grid")
+            print(f"  {pname}: dNLL range [{nr.min():.4g}, {nr.max():.4g}]{at_opt}")
             if np.all(np.abs(nr) < 1e-10):
                 print(f"    *** FLAT: model may not respond to {pname} ***")
+            # A slice does not re-optimize the nuisances, so a point below the
+            # optimum is not a definition mismatch the way it can be in a
+            # profile: the fit is beatable by moving this parameter alone.
+            if nr.min() < -_SLICE_DNLL_TOL:
+                j = int(np.argmin(nr))
+                print(f"    *** WARNING: {pname}={pv[j]:.6g} scores "
+                      f"{abs(nr.min()):.4g} nats BELOW the reported optimum "
+                      f"with every other parameter held fixed - the fit has "
+                      f"not converged ***")
         except Exception as exc:
             print(f"  {pname}: error — {exc}")
     opt["stats"]["slice_traces"] = slice_traces
+    opt["stats"]["slice_dnll_at_optimum"] = dnll_at_opt
+    _worst_at_opt = max((abs(v) for v in dnll_at_opt.values()), default=0.0)
+    if _worst_at_opt > _SLICE_DNLL_TOL:
+        print(f"  *** WARNING: the slice scores the fitted point "
+              f"{_worst_at_opt:.4g} nats away from the value the fit reported "
+              f"there - every dNLL above is measured from the wrong place ***")
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for idx, pname in enumerate(param_names):
@@ -380,30 +1050,44 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
                 marker=markers[(idx // len(colors)) % len(markers)], linestyle='-',
                 label=pname, linewidth=2, color=colors[idx % len(colors)])
 
+    # The fitted point itself, drawn on top of the curves. It is where the
+    # curves now meet, and on the zoomed figures it is often the only point of a
+    # steep slice still on screen, so it needs to be identifiable as such.
+    _opt_ys = [dnll_at_opt[p] for p in param_names if p in dnll_at_opt]
+    if _opt_ys:
+        ax.plot([1.0] * len(_opt_ys), _opt_ys, linestyle='none', marker='x',
+                color='black', markersize=8, markeredgewidth=1.5, zorder=5,
+                label=f'Optimum (Δ NLL = {max(_opt_ys, key=abs):.3g})')
+
     ax.axhline(_PROFILE_CI_THRESHOLD, color='gray', linestyle=':', alpha=0.7, linewidth=1.5,
                label=f'95% CI threshold (Δ NLL = {_PROFILE_CI_THRESHOLD:.2f})')
     ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
     ax.set_xlabel('Parameter Value (relative to optimal)')
     ax.set_ylabel('Δ NLL (relative to minimum)')
-    ax.set_title(f'Likelihood Slice — {tag}')
+    if _worst_at_opt > _SLICE_DNLL_TOL:
+        ax.set_title('Likelihood Slice — WARNING: slice is '
+                     f'{_worst_at_opt:.3g} nats off the fit at the optimum')
+    else:
+        ax.set_title('Likelihood Slice')
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0.2, 3.5)
     plt.tight_layout()
-    out_path = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice.png")
+    _base = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice")
+    out_path = f"{_base}_{ts}.png"
     plt.savefig(out_path, bbox_inches="tight")
     print(f"Likelihood slice saved to: {out_path}")
 
     zoom_half = _PROFILE_CI_THRESHOLD * 0.10
     ax.set_ylim(-zoom_half, zoom_half)
-    ax.set_title(f'Likelihood Slice — {tag} (y-axis ±10% CI)')
-    out_path_zoom = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice_zoom.png")
+    ax.set_title(f'Likelihood Slice (y-axis ±10% CI)')
+    out_path_zoom = f"{_base}_zoom_{ts}.png"
     plt.savefig(out_path_zoom, bbox_inches="tight")
     print(f"Likelihood slice (zoomed) saved to: {out_path_zoom}")
 
     ax.set_ylim(-_PROFILE_CI_THRESHOLD * 0.10, _PROFILE_CI_THRESHOLD)
-    ax.set_title(f'Likelihood Slice — {tag} (y-axis -10% to +100% CI)')
-    out_path_zoom2 = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice_zoom2.png")
+    ax.set_title(f'Likelihood Slice (y-axis -10% to +100% CI)')
+    out_path_zoom2 = f"{_base}_zoom2_{ts}.png"
     plt.savefig(out_path_zoom2, bbox_inches="tight")
     print(f"Likelihood slice (zoomed2) saved to: {out_path_zoom2}")
     plt.close(fig)
@@ -470,7 +1154,9 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
     if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
         _save_likelihood_slice_plot(opt, param_names, paths["plot_path"], MODEL_NAME)
     if (optimization_settings.get("profile_likelihood_analysis") or optimization_settings.get("fast_profile_likelihood_analysis")) and opt["stats"].get("profile_likelihood"):
-        _save_profile_likelihood_plot(opt, param_names, paths["plot_path"], MODEL_NAME)
+        _save_profile_likelihood_plot(
+            opt, param_names, paths["plot_path"], MODEL_NAME,
+            profile_kwargs=_profile_kwargs(optimization_settings))
     if optimization_settings.get("sobol_analysis") and opt["stats"].get("sobol"):
         from Engine.Sensitivity_analysis import save_sobol_plot
         save_sobol_plot(opt["stats"]["sobol"], paths["plot_path"], MODEL_NAME)
@@ -535,16 +1221,22 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             fit_mode=settings.get("fit_mode"),
             n_workers=settings.get("n_workers"),
             profile_checkpoint=settings.get("profile_checkpoint", True),
+            preequil_cache=settings.get("preequil_cache", True),
+            reuse_fit=settings.get("reuse_fit", True),
         )
 
-        groups_tag = _make_tag(settings, opt.get("groups", ["ALL"]))
+        groups_tag = "_".join(opt.get("groups", ["ALL"]))
 
         if settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, optimization_settings.param_names, paths["plot_path"],
                                         MODEL_NAME, tag=groups_tag)
         if (settings.get("profile_likelihood_analysis") or settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
-            _save_profile_likelihood_plot(opt, optimization_settings.param_names, paths["plot_path"],
-                                          MODEL_NAME, tag=groups_tag)
+            _save_profile_likelihood_plot(
+                opt, optimization_settings.param_names, paths["plot_path"],
+                MODEL_NAME, tag=groups_tag,
+                profile_kwargs=_profile_kwargs(settings, optimization_settings))
+        if settings.get("fast_profile_likelihood_analysis") and opt.get("stats", {}).get("fast_profile_all"):
+            _run_fast_profile_report(opt, settings, optimization_settings)
         if settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
             from Engine.Sensitivity_analysis import save_sobol_plot
             save_sobol_plot(opt["stats"]["sobol"], paths["plot_path"], MODEL_NAME, tag=groups_tag)
@@ -557,7 +1249,6 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  model_name=MODEL_NAME, experiment_id=groups_tag, method=optimization_settings.method)
 
         if opt.get("results_dict") is not None and plot_function:
-            paths["plot_tag"] = groups_tag
             plot_function(paths, opt["results_dict"])
         _shutdown_evaluator(opt)
         return opt
@@ -614,19 +1305,19 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
             group_optimizations[group_name] = opt
 
-            group_tag = _make_tag(settings, group_name)
-
             # Run analysis plots first so profile_ci is populated before CSV write
             if group_settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
                 _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
-                                            MODEL_NAME, tag=group_tag)
+                                            MODEL_NAME, tag=group_name)
             if (group_settings.get("profile_likelihood_analysis") or group_settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
-                _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
-                                              MODEL_NAME, tag=group_tag)
+                _save_profile_likelihood_plot(
+                    opt, param_names, paths["plot_path"], MODEL_NAME,
+                    tag=group_name,
+                    profile_kwargs=_profile_kwargs(group_settings))
             if group_settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
                 from Engine.Sensitivity_analysis import save_sobol_plot
                 save_sobol_plot(opt.get("stats", {}).get("sobol"), paths["plot_path"],
-                                MODEL_NAME, tag=group_tag)
+                                MODEL_NAME, tag=group_name)
 
             print(f"\nOptimization Summary for {group_name}:")
             print("-" * 85)
@@ -673,10 +1364,10 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
             csv_path = os.path.join(
                 paths["plot_path"],
-                f"{MODEL_NAME}_{group_tag}_optimization_results.csv",
+                f"{MODEL_NAME}_{group_name}_optimization_results.csv",
             )
             log_optimization_results(opt, param_names, csv_path,
-                                     model_name=MODEL_NAME, experiment_id=group_tag,
+                                     model_name=MODEL_NAME, experiment_id=group_name,
                                      method=method)
 
         if optimization_settings.get("petab_export"):
@@ -684,7 +1375,6 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  optimization_settings, group_optimizations)
 
         if all_results and plot_function:
-            paths["plot_tag"] = _make_tag(settings, sorted(group_optimizations.keys()))
             plot_function(paths, all_results)
         for _o in group_optimizations.values():
             _shutdown_evaluator(_o)
@@ -721,15 +1411,17 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             n_workers=optimization_settings.get("n_workers", settings.get("n_workers")),
         )
 
-        groups_tag = _make_tag(settings, opt.get("groups", ["ALL"]))
+        groups_tag = "_".join(opt.get("groups", ["ALL"]))
 
         # Run analysis plots first so profile_ci is populated before CSV write
         if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
                                         MODEL_NAME, tag=groups_tag)
         if (optimization_settings.get("profile_likelihood_analysis") or optimization_settings.get("fast_profile_likelihood_analysis")) and opt["stats"].get("profile_likelihood"):
-            _save_profile_likelihood_plot(opt, param_names, paths["plot_path"],
-                                          MODEL_NAME, tag=groups_tag)
+            _save_profile_likelihood_plot(
+                opt, param_names, paths["plot_path"], MODEL_NAME,
+                tag=groups_tag,
+                profile_kwargs=_profile_kwargs(optimization_settings))
         if optimization_settings.get("sobol_analysis") and opt["stats"].get("sobol"):
             from Engine.Sensitivity_analysis import save_sobol_plot
             save_sobol_plot(opt["stats"]["sobol"], paths["plot_path"],
@@ -747,7 +1439,6 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  optimization_settings, {"__flat__": opt})
 
         if opt.get("results_dict") is not None and plot_function:
-            paths["plot_tag"] = groups_tag
             plot_function(paths, opt["results_dict"])
         _shutdown_evaluator(opt)
         return opt

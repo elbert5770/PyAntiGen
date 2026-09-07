@@ -11,6 +11,7 @@ from framework.TelluriumGen import TelluriumGen
 
 from Modules.Experiment import *
 from Modules.Plots import *
+from Engine.Event_times import attach_event_times
 from Engine.Simulate import simulate
 
 def run_steady_state(model_text, paths, settings):
@@ -85,6 +86,10 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
                     r[p_name] = p_val
                 except Exception:
                     pass
+
+        # After the overrides: a trigger built on an overridden parameter has to
+        # resolve against the value this run will actually integrate with.
+        attach_event_times(replicate, r, verbose=True)
 
         solver_settings = replicate["Solver_settings"](replicate)
         observed_species = replicate["Observed_species"](r)

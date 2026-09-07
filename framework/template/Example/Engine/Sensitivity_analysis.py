@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -152,12 +153,18 @@ def save_sobol_plot(sobol_results, plot_path, model_name, tag="ALL"):
     ax.grid(axis='x', linestyle='--', alpha=0.5)
     
     plt.tight_layout()
-    out_file = os.path.join(plot_path, f"{model_name}_{tag}_sobol_{mode}.png")
+    # Stamped like the profile and slice figures, so a re-run does not overwrite
+    # the analysis that prompted it. The figure and its summary share one stamp.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = os.path.join(plot_path,
+                            f"{model_name}_{tag}_sobol_{mode}_{ts}.png")
     plt.savefig(out_file, dpi=300)
     plt.close(fig)
-    
+    print(f"Sobol sensitivity saved to: {out_file}")
+
     # Text Summary
-    txt_file = os.path.join(plot_path, f"{model_name}_{tag}_sobol_{mode}_summary.txt")
+    txt_file = os.path.join(
+        plot_path, f"{model_name}_{tag}_sobol_{mode}_summary_{ts}.txt")
     with open(txt_file, "w") as f:
         f.write(f"Sobol Global Sensitivity Analysis ({title_mode})\n")
         f.write("========================================================\n")
@@ -248,7 +255,10 @@ def setup_sobol_analysis(settings, optimization_settings, experiment_dict):
     events_str = rep["Events"](rep, df_dict)
     r = TelluriumGen(model_text + "\n" + events_str, paths)
     rep["Update_parameters"](r, rep)
-    
+
+    from Engine.Event_times import attach_event_times
+    attach_event_times(rep, r)
+
     # We will record Y of shape (num_samples, len(observables), len(times))
     Y = np.zeros((num_samples, len(observables), len(times)))
     
