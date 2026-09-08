@@ -23,3 +23,6 @@ wheels/
 .venv
 venv/
 ENV/
+
+# Written at build time by setuptools-scm (see [tool.setuptools_scm])
+framework/_version.py

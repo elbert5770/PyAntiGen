@@ -1,10 +1,12 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyAntiGen"
-version = "1.0.10"
+# Version comes from the git tag via setuptools-scm; see [tool.setuptools_scm]
+# below. Do not add a literal "version" here -- declaring both is a build error.
+dynamic = ["version"]
 description = "Short one-line description of what PyAntiGen does"
 readme = "README.md"
 license = { text = "MIT" }          # adjust if needed
@@ -37,3 +39,19 @@ pyantigen-create = "framework.cli:create_project"
 
 [tool.setuptools.packages.find]
 include = ["framework*"]
+
+# Version is derived from the latest git tag (v1.0.10 -> 1.0.10; the leading "v"
+# is stripped automatically). Releasing is therefore: commit, tag, build.
+#
+#   - On a clean checkout sitting exactly on a tag, the version IS that tag.
+#   - On any other commit, or a dirty tree, you get a development version such
+#     as 1.0.11.dev2+g1a2b3c4.d20260908. That carries a PEP 440 local segment,
+#     which PyPI refuses to accept -- deliberately. It means an untagged or
+#     uncommitted release fails at upload instead of shipping a wrong number.
+#   - Building from an export with no .git falls back to the version below,
+#     which is likewise unpublishable on purpose.
+#
+# CI must fetch full history and tags; a default shallow clone sees no tags.
+[tool.setuptools_scm]
+version_file = "framework/_version.py"
+fallback_version = "0.0.0+unknown"

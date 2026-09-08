@@ -2,7 +2,9 @@ from setuptools import setup, find_packages
 
 setup(
     name='pyantigen',
-    version='1.0.10',
+    # No version here. It is declared dynamic in pyproject.toml and supplied by
+    # setuptools-scm from the git tag; setting it in both places is a build
+    # error. This file now only carries package_data, which pyproject does not.
     description='A declarative framework for building compartmental Antimony models',
     author='Open Source Contributor',
     packages=find_packages(include=['framework*']),
