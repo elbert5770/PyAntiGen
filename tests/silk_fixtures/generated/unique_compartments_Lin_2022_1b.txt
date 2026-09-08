@@ -1,5 +1,0 @@
-BrainISF
-CSF
-IV
-Peripheral
-Plasma

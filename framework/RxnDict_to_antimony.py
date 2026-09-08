@@ -504,9 +504,28 @@ def generate_antimony_from_txt(txt_file_path, name):
     # Generate the complete script with compartments, species, and reactions
     complete_script = ""
     
-    # Add compartment declarations
+    # Add compartment declarations.
+    #
+    # ":=" and not "=", deliberately. With "=" Antimony emits an SBML
+    # initialAssignment and marks the compartment constant, so the compartment
+    # takes a *copy* of V_<name> at t=0 and nothing ever refreshes it. Rate laws
+    # reference the V_<name> parameter directly, so the dynamics stay correct,
+    # but every concentration -- amount/compartment for a substanceOnly species
+    # -- is then computed against a stale size, and setting V_<name> at runtime
+    # does not resize the compartment at all.
+    #
+    # That diverges silently whenever V_<name> is driven by an assignment rule
+    # or is assigned between runs. Measured in the Elbert_Esguerra amyloid model
+    # on 2026-09-08, where V_LV grows with atrophy: at age 72 the LV compartment
+    # was 10.3x smaller than V_LV, so [X_LV] read 10.3x high while the ODEs were
+    # right.
+    #
+    # ":=" makes the compartment an assignment-rule variable that tracks its
+    # parameter. Amounts are unaffected (no spurious dilution flux), every rate
+    # law is unchanged since they use V_<name>, and concentrations become
+    # consistent with the volume the dynamics actually use.
     for compartment in sorted(unique_compartments):
-        complete_script += f"compartment {compartment} = V_{compartment}\n"
+        complete_script += f"compartment {compartment} := V_{compartment}\n"
     complete_script += "\n"  # Add blank line after compartments
     
     # Add species declarations (use explicit compartment map when available)

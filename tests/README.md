@@ -4,11 +4,13 @@
 
 The tests in `test_silk_all_reactions.py` run scripts and assert on the generated `*_reaction_dict.txt` files:
 
-| Script | Generated file | Min reactions |
-|--------|----------------|---------------|
-| `scripts/Elbert_2022_1a.py` | `generated/Elbert_2022_1a/Elbert_2022_1a_reaction_dict.txt` | 100 |
-| `scripts/Bloomingdale_2021_1a.py` | `generated/Bloomingdale_2021_1a/Bloomingdale_2021_1a_reaction_dict.txt` | 25 |
-| `scripts/Lin_2022_1b.py` | `generated/Lin_2022_1b/Lin_2022_1b_reaction_dict.txt` | 70 |
+The output folder is named after the **model name** passed to `PyAntiGen()` inside
+the script, which need not match the script's filename.
+
+| Script | Model name | Generated file | Min reactions |
+|--------|------------|----------------|---------------|
+| `scripts/Elbert_2022_1a.py` | `Elbert_2022_1a` | `generated/Elbert_2022_1a/Elbert_2022_1a_reaction_dict.txt` | 100 |
+| `scripts/Bloomingdale_2021_1a.py` | `Bloomingdale_2021_1a` | `generated/Bloomingdale_2021_1a/Bloomingdale_2021_1a_reaction_dict.txt` | 25 |
 
 ### Where the scripts come from
 

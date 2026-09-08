@@ -1,0 +1,30 @@
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainVascular_BrainISF', 'Reactants': '[Antibody_BrainVascular]', 'Products': '[Antibody_BrainISF]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - RC_BBB) * QB_ECF'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainISF_Lymph', 'Reactants': '[Antibody_BrainISF]', 'Products': '[Antibody_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - RC_BrainISF) * QB_ECF'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainVascular_CSF', 'Reactants': '[Antibody_BrainVascular]', 'Products': '[Antibody_CSF]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - RC_BCSFB) * QB_CSF'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_CSF_Lymph', 'Reactants': '[Antibody_CSF]', 'Products': '[Antibody_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - RC_CSF) * QB_ECF'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainVascular_BBB', 'Reactants': '[Antibody_BrainVascular]', 'Products': '[Antibody_BBB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'CLup_BBB'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainISF_BBB', 'Reactants': '[Antibody_BrainISF]', 'Products': '[Antibody_BBB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'CLup_BBB'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainVascular_BCSFB', 'Reactants': '[Antibody_BrainVascular]', 'Products': '[Antibody_BCSFB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'CLup_BCSFB'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_CSF_BCSFB', 'Reactants': '[Antibody_CSF]', 'Products': '[Antibody_BCSFB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'CLup_BCSFB'}
+{'Reaction_name': 'BidirectionalFlowWithinTissue_Antibody_CSF_BrainISF', 'Reactants': '[Antibody_CSF]', 'Products': '[Antibody_BrainISF]', 'Rate_type': 'BDF', 'Rate_eqtn_prototype': 'QB_ECF'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_TissueVascular_TissueISF', 'Reactants': '[Antibody_TissueVascular]', 'Products': '[Antibody_TissueISF]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - RC_TissueVascular) * LT'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_TissueISF_Lymph', 'Reactants': '[Antibody_TissueISF]', 'Products': '[Antibody_Lymph]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - RC_TissueLymph) * LT'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_Plasma_TissueVascular', 'Reactants': '[Antibody_Plasma]', 'Products': '[Antibody_TissueVascular]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'QT'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_TissueVascular_Plasma', 'Reactants': '[Antibody_TissueVascular]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(QT - LT)'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_Lymph_Plasma', 'Reactants': '[Antibody_Lymph]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(LB + LT)'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_Plasma_BrainVascular', 'Reactants': '[Antibody_Plasma]', 'Products': '[Antibody_BrainVascular]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'QB'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_BrainVascular_Plasma', 'Reactants': '[Antibody_BrainVascular]', 'Products': '[Antibody_Plasma]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(QB - LB)'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_TissueVascular_TissueEndosomal', 'Reactants': '[Antibody_TissueVascular]', 'Products': '[Antibody_TissueEndosomal]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'CLup_Tissue'}
+{'Reaction_name': 'FlowWithinTissue_Antibody_TissueISF_TissueEndosomal', 'Reactants': '[Antibody_TissueISF]', 'Products': '[Antibody_TissueEndosomal]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'CLup_Tissue'}
+{'Reaction_name': 'Recycle_FcRn_Antibody_BBB_BrainISF', 'Reactants': '[Antibody__FcRn_BBB]', 'Products': '[Antibody_BrainISF, FcRn_BBB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - FR_B) * CLup_BBB'}
+{'Reaction_name': 'Recycle_FcRn_Antibody_BBB_BrainVascular', 'Reactants': '[Antibody__FcRn_BBB]', 'Products': '[Antibody_BrainVascular, FcRn_BBB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'FR_B * CLup_BBB'}
+{'Reaction_name': 'Recycle_FcRn_Antibody_BCSFB_BrainISF', 'Reactants': '[Antibody__FcRn_BCSFB]', 'Products': '[Antibody_BrainISF, FcRn_BCSFB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - FR_B) * CLup_BCSFB'}
+{'Reaction_name': 'Recycle_FcRn_Antibody_BCSFB_BrainVascular', 'Reactants': '[Antibody__FcRn_BCSFB]', 'Products': '[Antibody_BrainVascular, FcRn_BCSFB]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'FR_B * CLup_BCSFB'}
+{'Reaction_name': 'Recycle_FcRn_Antibody_TissueEndosomal_TissueISF', 'Reactants': '[Antibody__FcRn_TissueEndosomal]', 'Products': '[Antibody_TissueISF, FcRn_TissueEndosomal]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': '(1 - FR) * CLup_Tissue'}
+{'Reaction_name': 'Recycle_FcRn_Antibody_TissueEndosomal_TissueVascular', 'Reactants': '[Antibody__FcRn_TissueEndosomal]', 'Products': '[Antibody_TissueVascular, FcRn_TissueEndosomal]', 'Rate_type': 'UDF', 'Rate_eqtn_prototype': 'FR * CLup_Tissue'}
+{'Reaction_name': 'DegradationWithinEndosome_Antibody_TissueEndosomal', 'Reactants': '[Antibody_TissueEndosomal]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'Kdeg'}
+{'Reaction_name': 'BindingToFcRn_Antibody_TissueEndosomal', 'Reactants': '[Antibody_TissueEndosomal, FcRn_TissueEndosomal]', 'Products': '[Antibody__FcRn_TissueEndosomal]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[Kon_FcRn,Koff_FcRn]'}
+{'Reaction_name': 'DegradationWithinEndosome_Antibody_BBB', 'Reactants': '[Antibody_BBB]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'Kdeg'}
+{'Reaction_name': 'BindingToFcRn_Antibody_BBB', 'Reactants': '[Antibody_BBB, FcRn_BBB]', 'Products': '[Antibody__FcRn_BBB]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[Kon_FcRn,Koff_FcRn]'}
+{'Reaction_name': 'DegradationWithinEndosome_Antibody_BCSFB', 'Reactants': '[Antibody_BCSFB]', 'Products': '[0]', 'Rate_type': 'MA', 'Rate_eqtn_prototype': 'Kdeg'}
+{'Reaction_name': 'BindingToFcRn_Antibody_BCSFB', 'Reactants': '[Antibody_BCSFB, FcRn_BCSFB]', 'Products': '[Antibody__FcRn_BCSFB]', 'Rate_type': 'RMA', 'Rate_eqtn_prototype': '[Kon_FcRn,Koff_FcRn]'}

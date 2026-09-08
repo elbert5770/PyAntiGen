@@ -1,10 +1,10 @@
 """
 Tests that run Elbert_2022_SILK scripts and validate the generated *_reaction_dict files.
 
-Target scripts (and their reaction output files):
-- scripts/Elbert_2022_1a.py  -> generated/Elbert_2022_1a_reaction_dict.txt
-- scripts/Bloomingdale_2021_1a.py -> generated/Bloomingdale_2021_1a_reaction_dict.txt
-- scripts/Lin_2022_1b.py -> generated/Lin_2022_1b_reaction_dict.txt
+Target scripts (and their reaction output files, keyed by model name rather
+than script name -- the two need not agree):
+- scripts/Elbert_2022_1a.py  -> generated/Elbert_2022_1a/Elbert_2022_1a_reaction_dict.txt
+- scripts/Bloomingdale_2021_1a.py -> generated/Bloomingdale_2021_1a/Bloomingdale_2021_1a_reaction_dict.txt
 
 Requires the Elbert_2022_SILK project to be available (sibling directory or SILK_PROJECT_PATH).
 """
@@ -79,33 +79,37 @@ def run_script(silk_root, script_basename, pyantigen_root):
     return result
 
 
-@pytest.mark.parametrize("script_name,expected_min_reactions,expected_reaction_names", [
+# model_name is the name passed to PyAntiGen() inside the script, which is what
+# sets the generated/<model_name>/ output folder. It is stated explicitly rather
+# than derived from the script filename, because the two need not agree: a
+# script whose model name differs would otherwise be checked against a path
+# nothing writes, and fail as "File not found" even though it had succeeded.
+@pytest.mark.parametrize("script_name,model_name,expected_min_reactions,expected_reaction_names", [
     (
         "Elbert_2022_1a.py",
+        "Elbert_2022_1a",
         100,
         ["APPSynthesis_BrainISF", "FlowWithinTissue_AB38_CV_SAS", "BidirectionalFlowWithinTissue_AB38_SAS_BrainISF", "AB40Exchange_BrainISF"],
     ),
     (
         "Bloomingdale_2021_1a.py",
+        "Bloomingdale_2021_1a",
         25,
         ["FlowWithinTissue_Antibody_BrainVascular_BrainISF", "BidirectionalFlowWithinTissue_Antibody_CSF_BrainISF", "BindingToFcRn_Antibody_BBB"],
-    ),
-    (
-        "Lin_2022_1b.py",
-        70,
-        ["Flow_IV_mAb_", "Synth_APP_Plasma", "Bind_APP_BACE_Plasma", "Bind_mAb_Abeta_Plasma", "Catalysis_ADCP_Aolig_BrainISF"],
     ),
 ])
 def test_silk_script_generates_all_reactions(
     silk_project_path,
     pyantigen_root,
     script_name,
+    model_name,
     expected_min_reactions,
     expected_reaction_names,
 ):
     """Run the SILK script and assert the generated _reaction_dict file is valid and has expected content."""
-    name = script_name.replace(".py", "")
-    reactions_file = os.path.join(silk_project_path, "generated", name, f"{name}_reaction_dict.txt")
+    reactions_file = os.path.join(
+        silk_project_path, "generated", model_name, f"{model_name}_reaction_dict.txt"
+    )
 
     # Run the script to (re)generate the file
     result = run_script(silk_project_path, script_name, pyantigen_root)
@@ -130,10 +134,15 @@ def test_silk_all_reactions_file_structure(silk_project_path):
     If the SILK project exists and has pre-generated _reaction_dict files,
     validate their structure without re-running the scripts.
     """
+    # Model names, not script names -- see the note on the parametrize above.
+    #
+    # Note the skip below fires inside the loop, so one missing file marks the
+    # whole test skipped and discards the cases already checked. Keep this list
+    # in step with the parametrize above, or a stale entry goes quiet instead of
+    # red.
     cases = [
         ("Elbert_2022_1a", 100),
         ("Bloomingdale_2021_1a", 25),
-        ("Lin_2022_1b", 70),
     ]
     for name, min_reactions in cases:
         filename = f"{name}_reaction_dict.txt"

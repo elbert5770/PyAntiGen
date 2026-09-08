@@ -1,0 +1,10 @@
+BBB
+BCSFB
+BrainISF
+BrainVascular
+CSF
+Lymph
+Plasma
+TissueEndosomal
+TissueISF
+TissueVascular
