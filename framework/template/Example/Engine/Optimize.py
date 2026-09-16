@@ -16,6 +16,8 @@ from Engine.Event_times import attach_event_times
 from Engine.Simulate import simulate
 from Engine.Profile_checkpoint import record_is_better as _profile_record_is_better
 from Modules.Loss_config import no_optimization
+from Modules.utils.noise_floor import get_noise_floor
+from Modules.utils.noise_floor import clear_cache as _clear_noise_floor_cache
 
 
 # Persistent state for the live optimization-progress overlay plot. The figure
@@ -35,24 +37,32 @@ _progress_overlay_state = {
 def _block_title_stats(tr, blocks):
     """The block's own term in the objective, for a panel title.
 
-    *blocks* is the ``{(block_key, obs): [sse, n, known_sigma]}`` mapping the
-    concentrated likelihood is summed over, and the trace carries which block
-    it fed. Returns ``(n, sigma, term, tag)`` or None when the trace cannot be
-    matched -- a legacy route with no blocks, for instance.
+    *blocks* is the ``{(block_key, obs): [sse, n, known_sigma, sigma_floor]}``
+    mapping the concentrated likelihood is summed over, and the trace carries
+    which block it fed. Returns ``(n, sigma, term, tag)`` or None when the
+    trace cannot be matched -- a legacy route with no blocks, for instance.
     """
     if not blocks or tr.get("block") is None:
         return None
     v = blocks.get(tuple(tr["block"]))
     if v is None:
         return None
-    sse, n, ks = _unpack_block(v)
+    sse, n, ks, floor = _unpack_block(v)
     if n <= 0:
         return None
-    if ks is None:
-        s2 = max(sse / n, _SIGMA2_FLOOR)
-        return n, float(np.sqrt(s2)), 0.5 * n * np.log(s2), "sigma fitted"
-    ks = max(float(ks), 1e-300)
-    return n, ks, sse / (2.0 * ks * ks), "sigma fixed"
+    sigma_used, _cost, state = _block_sigma_resolution(sse, n, ks, floor)
+    if state == "declared":
+        term = sse / (2.0 * sigma_used * sigma_used)
+        tag = "sigma fixed"
+    elif state in ("floored_binding", "floored_free"):
+        term = n * np.log(sigma_used) + sse / (2.0 * sigma_used * sigma_used)
+        tag = ("sigma floor (capped)" if state == "floored_binding"
+               else "sigma floor (not binding)")
+    else:
+        s2 = max(sigma_used * sigma_used, _SIGMA2_FLOOR)
+        term = 0.5 * n * np.log(s2)
+        tag = "sigma fitted"
+    return n, sigma_used, term, tag
 
 
 def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
@@ -156,6 +166,19 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
         ax.clear()
         tr = trace_collector[key]
         ax.plot(tr["t_sim"], tr["y_sim"], color="C0", lw=1.2, label="model")
+        floor_obj = tr.get("floor")
+        if floor_obj is not None:
+            # Data-only smoother +/- its residual SD: the same values capping
+            # this block's profiled sigma (see _sigma_floor_for), so this band
+            # is exactly the noise floor the fit is being held to, not just an
+            # illustration of it.
+            ax.plot(floor_obj.x_fit, floor_obj.y_fit, color="C2", lw=1.0,
+                    ls="--", alpha=0.8, zorder=2, label="data smoother")
+            ax.fill_between(floor_obj.x_fit,
+                            floor_obj.y_fit - floor_obj.sigma,
+                            floor_obj.y_fit + floor_obj.sigma,
+                            color="C2", alpha=0.15, zorder=1,
+                            label="±1σ floor")
         ax.scatter(tr["t_data"], tr["y_data"], facecolors="none", edgecolors="black", s=10,
                    zorder=5, label="data")
 
@@ -199,69 +222,6 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
     out = os.path.join(plot_path, f"optimization_progress_{opt_timestamp}.png")
     fig.savefig(out, dpi=100, bbox_inches="tight")
     _progress_overlay_state["last_render"] = now
-
-
-def evaluate_observable(obs, result, param_dict=None, on_error="raise"):
-    """Evaluate an observable against a simulation result.
-
-    ``obs`` may be a callable, a bare output name ("MFL42", "[AB42_SP3]"), or a
-    Python **expression** over the output columns
-    (e.g. "np.log10(Total_Plasma_Antibody/V_Plasma)").
-
-    This exists because the expression case was previously handled in the loss
-    but *not* in the sigma-estimation block, which silently substituted zeros
-    for anything that was not a literal column name. Sigma was then the RMS of
-    the data rather than of the residuals -- inflating it by ~100x for log-scale
-    PK data, which suppressed every dNLL built on it by ~10^4 and made profile
-    likelihood useless for expression-valued observables. One resolver, used
-    everywhere, is what keeps that from recurring.
-
-    ``on_error="zeros"`` returns zeros instead of raising, for callers that must
-    not fail; it logs, because silently returning zeros is what caused the bug.
-
-    **Not used by the loss functions on purpose.** ``loss_function_evaluated``
-    and ``loss_function_composite`` build the same namespace once per result and
-    reuse it across observables (``_ensure_eval_context``). They run millions of
-    times per fit, so rebuilding the column namespace per call there would cost
-    real time. This resolver is for the once-per-fit paths -- sigma estimation
-    and diagnostics -- where clarity matters and the cost does not. If the two
-    ever need to converge, cache inside this function rather than removing the
-    caching from the hot loop.
-    """
-    if callable(obs):
-        return np.asarray(obs(result))
-
-    if not isinstance(obs, str):
-        raise ValueError(f"Invalid observable type: {type(obs)}")
-
-    cols = (result.colnames if hasattr(result, "colnames")
-            else (result.dtype.names if hasattr(result, "dtype") and result.dtype.names
-                  else []))
-    if obs in cols:
-        return np.asarray(result[obs])
-
-    # Expression: build a namespace of every output column, with [X] aliased to X.
-    local_dict = {"np": np, "numpy": np, "time": np.asarray(result["time"])}
-    for col in cols:
-        local_dict[col] = np.asarray(result[col])
-        if col.startswith("[") and col.endswith("]"):
-            local_dict[col[1:-1]] = np.asarray(result[col])
-    if param_dict:
-        local_dict.update(param_dict)
-
-    eval_obs = str(obs)
-    for col in cols:
-        if col.startswith("[") and col.endswith("]"):
-            eval_obs = eval_obs.replace(col, col[1:-1])
-    try:
-        return np.asarray(eval(eval_obs, {"__builtins__": {}}, local_dict))
-    except Exception as exc:
-        if on_error == "zeros":
-            print(f"  [observable] could not evaluate {_short_obs_label(obs)!r}: "
-                  f"{exc}. Returning zeros — any sigma or loss derived from this "
-                  f"will be meaningless.")
-            return np.zeros_like(np.asarray(result["time"]))
-        raise RuntimeError(f"Failed to evaluate observable '{obs}': {exc}") from exc
 
 
 def _short_obs_label(obs, max_len=32):
@@ -321,6 +281,12 @@ def _resolve_obs_df(df_dict, obs_cfg):
       2. If obs_cfg has "data_dict_key", use it as the dict key.
       3. Fall back to the first DataFrame whose columns contain both
          data_column and time_column.
+
+    A replicate's ``Data`` function is what slices its rows out of a shared
+    table: every ``load_*_data`` in Modules/Data.py already filters by the
+    replicate's own keys before returning, so by the time a DataFrame reaches
+    here it holds exactly the rows that replicate is scored against. Nothing
+    model-specific belongs in this function.
     """
     d_col = obs_cfg["data_column"]
     t_col = obs_cfg["time_column"]
@@ -335,29 +301,6 @@ def _resolve_obs_df(df_dict, obs_cfg):
         None,
     )
 
-
-def _count_replicate_data_points(df_dict, effective_lc):
-    """Count finite data points across all observables in a replicate's loss config.
-
-    Used to normalize per-replicate loss contributions so that replicates with
-    different numbers of time points contribute equally to the total objective.
-    Returns at least 1 to avoid division by zero.
-    """
-    total = 0
-    for obs_cfg in effective_lc.get("observables", []):
-        obs_df = _resolve_obs_df(df_dict, obs_cfg)
-        if obs_df is None:
-            continue
-        d_col = obs_cfg["data_column"]
-        if d_col not in obs_df.columns:
-            continue
-        total += int(np.sum(np.isfinite(np.asarray(obs_df[d_col]))))
-    return max(total, 1)
-
-
-# ---------------------------------------------------------------------------
-# Core run / loss
-# ---------------------------------------------------------------------------
 
 def run_all(r, exp_num, experiment, df_dict, set_parameters=None, parameters=None,
             preequil_cache=None):
@@ -496,30 +439,153 @@ def _known_sigma_for(obs_cfg, obs_df=None, valid=None):
     return None
 
 
-def _record_block(blocks, key, obs, residuals, weights, known_sigma=None):
+def _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=None):
+    """The data-derived sigma CAP this observable asserts, or ``(None, None)``.
+
+    Unlike ``_known_sigma_for``, this does not replace the profiled sigma --
+    see ``concentrated_nll`` -- it only bounds it above. The value is frozen
+    the first time it is computed for a given observable and safe to look up
+    on every objective evaluation thereafter; the lookup is cached in
+    ``Modules.utils.noise_floor`` so the LOOCV span search itself only ever
+    runs once per observable.
+
+    Must be called with ``t_data``/``y_data`` BEFORE any model-dependent mask
+    (``valid = np.isfinite(y_pred) & ...``) is applied to them -- filtering by
+    ``valid`` would leak model-dependence into a value that has to stay
+    reusable across evaluations without depending on which parameter point
+    produced this particular call.
+
+    ``y_sim_ref``, if given, is the model's own predicted curve interpolated
+    onto ``t_data`` (i.e. exactly ``y_pred`` at the call site, unfiltered).
+    It is passed straight through to ``get_noise_floor``'s ``shape_reference``
+    -- consulted only on the first (cache-miss) call for this observable, to
+    calibrate the smallest LOESS window worth trusting against the model's
+    own shape rather than the data's potentially-correlated noise; see that
+    function and the ``Modules.utils.noise_floor`` module docstring for why
+    this one-time use doesn't reintroduce model-dependence into the frozen,
+    per-evaluation value everything downstream actually reads.
+
+    Returns ``(sigma_or_None, NoiseFloor_or_None)``. The ``NoiseFloor`` object
+    carries the fitted curve for the progress-overlay plot; the fit only ever
+    uses its ``.sigma``.
+    """
+    if not obs_cfg.get("sigma_floor_from_data"):
+        return None, None
+    key = (obs_cfg.get("data_dict_key"), obs_cfg.get("data_column"),
+           obs_cfg.get("time_column"))
+    nf = get_noise_floor(t_data, y_data, cache_key=key,
+                         spans=obs_cfg.get("sigma_floor_spans"),
+                         shape_reference=y_sim_ref)
+    return (nf.sigma if nf is not None else None), nf
+
+
+def _apply_n_eff_scale(weights, n_eff_scale):
+    """Rescale a block's per-point weights to state an effective sample size.
+
+    A block contributes ``(n/2) log(SSE/n)`` to the concentrated NLL, where n is
+    the sum of the per-point weights. Multiplying every weight by c leaves
+    ``SSE/n`` untouched -- the mean squared residual, and so the estimated
+    sigma, are unchanged -- and turns the multiplier into ``c*n/2``. So c is
+    exactly a claim about how many INDEPENDENT observations the block carries,
+    which is a coherent likelihood statement rather than an ad-hoc reweighting.
+
+    ``n_eff_scale`` is read off a loss element:
+
+      absent or 1.0   n independent points. The default, and the right answer
+                      unless there is a reason.
+      float c         c*n independent points. c < 1 says the residuals inside
+                      this block are correlated, so it carries less information
+                      than its point count suggests.
+      "equalize"      the block counts as ONE observation whatever its n. This
+                      is literally "divide this element's loss by its number of
+                      data points": the multiplier becomes 1/2 for every block,
+                      so a 60-point arm and a 6-point arm weigh the same.
+
+    Read the caveat in the concentrated-likelihood note above before using
+    "equalize". Under a likelihood more data SHOULD count for more, and once
+    blocks no longer carry their own n the total is not a log-likelihood: dNLL
+    can no longer be compared with 1.9207 and AIC/BIC lose their meaning. It is
+    a legitimate thing to want when arms are not exchangeable -- a dense 60
+    point time course and one steady-state number are not 60 versus 1 units of
+    evidence about the same thing -- but it is bought at the cost of inference.
+    """
+    if n_eff_scale is None:
+        return weights
+    if isinstance(n_eff_scale, str):
+        if n_eff_scale != "equalize":
+            raise ValueError(
+                f"n_eff_scale must be a positive number or 'equalize'; "
+                f"got {n_eff_scale!r}")
+        total = float(np.sum(weights))
+        if total <= 0:
+            return weights
+        return np.asarray(weights, dtype=float) / total
+    c = float(n_eff_scale)
+    if c <= 0:
+        raise ValueError(f"n_eff_scale must be positive; got {n_eff_scale!r}")
+    return np.asarray(weights, dtype=float) * c
+
+
+def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
+                  sigma_floor=None):
     """Accumulate weighted SSE and effective count for one observable block.
 
-    Entries are ``[weighted_sse, n_eff, known_sigma_or_None]``. A block with a
-    known sigma is scored with the plain Gaussian NLL and costs no parameter;
-    one without has its sigma profiled out.
+    Entries are ``[weighted_sse, n_eff, known_sigma_or_None,
+    sigma_floor_or_None]``. A block with a known sigma is scored with the
+    plain Gaussian NLL and costs no parameter; one with a sigma_floor instead
+    caps its profiled sigma at that data-derived value (see
+    ``concentrated_nll``) and costs a parameter only while the cap does not
+    bind; one with neither has its sigma fully profiled out.
     """
     if blocks is None:
         return
-    acc = blocks.setdefault((key, _short_obs_label(obs)), [0.0, 0.0, known_sigma])
+    acc = blocks.setdefault((key, _short_obs_label(obs)),
+                            [0.0, 0.0, known_sigma, sigma_floor])
     acc[0] += float(np.dot(weights, np.asarray(residuals, dtype=float) ** 2))
     acc[1] += float(np.sum(weights))
-    # Pooled blocks must agree: if any contributor asserts a sigma, the pool is
-    # known-sigma. Mixing asserted and estimated noise in one pool is a spec
-    # error, so the first assertion wins and stays.
+    # Pooled blocks must agree: if any contributor asserts a sigma or a floor,
+    # the pool keeps it. Mixing asserted/floored/estimated noise in one pool is
+    # a spec error, so the first assertion of each kind wins and stays -- no
+    # current loss_config pools a floored observable with a differently-
+    # sourced one, so this is a documented caveat rather than a hardened rule.
     if acc[2] is None and known_sigma is not None:
         acc[2] = known_sigma
+    if acc[3] is None and sigma_floor is not None:
+        acc[3] = sigma_floor
 
 
 def _unpack_block(v):
-    """(sse, n, known_sigma) from a 2- or 3-element block entry."""
+    """(sse, n, known_sigma, sigma_floor) from a 2/3/4-element block entry."""
+    if len(v) >= 4:
+        return float(v[0]), float(v[1]), v[2], v[3]
     if len(v) >= 3:
-        return float(v[0]), float(v[1]), v[2]
-    return float(v[0]), float(v[1]), None
+        return float(v[0]), float(v[1]), v[2], None
+    return float(v[0]), float(v[1]), None, None
+
+
+def _block_sigma_resolution(sse, n, known_sigma, sigma_floor=None):
+    """(sigma_used, param_cost, state) for one block -- the single place that
+    decides what sigma a block actually uses and whether it costs a parameter.
+
+    ``state`` is one of ``"estimated"``, ``"declared"``, ``"floored_binding"``
+    or ``"floored_free"``. A binding floor costs 0 parameters: at the point
+    being evaluated the model cannot reach the data's own noise floor, so
+    nothing about sigma was estimated at the margin -- the same reasoning that
+    makes a declared sigma free. A non-binding floor behaves exactly like an
+    ordinary profiled sigma and costs 1. The binding test uses a small
+    relative epsilon since this only affects display/AIC classification, never
+    the value used in the live objective (``concentrated_nll`` uses ``min()``
+    directly and needs no epsilon).
+    """
+    sigma_hat = float(np.sqrt(max(sse / n, _SIGMA2_FLOOR))) if n > 0 else 0.0
+    if known_sigma is not None:
+        return float(known_sigma), 0, "declared"
+    if sigma_floor is not None:
+        floor = float(sigma_floor)
+        if sigma_hat > floor * (1.0 + 1e-9):
+            return floor, 0, "floored_binding"
+        return sigma_hat, 1, "floored_free"
+    return sigma_hat, 1, "estimated"
 
 
 def concentrated_nll(blocks, include_constant=False):
@@ -527,32 +593,58 @@ def concentrated_nll(blocks, include_constant=False):
 
     Blocks without a declared sigma have theirs profiled out analytically
     (``(n/2)log(SSE/n)``); blocks with a known sigma get the plain Gaussian NLL
-    (``SSE/(2*sigma^2)``). The two compose in one likelihood, so a spec may mix
-    them freely.
+    (``SSE/(2*sigma^2)``). A block with a sigma_floor instead of a known sigma
+    caps its profiled sigma at that data-derived value: ``sigma_used =
+    min(sigma_hat, sigma_floor)``, the constrained-profile-likelihood solution
+    (the unconstrained NLL is monotonically decreasing in sigma up to
+    sigma_hat, so capping below it puts the constrained optimum exactly at the
+    cap).
 
-    *blocks* maps a key to ``[weighted_sse, n_eff, known_sigma_or_None]``.
-    Returns ``0.0`` for an empty mapping so a spec with no resolvable data does
-    not silently produce ``nan``.
+    That third branch is computed with its OWN inline formula -- it does not
+    switch between the profiled and known formulas above. Those two strip
+    different constants from the full NLL: the profiled branch's stripped
+    ``n/2`` is a true constant only because it is always evaluated at
+    sigma_hat; the known branch's stripped ``n*log(sigma)`` is a true constant
+    only because sigma is fixed. sigma_used here is sometimes one, sometimes
+    the other, so neither stripping is valid across the whole branch --
+    switching between the two existing formulas at the cap boundary leaves a
+    jump of ``n*(log(floor) - 0.5)`` nats exactly where a parameter could cross
+    it mid-optimization. Keeping ``n*log(sigma_used)`` in the formula
+    unconditionally is what keeps this branch continuous, in both value and
+    derivative w.r.t. SSE, at the switch (and means a floored block that never
+    binds still differs from the plain-profiled value by a constant ``+n/2``
+    -- fixed for the life of the block, so it moves no minimizer or gradient).
+
+    *blocks* maps a key to ``[weighted_sse, n_eff, known_sigma_or_None,
+    sigma_floor_or_None]``. Returns ``0.0`` for an empty mapping so a spec with
+    no resolvable data does not silently produce ``nan``.
     """
     total = 0.0
     for v in blocks.values():
-        sse, n, ks = _unpack_block(v)
+        sse, n, ks, floor = _unpack_block(v)
         if n <= 0:
             continue
-        if ks is None:
-            total += 0.5 * n * np.log(max(sse / n, _SIGMA2_FLOOR))
-            if include_constant:
-                total += 0.5 * n * (1.0 + np.log(2.0 * np.pi))
-        else:
+        if ks is not None:
             ks = max(float(ks), 1e-300)
             total += sse / (2.0 * ks * ks)
             if include_constant:
                 total += n * np.log(ks) + 0.5 * n * np.log(2.0 * np.pi)
+        elif floor is not None:
+            sigma_hat = np.sqrt(max(sse / n, _SIGMA2_FLOOR))
+            sigma_used = min(sigma_hat, max(float(floor), 1e-300))
+            total += n * np.log(sigma_used) + sse / (2.0 * sigma_used * sigma_used)
+            if include_constant:
+                total += 0.5 * n * np.log(2.0 * np.pi)
+        else:
+            total += 0.5 * n * np.log(max(sse / n, _SIGMA2_FLOOR))
+            if include_constant:
+                total += 0.5 * n * (1.0 + np.log(2.0 * np.pi))
     return float(total)
 
 
 def block_sigmas(blocks):
-    """Sigma per block: the ML estimate, or the declared value where given.
+    """Sigma per block: the ML estimate, the declared value, or the
+    floor-capped estimate, whichever applies (see ``_block_sigma_resolution``).
 
     The ML estimate is deliberately not degrees-of-freedom corrected -- a
     corrected sigma substituted back into the concentrated form would no longer
@@ -560,17 +652,52 @@ def block_sigmas(blocks):
     """
     out = {}
     for key, v in blocks.items():
-        sse, n, ks = _unpack_block(v)
+        sse, n, ks, floor = _unpack_block(v)
         if n <= 0:
             continue
-        out[key] = float(ks) if ks is not None else float(
-            np.sqrt(max(sse / n, _SIGMA2_FLOOR)))
+        sigma_used, _cost, _state = _block_sigma_resolution(sse, n, ks, floor)
+        out[key] = sigma_used
     return out
 
 
 def known_sigma_blocks(blocks):
-    """Keys whose sigma was declared rather than estimated."""
+    """Keys whose sigma was declared rather than estimated.
+
+    Declared-only, deliberately: this is used to exempt blocks from the
+    "unbounded below as SSE -> 0" warning below, and a sigma_floor bounds
+    sigma from ABOVE, not below -- it gives no protection against that failure
+    mode, so a floor-capped block (even a binding one) stays out of this set.
+    Use ``zero_cost_sigma_blocks`` for "does this block cost a parameter."
+    """
     return {k for k, v in blocks.items() if _unpack_block(v)[2] is not None}
+
+
+def zero_cost_sigma_blocks(blocks):
+    """Keys that cost no parameter in ``effective_k``: a declared sigma, or a
+    currently-binding sigma_floor. Built from the same resolution
+    ``effective_k`` uses, so the two numbers can never drift apart."""
+    out = set()
+    for k, v in blocks.items():
+        sse, n, ks, floor = _unpack_block(v)
+        if n <= 0:
+            continue
+        _sigma, cost, _state = _block_sigma_resolution(sse, n, ks, floor)
+        if cost == 0:
+            out.add(k)
+    return out
+
+
+def block_sigma_states(blocks):
+    """{key: state} per block -- "estimated", "declared", "floored_binding" or
+    "floored_free" -- for display (progress-plot tags, fit-summary printout)."""
+    out = {}
+    for k, v in blocks.items():
+        sse, n, ks, floor = _unpack_block(v)
+        if n <= 0:
+            continue
+        _sigma, _cost, state = _block_sigma_resolution(sse, n, ks, floor)
+        out[k] = state
+    return out
 
 
 def total_points(blocks):
@@ -582,16 +709,20 @@ def effective_k(param_names, blocks):
     """Parameters an information criterion must charge for.
 
     The estimated parameters *plus* one sigma for every block whose sigma is
-    *estimated*. Profiling sigma out analytically makes it invisible in the
-    objective but does not make it free -- it is still fitted from the same
-    data. A block with a declared sigma costs nothing, because nothing about it
-    was estimated.
+    estimated AT THE MARGIN -- ordinary profiled blocks, and floor-capped
+    blocks whose cap is not currently binding. Profiling sigma out
+    analytically makes it invisible in the objective but does not make it
+    free -- it is still fitted from the same data. A block with a declared
+    sigma, or a floor-capped block whose cap IS binding, costs nothing:
+    nothing about sigma was estimated from the data at that point.
     """
     n_est = 0
     for v in blocks.values():
-        sse, n, ks = _unpack_block(v)
-        if n > 0 and ks is None:
-            n_est += 1
+        sse, n, ks, floor = _unpack_block(v)
+        if n <= 0:
+            continue
+        _sigma, cost, _state = _block_sigma_resolution(sse, n, ks, floor)
+        n_est += cost
     return len(param_names) + n_est
 
 
@@ -655,6 +786,7 @@ def collect_loss_blocks(
                     key, elem, param_names, loss_config=lc,
                     trace_collector=trace_collector, blocks=blocks,
                     block_key=elem.get("sigma_block") or key, seen=seen,
+                    n_eff_scale=elem.get("n_eff_scale"),
                 )
             else:
                 sim = elem.get("simulation")
@@ -666,7 +798,7 @@ def collect_loss_blocks(
                     p_dict, {f"{g_name} · {sim}": sim_results[sim]}, param_names,
                     loss_config=lc, trace_collector=trace_collector,
                     blocks=blocks, block_key=elem.get("sigma_block") or key,
-                    seen=seen,
+                    seen=seen, n_eff_scale=elem.get("n_eff_scale"),
                 )
 
             if loss_components is not None:
@@ -686,6 +818,7 @@ def loss_function_evaluated(
     blocks=None,
     block_key=None,
     seen=None,
+    n_eff_scale=None,
 ):
     """
     Evaluate the loss for already simulated results.
@@ -783,12 +916,17 @@ def loss_function_evaluated(
             obs_weights_v = obs_weights[valid]
             residuals     = y_data_v - y_pred_v
 
+            obs_weights_v = _apply_n_eff_scale(obs_weights_v, n_eff_scale)
             n_eff = obs_weights_v.sum()
             loss_type = obs_cfg.get("loss_type", "nll")
 
+            known_sigma = _known_sigma_for(obs_cfg, obs_df, valid)
+            sigma_floor, floor_obj = (
+                _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
+                if known_sigma is None else (None, None))
             _record_block(blocks, block_key if block_key is not None else exp_id,
                           obs, residuals, obs_weights_v,
-                          known_sigma=_known_sigma_for(obs_cfg, obs_df, valid))
+                          known_sigma=known_sigma, sigma_floor=sigma_floor)
             if seen is not None:
                 # Pre-pooling identity. Block count cannot measure data coverage
                 # once several elements share a sigma_block, so record which
@@ -857,6 +995,7 @@ def loss_function_evaluated(
                     # block's real term rather than the legacy contrib.
                     "block":   (block_key if block_key is not None else exp_id,
                                 obs_label),
+                    "floor":   floor_obj,
                 }
 
             if debug:
@@ -894,6 +1033,7 @@ def loss_function_composite(
     blocks=None,
     block_key=None,
     seen=None,
+    n_eff_scale=None,
 ):
     """
     Evaluate aggregated composite loss across multiple simulated results.
@@ -1033,12 +1173,17 @@ def loss_function_composite(
         obs_weights_v = obs_weights[valid]
         residuals     = y_data_v - y_pred_v
 
+        obs_weights_v = _apply_n_eff_scale(obs_weights_v, n_eff_scale)
         n_eff = obs_weights_v.sum()
         loss_type = obs_cfg.get("loss_type", "nll")
 
+        known_sigma = _known_sigma_for(obs_cfg, obs_df, valid)
+        sigma_floor, floor_obj = (
+            _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
+            if known_sigma is None else (None, None))
         _record_block(blocks, block_key if block_key is not None else exp_id,
                       obs, residuals, obs_weights_v,
-                      known_sigma=_known_sigma_for(obs_cfg, obs_df, valid))
+                      known_sigma=known_sigma, sigma_floor=sigma_floor)
         if seen is not None:
             seen.add((str(exp_id), _short_obs_label(obs)))
 
@@ -1116,6 +1261,7 @@ def loss_function_composite(
                 "contrib": float(contrib),
                 "block":   (block_key if block_key is not None else exp_id,
                             obs_label),
+                "floor":   floor_obj,
             }
 
         if debug:
@@ -1391,23 +1537,24 @@ def describe_nll_terms(p_vec, models, replicates, param_names, scales, groups,
 
     rows = []
     for (block_key, obs_label), v in sorted(blocks.items()):
-        sse, n, known = _unpack_block(v)
+        sse, n, known, floor = _unpack_block(v)
         if n <= 0:
             rows.append({"block": block_key, "obs": obs_label, "n": 0,
                          "status": "no-valid-points"})
             continue
-        if known is None:
-            sigma = float(np.sqrt(max(sse / n, _SIGMA2_FLOOR)))
-            contrib = 0.5 * n * np.log(max(sse / n, _SIGMA2_FLOOR))
-        else:
-            sigma = float(known)
+        sigma, _cost, state = _block_sigma_resolution(sse, n, known, floor)
+        if state == "declared":
             contrib = sse / (2.0 * sigma * sigma)
+        elif state in ("floored_binding", "floored_free"):
+            contrib = n * np.log(sigma) + sse / (2.0 * sigma * sigma)
+        else:
+            contrib = 0.5 * n * np.log(max(sigma * sigma, _SIGMA2_FLOOR))
         rows.append({
             "block": block_key,
             "obs": obs_label,
             "n": int(round(n)),
             "sigma": sigma,
-            "sigma_source": "declared" if known is not None else "estimated",
+            "sigma_source": state,
             "sum_sq": float(sse),
             "mean_sq": float(sse / n),
             "rms": float(np.sqrt(sse / n)),
@@ -1433,36 +1580,6 @@ def describe_nll_terms(p_vec, models, replicates, param_names, scales, groups,
                      "status": "unresolved-data"})
     return rows
 
-
-def print_nll_decomposition(rows, title="NLL decomposition"):
-    """Human-readable table from :func:`describe_nll_terms`."""
-    print("\n" + "=" * 112)
-    print(title + "   [concentrated Gaussian likelihood]")
-    print("=" * 112)
-    print(f"{'block':<28} {'observable':<22} {'n':>5} {'sigma':>12} {'source':<10} "
-          f"{'sum r^2':>12} {'contrib':>12} {'share':>7}")
-    print("-" * 112)
-    n_ok = 0
-    unresolved = []
-    total = sum(r.get("contrib", 0.0) for r in rows if r.get("status") == "ok")
-    for r in rows:
-        if r.get("status") != "ok":
-            unresolved.append(r)
-            continue
-        n_ok += 1
-        print(f"{str(r['block']):<28} {r['obs']:<22} {r['n']:>5} {r['sigma']:>12.4g} "
-              f"{r.get('sigma_source', 'estimated'):<10} "
-              f"{r['sum_sq']:>12.4g} {r['contrib']:>12.4g} "
-              f"{100 * r['contrib'] / total if total else float('nan'):>6.1f}%")
-    print("-" * 112)
-    print(f"total NLL (constant omitted): {total:.6g}   across {n_ok} block(s)")
-    if unresolved:
-        print()
-        print(f"*** WARNING: {len(unresolved)} observable(s) contributed NOTHING to "
-              f"the likelihood — no data resolved. Check data_column / time_column / "
-              f"data_dict_key for: ***")
-        for r in unresolved:
-            print(f"      {r['block']} · {r['obs']}  ({r.get('status')})")
 
 # Hessian utilities
 # ---------------------------------------------------------------------------
@@ -1938,12 +2055,11 @@ def _auto_scale(value, bound, search_decades=None,
                 min_decades=_AUTO_MIN_DECADES):
     """Pick 'log10' or 'lin' for one parameter.
 
-    ``search_decades`` -- the declared search radius, in decades either side of
-    x0 -- is consulted first, and ``bounds`` only as a fallback. That ordering
-    is the point: the radius states how the author thinks of the parameter,
-    multiplicatively or not, while bounds are meant to carry physics. Reading
-    the scale off bounds means dropping a physical limit silently reverts the
-    fit to linear, which is the one outcome this is here to prevent.
+    ``search_decades`` is consulted first and ``bounds`` only as a fallback.
+    That ordering is the point: the radius states how the author thinks of the
+    parameter, multiplicatively or not, while bounds are meant to carry
+    physics. Reading the scale off bounds alone means dropping a physical limit
+    silently reverts the fit to linear, which is the outcome this prevents.
 
     Fitting a multiplicative parameter linearly is what makes a single absolute
     ``xatol`` incomparable across a vector whose magnitudes differ by decades,
@@ -1952,6 +2068,21 @@ def _auto_scale(value, bound, search_decades=None,
 
     Anything that can reach zero or go negative stays linear: log10 has no
     meaning there, and _to_opt_space would raise.
+
+    WHAT CHANGED 2026-09-09, and why. This used to return log10 only when
+    ``2*search_decades >= min_decades``, i.e. only for a radius of at least
+    half a decade. That tied two unrelated decisions together: how wide to
+    scatter multi-start points, and whether the parameter is multiplicative.
+    Wanting a tighter scatter is an ordinary thing to want, and at
+    search_decades below 0.5 it silently switched EVERY parameter to linear --
+    the one outcome the docstring above says this function exists to prevent,
+    triggered by a field whose name says nothing about scaling.
+
+    A radius expressed in DECADES is already a declaration that the author
+    thinks multiplicatively; how many decades is a separate question about
+    search width. So any positive, finite ``search_decades`` now means log10,
+    and ``min_decades`` governs only the bounds fallback, where a span is
+    genuinely evidence about the parameter's nature.
     """
     if value is None or not np.isfinite(value) or value <= 0:
         return "lin"
@@ -1962,8 +2093,7 @@ def _auto_scale(value, bound, search_decades=None,
         except (TypeError, ValueError):
             d = None
         if d is not None and np.isfinite(d) and d > 0:
-            # A radius of d decades either side spans 2d in total.
-            return "log10" if 2.0 * d >= min_decades else "lin"
+            return "log10"
 
     if bound is None:
         return "lin"
@@ -2489,7 +2619,8 @@ def _minimize_nuisance(fun, x0, args, method, bounds, optimizer_kwargs=None,
 
 
 def _enable_preequil_cache(models, active_replicates, param_names, x0_lin,
-                           bounds_lin, enabled=True, verbose=True):
+                           bounds_lin, enabled=True, verbose=True,
+                           model_text=None, paths=None, events_by_sim=None):
     """Attach a pre-dose cache to each active model, if it is safe to do so.
 
     The saving is real -- on the twelve-arm microglia group the pre-dose block is
@@ -2521,8 +2652,43 @@ def _enable_preequil_cache(models, active_replicates, param_names, x0_lin,
         return False
 
     try:
+        # PROBE ON A THROWAWAY MODEL, never on models[probe_name]["r"].
+        #
+        # verify_invariance integrates the pre-dose block twice, at two
+        # different parameter vectors, and leaves the instance holding the
+        # second vector, the state that 8 years of integration produced, and
+        # whatever tolerances safe_simulate's retry ladder settled on. The
+        # objective then integrates that same instance. So the arm that
+        # happened to be probed was not equivalent to the arm that was not.
+        #
+        # Measured: two consecutive identical runs of cook_gsi_ki --no-fit
+        # returned 159.545 and 169.73, and the only difference between them was
+        # whether the probe picked COOK_GSI_60 or COOK_GSI_240 -- dict order is
+        # not guaranteed to be stable across processes. The same mechanism
+        # produced 212.63 / 216.13 / 212.02 for one parameter value earlier the
+        # same day. A fit whose objective changes by 6% depending on which arm
+        # a startup check touched is not reproducible, and no diagnostic built
+        # on it means anything.
+        probe_r = models[probe_name]["r"]
+        if model_text is not None and paths is not None:
+            try:
+                text = model_text
+                if events_by_sim and events_by_sim.get(probe_name):
+                    text = model_text + "\n" + events_by_sim[probe_name]
+                probe_r = TelluriumGen(text, paths,
+                                       {"Verbose": False, "save_SBML?": False})
+            except Exception as exc:
+                print(f"[preequil] could not build a throwaway model for the "
+                      f"invariance check ({exc}); cache left disabled rather "
+                      f"than probing the live one.")
+                return False
+        else:
+            print("[preequil] no model_text/paths supplied for a throwaway "
+                  "probe; cache left disabled rather than probing the live "
+                  "model.")
+            return False
         ok, _report = verify_invariance(
-            models[probe_name]["r"], active_replicates[probe_name], param_names,
+            probe_r, active_replicates[probe_name], param_names,
             x0_lin, bounds_lin, verbose=verbose,
         )
     except Exception as exc:
@@ -2713,122 +2879,6 @@ def _make_nuisance_objective(nll_func, param_idx, n_params):
                 idx += 1
         return nll_func(x_full)
     return nuisance_objective
-
-def _old_run_pypesto_profile_single(
-    param_idx, nll_func, bounds, res_x, nll_at_optimum, param_names,
-    n_points=20, range_factor=2.0, fallback_func=None, wald_se_val=None
-):
-    """
-    PRESERVED AS REQUESTED:
-    Run an adaptive true profile likelihood for one parameter; return (param_vals, nll_vals_rel).
-    """
-    import scipy.optimize as opt
-    import numpy as np
-
-    pname = param_names[param_idx]
-    p_opt = res_x[param_idx]
-    
-    if bounds is not None:
-        lb, ub = bounds[param_idx]
-    else:
-        lb = p_opt / range_factor
-        ub = p_opt * range_factor
-
-    print(f"\n[true profile] {pname}  (adaptive walking, re-optimizing nuisance params)", flush=True)
-    
-    def nuisance_objective(x_nuisance, fixed_val):
-        x_full = np.zeros(len(param_names))
-        idx_nuisance = 0
-        for i in range(len(param_names)):
-            if i == param_idx:
-                x_full[i] = fixed_val
-            else:
-                x_full[i] = x_nuisance[idx_nuisance]
-                idx_nuisance += 1
-        return nll_func(x_full)
-
-    if bounds is not None:
-        nuisance_bounds = bounds[:param_idx] + bounds[param_idx+1:]
-    else:
-        nuisance_bounds = None
-
-    max_nll = 5.0  # Stop when we exceed 95% CI (1.92) by a safe margin
-    
-    def walk_profile(direction_sign, bound):
-        vals = []
-        nlls = []
-        
-        if wald_se_val is not None and wald_se_val > 0:
-            step = max(wald_se_val / 4.0, 1e-8)
-        else:
-            step = max(abs(p_opt) * 0.01, 1e-4)
-            
-        current_val = p_opt
-        x_nuisance = np.delete(res_x, param_idx)
-        
-        while True:
-            test_val = current_val + direction_sign * step
-            
-            hit_bound = False
-            if direction_sign == -1 and test_val <= bound:
-                test_val = bound
-                hit_bound = True
-            if direction_sign == 1 and test_val >= bound:
-                test_val = bound
-                hit_bound = True
-                
-            res = opt.minimize(
-                nuisance_objective, 
-                x_nuisance, 
-                args=(test_val,),
-                method='L-BFGS-B', 
-                bounds=nuisance_bounds,
-                options={'maxiter': 50, 'ftol': 1e-4}
-            )
-            
-            nll_rel = res.fun - nll_at_optimum
-            
-            prev_nll = nlls[-1] if len(nlls) > 0 else 0.0
-            dnll = nll_rel - prev_nll
-            
-            if dnll > 1.5:
-                if step > 1e-6 * max(abs(p_opt), 1e-4):
-                    factor = 0.5 / max(dnll, 1e-4)
-                    factor = max(factor, 0.1)  # shrink by at most 10x
-                    step *= factor
-                    continue
-            
-            vals.append(test_val)
-            nlls.append(nll_rel)
-            
-            print(f"  [{'left ' if direction_sign==-1 else 'right'}]  {pname}={test_val:.4g}  dNLL={nll_rel:.6g}", flush=True)
-            
-            if nll_rel > max_nll:
-                break
-            if hit_bound:
-                break
-                
-            current_val = test_val
-            x_nuisance = res.x
-            
-            dnll_eff = max(dnll, 1e-4)
-            factor = 0.5 / dnll_eff
-            factor = min(max(factor, 0.5), 2.0)
-            step *= factor
-            
-            if len(vals) > 50:
-                break
-                
-        return vals, nlls
-
-    left_vals, left_nlls = walk_profile(-1, lb)
-    right_vals, right_nlls = walk_profile(1, ub)
-    
-    all_vals = np.array(left_vals[::-1] + [p_opt] + right_vals)
-    all_nlls = np.array(left_nlls[::-1] + [0.0] + right_nlls)
-    
-    return all_vals, all_nlls
-
 
 def _run_pypesto_profile_single(
     param_idx, nll_func, bounds, res_x, nll_at_optimum, param_names,
@@ -5216,7 +5266,6 @@ def run_optimization_from_groups(
     param_names,
     x0,
     bounds=None,
-    group_names=None,
     method="Nelder-Mead",
     optimizer_kwargs=None,
     wald_analysis=False,
@@ -5295,10 +5344,37 @@ def run_optimization_from_groups(
         )
         x0 = _to_opt_space(x0_lin, scales)
         bounds = _bounds_to_opt_space(bounds_lin, scales)
+        # Report the resolved scales whenever they were not spelled out, and
+        # report them even when nothing came back log10. The old message was
+        # guarded by _any_log, so the all-linear outcome -- the one that costs
+        # the Wald SEs and makes xatol incomparable -- printed nothing at all.
+        _ps = getattr(optimization_spec, "parameter_scale", None)
+        if isinstance(_ps, dict):
+            _asked_auto = "auto" in _ps.values()
+        elif isinstance(_ps, (list, tuple)):
+            _asked_auto = "auto" in _ps
+        else:
+            _asked_auto = _ps == "auto"
+        logged = [p for p, s in zip(param_names, scales) if s == "log10"]
         if _any_log(scales):
-            logged = [p for p, s in zip(param_names, scales) if s == "log10"]
             print(f"[opt] Fitting {len(logged)}/{len(param_names)} parameter(s) on a "
                   f"log10 scale: {logged}")
+        elif _asked_auto:
+            print(f"[opt] parameter_scale='auto' resolved ALL {len(param_names)} "
+                  f"parameter(s) to a LINEAR scale.")
+        if _asked_auto:
+            demoted = [p for p, sc, v in zip(param_names, scales, x0_lin)
+                       if sc != "log10" and v is not None
+                       and np.isfinite(v) and v > 0]
+            if demoted:
+                print(f"[opt] NOTE: {len(demoted)} strictly positive parameter(s) "
+                      f"resolved to a linear scale: {demoted}. If they are rate "
+                      f"constants, volumes or flows this is probably not what "
+                      f"you want -- give them bounds spanning a decade or more, "
+                      f"set search_decades, or name the scale explicitly. "
+                      f"Fitting a multiplicative parameter linearly is what "
+                      f"makes one absolute xatol incomparable across the vector "
+                      f"and what leaves the Wald SEs undefined.")
 
         fit_mode = _resolve_fit_mode(fit_mode, optimizer_kwargs)
         profile_method, profile_opt_kwargs = _resolve_profile_optimizer(
@@ -5382,6 +5458,8 @@ def run_optimization_from_groups(
         preequil_ok = _enable_preequil_cache(
             models, active_replicates, param_names, x0_lin, bounds_lin,
             enabled=preequil_cache and not _events_dynamic,
+            model_text=model_text, paths=paths,
+            events_by_sim={k: m.get("events_str") for k, m in models.items()},
         )
 
         _debug_calls = [0]
@@ -5675,6 +5753,26 @@ def run_optimization_from_groups(
                                set_parameters=set_params, parameters=param_dict)
             best_results.update(res_dict)
 
+        # Every sigma_floor_from_data block calibrated its trusted window once,
+        # on the LIVE run's first evaluation -- typically x0, a poor fit, so a
+        # poor shape reference. Clearing here forces every one of them to
+        # recalibrate against best_results (the converged fit) instead, right
+        # before it's used for anything reported as "the" final result. This
+        # also means every diagnostic after this point (nll_func_fixed, Wald,
+        # profile likelihood, Sobol -- all of which route through the same
+        # cache via collect_loss_blocks) sees one stable, better-calibrated
+        # floor from here on, not the one the live search happened to start
+        # with. See Modules.utils.noise_floor.clear_cache.
+        #
+        # The one thing this does NOT retroactively fix is res.fun itself --
+        # it was already returned by the live optimizer, minimized under the
+        # OLD calibration, and can't be un-computed. total_loss_at_opt below
+        # is the recalibrated equivalent, and replaces res.fun everywhere a
+        # "final" total loss is reported (out["fun"], the print below, and the
+        # diagnostic-vs-fit drift check), so those stay mutually consistent
+        # with opt_blocks/sigma_by_block instead of anchored on a stale value.
+        _clear_noise_floor_cache()
+
         # Blocks at the optimum. These are the same (SSE, n) the objective
         # accumulated, so the sigmas reported here are exactly the ones the
         # concentrated likelihood profiled out -- no second, differently-scaled
@@ -5696,6 +5794,12 @@ def run_optimization_from_groups(
         sigma_by_block = block_sigmas(opt_blocks)
         total_n = total_points(opt_blocks)
         k_eff = effective_k(param_names, opt_blocks)
+
+        # The recalibrated stand-in for res.fun -- see the note above the
+        # cache clear. Same convention as res.fun (include_constant=False),
+        # so it's a drop-in replacement everywhere res.fun was "the" loss.
+        total_loss_at_opt = concentrated_nll(opt_blocks)
+        out["fun"] = total_loss_at_opt
 
         # Kept so the frozen-sigma path (evaluate_nll_fixed(concentrated=False))
         # and describe_nll_terms still resolve, and so archived runs remain
@@ -5738,16 +5842,21 @@ def run_optimization_from_groups(
                   f"the likelihood — check their data_column / time_column mapping. ***")
             print()
 
-        print(f"\n[fit] concentrated NLL at optimum: {res.fun:.6g}")
+        print(f"\n[fit] concentrated NLL at optimum: {total_loss_at_opt:.6g}"
+              + (f"  (res.fun was {res.fun:.6g} before floor recalibration)"
+                 if abs(total_loss_at_opt - float(res.fun)) > 1e-6 * max(1.0, abs(float(res.fun)))
+                 else ""))
         _known = known_sigma_blocks(opt_blocks)
+        _zero_cost = zero_cost_sigma_blocks(opt_blocks)
+        _states = block_sigma_states(opt_blocks)
         print(f"[fit] {len(opt_blocks)} block(s), {total_n:.0f} points, "
               f"k={len(param_names)} parameters + "
-              f"{len(opt_blocks) - len(_known)} estimated sigma(s) = {k_eff}"
-              + (f"   ({len(_known)} declared sigma(s), not charged)"
-                 if _known else ""))
+              f"{len(opt_blocks) - len(_zero_cost)} estimated sigma(s) = {k_eff}"
+              + (f"   ({len(_zero_cost)} zero-cost sigma(s): declared or "
+                 f"floor-capped, not charged)" if _zero_cost else ""))
         for (block_key, obs_label), sig in sorted(sigma_by_block.items()):
-            _, n_b, _ks = _unpack_block(opt_blocks[(block_key, obs_label)])
-            tag = "declared" if (block_key, obs_label) in _known else "estimated"
+            _, n_b, _ks, _floor = _unpack_block(opt_blocks[(block_key, obs_label)])
+            tag = _states.get((block_key, obs_label), "estimated")
             print(f"    sigma[{block_key} · {obs_label}] = {sig:.4g}  "
                   f"(n={n_b:.0f}, {tag})")
 
@@ -5889,18 +5998,27 @@ def run_optimization_from_groups(
                 )
 
             if slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis:
-                # Re-evaluated rather than reusing res.fun: this asserts that the
-                # diagnostic objective and the fit objective really do agree at
-                # the optimum. They are the same function now, so a mismatch here
-                # means the two paths have drifted apart and every dNLL below
-                # would be measured from the wrong place.
+                # Re-evaluated rather than reusing a stored value: this asserts
+                # that the diagnostic objective and the fit objective really do
+                # agree at the optimum. They are the same function now, so a
+                # mismatch here means the two paths have drifted apart and
+                # every dNLL below would be measured from the wrong place.
+                #
+                # Anchored on total_loss_at_opt, not res.fun: the two are
+                # expected to differ whenever floor recalibration (the cache
+                # clear above) actually changed a block's sigma, which is not
+                # drift -- nll_func_fixed routes through the same
+                # already-recalibrated cache as opt_blocks, so it is
+                # total_loss_at_opt this has to agree with. Comparing against
+                # res.fun here would false-alarm on exactly the runs where
+                # recalibration did something useful.
                 nll_at_optimum = nll_func_fixed(res.x)
-                drift = abs(nll_at_optimum - float(res.fun))
-                if drift > 1e-6 * max(1.0, abs(float(res.fun))):
+                drift = abs(nll_at_optimum - total_loss_at_opt)
+                if drift > 1e-6 * max(1.0, abs(total_loss_at_opt)):
                     print()
                     print(f"*** WARNING: the diagnostic objective disagrees with the "
                           f"fit objective at the optimum by {drift:.4g} "
-                          f"({nll_at_optimum:.8g} vs {float(res.fun):.8g}). They are "
+                          f"({nll_at_optimum:.8g} vs {total_loss_at_opt:.8g}). They are "
                           f"supposed to be the same function — every dNLL below is "
                           f"anchored on a value the fit did not minimize. ***")
                     print()
@@ -6026,495 +6144,30 @@ def run_optimization_from_groups(
         out["r"] = list(models.values())[0]["r"] if models else None
         return out
 
-    # =========================================================================
-    # LEGACY / FLAT REPLICATE ROUTE
-    # =========================================================================
+    # The legacy / flat replicate route lived here until 2026-09-09: roughly
+    # 500 lines that selected replicates by a per-replicate "Opt_group" key and
+    # ran one optimization per group, so that e.g. four antibodies could be
+    # fitted in one process.
+    #
+    # Removed because nothing could reach it. Model_run always passes an
+    # Optimization dataclass, which takes the spec route above, and every entry
+    # in OPTIMIZATION_REGISTRY resolves to one. It also carried the second
+    # source of truth for which replicates are scored, which is what let
+    # OPTIMIZATION_microglia_clearance name its groups after drugs while every
+    # Figure5 replicate said "Figure5" -- a fit that would have scored nothing,
+    # silently, had this route been live.
+    #
+    # Running several independent fits is a job for several invocations, which
+    # is also how they get their own logs, their own fit-cache entries and
+    # their own wall-clock budget.
+    raise TypeError(
+        "run_optimization_from_groups requires an optimization_spec. The "
+        "legacy route that selected replicates by each replicate's 'Opt_group' "
+        "was removed on 2026-09-09; build an Optimization spec whose groups' "
+        "loss_elements name the simulations to score, and run one invocation "
+        "per fit."
+    )
 
-    # Legacy dict-based route: linear-only (no parameter_scale field exists here).
-    scales = ["lin"] * len(param_names)
-    fit_mode = _resolve_fit_mode(fit_mode, optimizer_kwargs)
-    profile_method, profile_opt_kwargs = _resolve_profile_optimizer(method, optimizer_kwargs)
-
-    opt_groups = experiment.opt_groups  # {opt_group: [key, ...]}
-    if group_names is None:
-        selected_group_names = set(opt_groups.keys())
-    else:
-        selected_group_names = set(group_names)
-        missing = selected_group_names - set(opt_groups.keys())
-        if missing:
-            raise ValueError(
-                f"Optimization groups not found: {sorted(missing)}. "
-                f"Available: {sorted(opt_groups.keys())}"
-            )
-    groups_tag = "_".join(sorted(selected_group_names))
-
-    def _effective_loss_cfg(treatment):
-        lc = treatment.get("Loss_config", no_optimization)
-        return lc(treatment)
-
-    # r_ic is only used when events depend on optimizer parameters (dynamic
-    # event rebuild path). Skip the second model compile when it is not needed.
-    _events_dynamic = (optimizer_kwargs.get("events_depend_on_opt_param", False)
-                       if optimizer_kwargs else False)
-
-    # Pre-build one Tellurium model per replicate in selected groups.
-    models     = {}
-    replicates = {}
-    for key, replicate in experiment.replicates.items():
-        if replicate.get("Opt_group") not in selected_group_names:
-            continue
-        df_dict    = replicate["Data"](replicate, data_path)
-
-        if _events_dynamic:
-            r_ic       = TelluriumGen(model_text, paths)
-            r_ic_proxy = OptRoadRunnerProxy(r_ic, param_names)
-            replicate["Update_parameters"](r_ic_proxy, replicate)
-            try:
-                events_str = replicate["Events"](replicate, df_dict, r_ic=r_ic)
-            except TypeError:
-                events_str = replicate["Events"](replicate, df_dict)
-        else:
-            r_ic = None
-            try:
-                events_str = replicate["Events"](replicate, df_dict, r_ic=None)
-            except TypeError:
-                events_str = replicate["Events"](replicate, df_dict)
-
-        r          = TelluriumGen(model_text + "\n" + events_str, paths)
-        r_proxy    = OptRoadRunnerProxy(r, param_names)
-        replicate["Update_parameters"](r_proxy, replicate)
-
-        models[key]     = {"r_ic": r_ic, "r": r, "df_dict": df_dict}
-        replicates[key] = replicate
-
-    if not models:
-        raise ValueError("No valid replicates found across selected groups.")
-
-    # Pre-compute finite data point counts per active replicate (informational
-    # only — loss_function already per-point-averages each observable via /n_eff
-    # so the objective sums replicate contributions directly without further
-    # /n_pts normalization).
-    n_points_by_key = {}
-    for key, replicate in replicates.items():
-        effective_lc = _effective_loss_cfg(replicate)
-        if effective_lc and effective_lc.get("observables"):
-            n_points_by_key[key] = _count_replicate_data_points(
-                models[key]["df_dict"], effective_lc
-            )
-    print("[opt] Data point counts per replicate:")
-    for key, n_pts in n_points_by_key.items():
-        print(f"  {key}: {n_pts} points")
-
-    # Objective: sum NLL over active replicates only.
-    # First 3 calls print diagnostics to help identify time-alignment issues.
-    # Subsequent calls emit a single overwritten progress line every 10 evals.
-    _debug_calls = [0]
-    _progress    = {"best": float("inf"), "t0": None}
-
-    def objective(x):
-        call_n   = _debug_calls[0]
-        do_debug = call_n < 3
-        if call_n == 0:
-            _progress["t0"] = time.time()
-        if do_debug:
-            print(f"\n[opt debug] call #{call_n + 1}  "
-                  + "  ".join(f"{n}={v:.4g}" for n, v in zip(param_names, x.tolist())))
-        total_loss = 0.0
-        loss_components = {}
-        trace_collector = {}
-        x_dict = dict(zip(param_names, np.atleast_1d(x).tolist()))
-        events_dynamic = optimizer_kwargs.get("events_depend_on_opt_param", False) if optimizer_kwargs else False
-
-        # Gather active tasks
-        tasks = []
-        for key, replicate in replicates.items():
-            effective_lc = _effective_loss_cfg(replicate)
-            if not effective_lc or not effective_lc.get("observables"):
-                continue
-            tasks.append((key, replicate, effective_lc))
-
-        if not tasks:
-            _debug_calls[0] += 1
-            return 0.0
-
-        if events_dynamic:
-            for key, replicate, effective_lc in tasks:
-                m = models[key]
-                r_ic = m["r_ic"]
-                r_ic.reset()
-                set_parameters_from_dict(r_ic, x_dict)
-                try:
-                    events_str = replicate["Events"](replicate, m["df_dict"], r_ic=r_ic)
-                except TypeError:
-                    events_str = replicate["Events"](replicate, m["df_dict"])
-
-                r_new = TelluriumGen(model_text + "\n" + events_str, paths)
-                r_proxy = OptRoadRunnerProxy(r_new, param_names)
-                replicate["Update_parameters"](r_proxy, replicate)
-                
-                loss_val = loss_function(
-                    x, r_new, key, replicate,
-                    m["df_dict"], param_names,
-                    loss_config=effective_lc,
-                    trace_collector=trace_collector,
-                )
-                if loss_val >= 1e10:
-                    _debug_calls[0] += 1
-                    return 1e10
-                rep_weight = effective_lc.get("replicate_weight", 1.0)
-                loss_components[key] = loss_val * rep_weight
-                total_loss += loss_val * rep_weight
-        else:
-            for key, replicate, effective_lc in tasks:
-                m = models[key]
-                try:
-                    loss_val = loss_function(
-                        x, m["r"], key, replicate,
-                        m["df_dict"], param_names,
-                        loss_config=effective_lc,
-                        trace_collector=trace_collector,
-                    )
-                except Exception as e:
-                    print(f"Error evaluating replicate {key}: {e}")
-                    _debug_calls[0] += 1
-                    return 1e10
-                if loss_val >= 1e10:
-                    _debug_calls[0] += 1
-                    return 1e10
-                rep_weight = effective_lc.get("replicate_weight", 1.0)
-                weighted_loss = loss_val * rep_weight
-                loss_components[key] = weighted_loss
-                total_loss += weighted_loss
-        # Best-tracking runs on every eval, the first three included. Those
-        # debug calls are real evaluations -- call 1 is x0 itself -- so leaving
-        # them out of the tally let a better point go unrecorded and kept the
-        # progress JSON's parameter snapshot off the true best-so-far. The
-        # overlay/JSON write is driven off new_best for the same reason.
-        n        = call_n + 1
-        new_best = total_loss < _progress["best"]
-        if new_best:
-            _progress["best"] = total_loss
-
-        if do_debug:
-            print(f"  -> total_loss = {total_loss:.6g}"
-                  f"  best={_progress['best']:.6g}")
-            if loss_components:
-                comp_str = "  ".join(f"{k}={v:.4g}" for k, v in loss_components.items())
-                print(f"    components: {comp_str}")
-            if new_best:
-                _render_progress_overlay(
-                    trace_collector, total_loss, _progress["best"],
-                    n, paths.get("plot_path"),
-                    param_names=param_names, param_values=x,
-                    model_name=paths.get("MODEL_NAME", ""),
-                    experiment_id=groups_tag, method=method
-                )
-        else:
-            if n % 10 == 0 or new_best:
-                elapsed = time.time() - _progress["t0"]
-                rate    = n / elapsed if elapsed > 0 else 0.0
-                tag = "*" if new_best else " "
-                print(
-                    f"  [opt]{tag}eval {n:5d}  loss={total_loss:.5g}"
-                    f"  best={_progress['best']:.5g}"
-                    f"  {elapsed:6.0f}s  ({rate:.1f} eval/s)",
-                    flush=True,
-                )
-                if loss_components:
-                    comp_str = "  ".join(f"{k}={v:.4g}" for k, v in loss_components.items())
-                    print(f"         components: {comp_str}", flush=True)
-                _render_progress_overlay(
-                    trace_collector, total_loss, _progress["best"],
-                    n, paths.get("plot_path"),
-                    param_names=param_names, param_values=x,
-                    model_name=paths.get("MODEL_NAME", ""),
-                    experiment_id=groups_tag, method=method
-                )
-        _debug_calls[0] += 1
-        return total_loss
-
-    opt_kw = _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol)
-    
-    if fit_mode == "evaluate_x0":
-        from scipy.optimize import OptimizeResult
-        print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
-              "so diagnostics run against the supplied parameters.")
-        x0_arr = np.array(x0)
-        res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
-                             message="Optimization bypassed (fit_mode=evaluate_x0)",
-                             nit=0, nfev=1)
-    elif method.lower() in _GLOBAL_METHODS:
-        res = _run_global_optimization(objective, x0, bounds, method, opt_kw)
-    else:
-        res = minimize(objective, x0, method=method, bounds=bounds or None, **opt_kw)
-        
-    if _debug_calls[0] > 3:
-        elapsed = time.time() - _progress["t0"]
-        print(f"\n  [opt] done — {_debug_calls[0]} evals in {elapsed:.0f}s"
-              f"  best={_progress['best']:.5g}")
-
-    out = {
-        "x": res.x, "fun": res.fun, "success": res.success,
-        "message": res.message, "stats": {},
-        "groups": sorted(selected_group_names),
-        "nit":  getattr(res, "nit",  None),
-        "nfev": getattr(res, "nfev", None),
-        "timestamp": _progress_overlay_state.get("timestamp"),
-    }
-
-    if not res.success:
-        print(f"Warning: optimizer reported non-convergence — {res.message}")
-        print("Proceeding with best-found parameters for results and profile likelihood.")
-
-    param_dict = dict(zip(param_names, res.x.tolist()))
-
-    def set_params(r, p):
-        set_parameters_from_dict(r, p)
-
-    # The optimizer minimized a z-score χ² objective for balanced dataset
-    # weighting; the proper joint NLL for AIC/BIC and Hessian-based CIs is
-    # computed below from nll_func_fixed(res.x) once fixed_sigmas exists.
-
-    # Run selected replicates at optimal params; passive ones produce plot data only.
-    best_results = {}
-    fixed_sigmas = {}
-    total_n      = 0
-    k            = len(param_names)
-
-    for key, replicate in replicates.items():
-        m        = models[key]
-        res_dict = run_all(m["r"], key, replicate, m["df_dict"],
-                           set_parameters=set_params, parameters=param_dict)
-        best_results.update(res_dict)
-
-        effective_lc       = _effective_loss_cfg(replicate)
-        observables_config = effective_lc.get("observables", [])
-        if not observables_config:
-            continue
-
-        for _, item in res_dict.items():
-            result  = item["results"]
-            item_df = item["data"]
-            t_sim   = np.asarray(result["time"])
-
-            local_dict = {"np": np, "time": t_sim}
-            cols = (result.colnames if hasattr(result, "colnames") else
-                    (result.dtype.names if hasattr(result, "dtype") else []))
-            for c in cols:
-                local_dict[c] = np.asarray(result[c])
-                if c.startswith('[') and c.endswith(']'):
-                    local_dict[c[1:-1]] = np.asarray(result[c])
-            local_dict.update(param_dict)
-
-            for obs_cfg in observables_config:
-                obs   = obs_cfg["observed_variable"]
-                d_col = obs_cfg["data_column"]
-                t_col = obs_cfg["time_column"]
-                obs_df = _resolve_obs_df(item_df, obs_cfg)
-                if obs_df is None or d_col not in obs_df.columns or t_col not in obs_df.columns:
-                    continue
-
-                y_data = np.asarray(obs_df[d_col])
-                t_data = np.asarray(obs_df[t_col])
-
-                try:
-                    if callable(obs):
-                        y_sim = np.asarray(obs(result))
-                    elif isinstance(obs, str) and obs in cols:
-                        y_sim = np.asarray(result[obs])
-                    elif isinstance(obs, str):
-                        eval_obs = str(obs)
-                        for c in cols:
-                            if c.startswith('[') and c.endswith(']'):
-                                eval_obs = eval_obs.replace(c, c[1:-1])
-                        y_sim = np.asarray(eval(eval_obs, {}, local_dict))
-                    else:
-                        continue
-                except Exception:
-                    continue
-
-                y_pred = np.interp(t_data, t_sim, y_sim)
-                valid = np.isfinite(y_pred) & np.isfinite(y_data)
-                if not valid.any():
-                    continue
-                y_data_v  = y_data[valid]
-                y_pred_v  = y_pred[valid]
-                residuals = y_data_v - y_pred_v
-
-                sigma_config = obs_cfg.get("noise_formula", None)
-                if sigma_config and sigma_config in local_dict:
-                    sigma = float(local_dict[sigma_config])
-                else:
-                    n_block = len(residuals)
-                    if n_block > 1:
-                        sigma = np.sqrt(np.sum(residuals**2) /
-                                         max(1, n_block - k / max(1, len(observables_config))))
-                    elif n_block == 1:
-                        sigma = max(np.abs(y_data_v[0]) * 0.1, 1e-6)
-                    else:
-                        sigma = 1e-6
-                fixed_sigmas[(key, obs)] = sigma
-                total_n += len(residuals)
-
-    # Simulate replicates NOT in selected groups at optimal params so that
-    # plot functions receive a complete results_dict.
-    for key, replicate in experiment.replicates.items():
-        if replicate.get("Opt_group") in selected_group_names:
-            continue
-        df_dict    = replicate["Data"](replicate, data_path)
-
-        if _events_dynamic:
-            r_ic       = TelluriumGen(model_text, paths)
-            r_ic_proxy = OptRoadRunnerProxy(r_ic, param_names)
-            replicate["Update_parameters"](r_ic_proxy, replicate)
-            try:
-                events_str = replicate["Events"](replicate, df_dict, r_ic=r_ic)
-            except TypeError:
-                events_str = replicate["Events"](replicate, df_dict)
-        else:
-            try:
-                events_str = replicate["Events"](replicate, df_dict, r_ic=None)
-            except TypeError:
-                events_str = replicate["Events"](replicate, df_dict)
-
-        r          = TelluriumGen(model_text + "\n" + events_str, paths)
-        r_proxy    = OptRoadRunnerProxy(r, param_names)
-        replicate["Update_parameters"](r_proxy, replicate)
-
-        res_dict   = run_all(r, key, replicate, df_dict,
-                             set_parameters=set_params, parameters=param_dict)
-        best_results.update(res_dict)
-
-    def nll_func_fixed(p):
-        p_dict = dict(zip(param_names, np.atleast_1d(p).tolist()))
-        events_dynamic = optimizer_kwargs.get("events_depend_on_opt_param", False) if optimizer_kwargs else False
-
-        # Gather active tasks
-        tasks = []
-        for key, replicate in replicates.items():
-            effective_lc = _effective_loss_cfg(replicate)
-            if not effective_lc or not effective_lc.get("observables"):
-                continue
-            tasks.append((key, replicate, effective_lc))
-
-        if not tasks:
-            return 0.0
-
-        total_nll = 0.0
-
-        if events_dynamic:
-            for key, replicate, effective_lc in tasks:
-                m = models[key]
-                r_ic = m["r_ic"]
-                r_ic.reset()
-                set_parameters_from_dict(r_ic, p_dict)
-                try:
-                    events_str = replicate["Events"](replicate, m["df_dict"], r_ic=r_ic)
-                except TypeError:
-                    events_str = replicate["Events"](replicate, m["df_dict"])
-
-                r_new = TelluriumGen(model_text + "\n" + events_str, paths)
-                r_proxy = OptRoadRunnerProxy(r_new, param_names)
-                replicate["Update_parameters"](r_proxy, replicate)
-                
-                # Unweighted: replicate_weight shapes the fit, but the joint
-                # log-likelihood is the plain sum. Weighting it would rescale
-                # every dNLL and invalidate the 1.9207 threshold.
-                total_nll += loss_function(
-                    p, r_new, key, replicate,
-                    m["df_dict"], param_names,
-                    effective_lc, fixed_sigmas=fixed_sigmas,
-                )
-        else:
-            for key, replicate, effective_lc in tasks:
-                m = models[key]
-                try:
-                    loss_val = loss_function(
-                        p, m["r"], key, replicate,
-                        m["df_dict"], param_names,
-                        effective_lc, fixed_sigmas=fixed_sigmas,
-                    )
-                except Exception as e:
-                    print(f"Error evaluating fixed replicate {key}: {e}")
-                    return 1e10
-                # Unweighted, for the same reason as above.
-                total_nll += loss_val
-
-        return total_nll
-
-    out["results_dict"] = best_results
-
-    if wald_analysis or slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis or sobol_analysis:
-        nll_proper = nll_func_fixed(res.x)
-        aic = 2 * k + 2 * nll_proper
-        bic = k * np.log(max(total_n, 1)) + 2 * nll_proper
-        out["stats"]["aic"] = aic
-        out["stats"]["bic"] = bic
-        out["stats"]["nll_proper"] = nll_proper
-
-    if wald_analysis:
-        _attach_wald_stats(out, nll_func_fixed, res.x, bounds, param_names)
-
-    if slice_analysis or profile_likelihood_analysis or fast_profile_likelihood_analysis:
-        try:
-            nll_at_optimum = nll_func_fixed(res.x)
-            out["stats"]["nll_at_optimum"] = nll_at_optimum
-            out["stats"]["fixed_sigmas"]   = fixed_sigmas
-
-            print(f"\nLikelihood analysis setup diagnostics:")
-            print(f"  NLL at optimum (fixed-sigma): {nll_at_optimum:.6g}")
-            print(f"  fixed_sigmas populated: {len(fixed_sigmas)} entries")
-            if not fixed_sigmas:
-                print("  WARNING: fixed_sigmas is EMPTY — observables may not be resolving to data.")
-            else:
-                for k_fs, v_fs in fixed_sigmas.items():
-                    print(f"    sigma[{k_fs}] = {v_fs:.4g}")
-            print(f"  Per-parameter NLL sensitivity (1.5x perturbation):")
-            for _i, _pname in enumerate(param_names):
-                _x_test = res.x.copy()
-                _x_test[_i] *= 1.5
-                _nll_test = nll_func_fixed(_x_test)
-                print(f"    {_pname}: {nll_at_optimum:.6g} -> {_nll_test:.6g}  (delta={_nll_test - nll_at_optimum:+.6g})")
-
-            def likelihood_slice_func(param_idx, n_points=20, range_factor=2.0):
-                return _run_likelihood_slice_single(
-                    param_idx, nll_func_fixed, res.x, nll_at_optimum, param_names,
-                    n_points=n_points, range_factor=range_factor, scales=scales,
-                )
-
-            if slice_analysis:
-                out["stats"]["likelihood_slice"] = likelihood_slice_func
-
-            if fast_profile_likelihood_analysis:
-                print("[opt] the fast profile runs only through the decoupled "
-                      "spec route (run_optimization_from_groups with an "
-                      "Optimization spec), where the worker pool and the "
-                      "checkpoint live; nothing was profiled here.")
-            elif profile_likelihood_analysis:
-                def true_profile_likelihood_func(param_idx, n_points=20, range_factor=2.0):
-                    se_array = out["stats"].get("wald_se_opt")
-                    wald_se_val = se_array[param_idx] if se_array is not None else None
-                    return _run_pypesto_profile_single(
-                        param_idx, nll_func_fixed, bounds, res.x, nll_at_optimum,
-                        param_names, n_points=n_points, range_factor=range_factor,
-                        fallback_func=likelihood_slice_func, wald_se_val=wald_se_val,
-                        method=profile_method, optimizer_kwargs=profile_opt_kwargs,
-                        scales=scales,
-                    )
-
-                out["stats"]["profile_likelihood"]  = true_profile_likelihood_func
-        except Exception as e:
-            print(f"Warning: likelihood analysis setup failed: {e}")
-
-    if sobol_analysis:
-        from Engine.Sensitivity_analysis import run_sobol_analysis
-        skwargs = sobol_kwargs or {}
-        out["stats"]["sobol"] = run_sobol_analysis(
-            nll_func_fixed, param_names, bounds, res.x, **skwargs
-        )
-
-    out["r"] = list(models.values())[0]["r"] if models else None
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -6722,45 +6375,6 @@ def likelihood_slice(param_idx, params_estimated, observable_data, model,
     return param_values, np.array(nll_values)
 
 
-def _plot_profile_likelihood(ax, plot_config, opt, params_estimated, param_names):
-    """Plot profile likelihood for parameters."""
-    params_to_profile = plot_config.get('parameters', param_names)
-    n_points          = plot_config.get('n_points', 30)
-    range_factor      = plot_config.get('range_factor', 3.0)
-
-    colors  = ['blue', 'green', 'red', 'orange', 'purple']
-    markers = ['o', 's', '^', 'D', 'v']
-
-    profile_func = opt.get("stats", {}).get("profile_likelihood")
-    if not profile_func:
-        print("Warning: no profile_likelihood closure found in opt['stats']")
-        return
-
-    for idx, param_name in enumerate(params_to_profile):
-        if param_name not in param_names:
-            continue
-        param_idx = param_names.index(param_name)
-        param_vals, nll_vals_rel = profile_func(param_idx, n_points=n_points, range_factor=range_factor)
-
-        param_vals_normalized = param_vals / params_estimated[param_idx]
-
-        color  = colors[idx % len(colors)]
-        marker = markers[idx % len(markers)]
-        ax.plot(param_vals_normalized, nll_vals_rel,
-                marker=marker, linestyle='-', label=param_name, linewidth=2, color=color)
-
-    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
-    ax.set_xlabel(plot_config.get('xlabel', 'Parameter Value (relative to optimal)'))
-    ax.set_ylabel(plot_config.get('ylabel', 'Δ NLL (relative to minimum)'))
-    ax.set_title(plot_config.get('title', 'Profile Likelihood (Identifiability Check)'))
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-    if 'xlim' in plot_config:
-        ax.set_xlim(plot_config['xlim'])
-    else:
-        ax.set_xlim(0.2, 3.5)
-
-
 def profile_ci_status(param_vals, nll_vals_rel, lo, hi, flat_tol=1e-3):
     """Why a bound is missing: 'ok', 'flat', 'open_lower', 'open_upper', 'open'.
 
@@ -6811,52 +6425,3 @@ def _extract_profile_ci(param_vals, nll_vals_rel, threshold=1.9207):
             break
     return lo, hi
 
-
-def _plot_likelihood_slice(ax, plot_config, opt, params_estimated, param_names):
-    """Plot likelihood slice for parameters."""
-    params_to_profile = plot_config.get('parameters', param_names)
-    n_points          = plot_config.get('n_points', 30)
-    range_factor      = plot_config.get('range_factor', 3.0)
-
-    colors  = ['blue', 'green', 'red', 'orange', 'purple']
-    markers = ['o', 's', '^', 'D', 'v']
-
-    slice_func = opt.get("stats", {}).get("likelihood_slice")
-    if not slice_func:
-        print("Warning: no likelihood_slice closure found in opt['stats']")
-        return
-
-    opt_points = []
-    for idx, param_name in enumerate(params_to_profile):
-        if param_name not in param_names:
-            continue
-        param_idx = param_names.index(param_name)
-        param_vals, nll_vals_rel = slice_func(param_idx, n_points=n_points, range_factor=range_factor)
-
-        param_vals_normalized = param_vals / params_estimated[param_idx]
-
-        color  = colors[idx % len(colors)]
-        marker = markers[idx % len(markers)]
-        ax.plot(param_vals_normalized, nll_vals_rel,
-                marker=marker, linestyle='-', label=param_name, linewidth=2, color=color)
-
-        # The fitted point is on the grid, so show where the curve crosses it
-        # rather than leaving the reader to infer it from the vertical line.
-        at_opt = np.isclose(param_vals_normalized, 1.0, rtol=1e-6, atol=0.0)
-        if at_opt.any():
-            opt_points.append(float(nll_vals_rel[np.argmax(at_opt)]))
-
-    if opt_points:
-        ax.plot([1.0] * len(opt_points), opt_points, linestyle='none', marker='x',
-                color='black', markersize=8, markeredgewidth=1.5, zorder=5,
-                label=f'Optimum (Δ NLL = {max(opt_points, key=abs):.3g})')
-    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
-    ax.set_xlabel(plot_config.get('xlabel', 'Parameter Value (relative to optimal)'))
-    ax.set_ylabel(plot_config.get('ylabel', 'Δ NLL (relative to minimum)'))
-    ax.set_title(plot_config.get('title', 'Likelihood Slice'))
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-    if 'xlim' in plot_config:
-        ax.set_xlim(plot_config['xlim'])
-    else:
-        ax.set_xlim(0.2, 3.5)

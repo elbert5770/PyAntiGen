@@ -5,8 +5,8 @@ High-level optimization setup.  Two entry points:
       Original flat-dict path: experiments is a plain dict of treatment dicts.
 
   setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_dict)
-      Group-aware path: uses Experiment.opt_groups (derived from each replicate's
-      Opt_group key) to define which replicates contribute to the objective.
+      Which replicates contribute to the objective is read off the
+      Optimization spec: each group's loss_elements name their simulations.
 """
 import os
 import pandas as pd
@@ -1166,15 +1166,6 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
 # Group-aware entry point
 # ---------------------------------------------------------------------------
 
-def _is_per_group_settings(optimization_settings):
-    """Return True when optimization_settings contains per-group sub-dicts
-    (e.g. the PK block keyed by drug name), False for a flat shared dict."""
-    return any(
-        isinstance(v, dict) and "param_names" in v
-        for v in optimization_settings.values()
-    )
-
-
 def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_dict):
     """
     Run parameter optimization using Experiment.opt_groups.
@@ -1183,13 +1174,9 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
     Replicates whose Loss_config is ``no_optimization()`` are simulated at the
     end with the optimal parameters for use by the plot function.
 
-    Flat mode  — optimization_settings has top-level param_names/x0/bounds:
-        one optimization is run, summing NLL across all active groups.
-
-    Per-group mode — optimization_settings has per-group sub-dicts each
-        containing param_names/x0/bounds (e.g. the PK block keyed by drug):
-        one independent optimization is run per group, results accumulated,
-        then plot_function is called once.
+    optimization_settings must be an Optimization spec. The flat and
+    per-group dict modes were removed on 2026-09-09; run one invocation per
+    fit instead.
     """
     MODEL_NAME = settings.get("MODEL_NAME", AntiGen_paths.MODEL_NAME)
     model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
@@ -1253,200 +1240,27 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
         _shutdown_evaluator(opt)
         return opt
 
-    if _is_per_group_settings(optimization_settings):
-        # ── Per-group mode ────────────────────────────────────────────────
-        all_results = {}
-        group_optimizations = {}
-        allowed_groups = optimization_settings.get("group_names")  # None = run all
-        # Replicates whose Opt_group is not among any per-group sub-dict key
-        # are treated as passive (plot-only) and kept in all_results regardless
-        # of which sub-group is being optimized.
-        known_opt_groups = {
-            name for name, val in optimization_settings.items()
-            if isinstance(val, dict) and val.get("param_names")
-        }
-        for group_name, group_settings in optimization_settings.items():
-            if not isinstance(group_settings, dict) or not group_settings.get("param_names"):
-                continue
-            if allowed_groups is not None and group_name not in allowed_groups:
-                continue
-            param_names = group_settings["param_names"]
-            method      = group_settings.get("method", "Nelder-Mead")
+    raise TypeError(
+        "setup_optimization_from_groups needs an Optimization spec from "
+        "Modules/Optimizer_settings.py; got "
+        f"{type(optimization_settings).__name__}. The per-group and flat "
+        "dict routes were removed on 2026-09-09: nothing used them, and they "
+        "selected replicates by a per-replicate 'Opt_group' key that no longer "
+        "exists. To run several fits, run several invocations."
+    )
 
-            try:
-                opt = run_optimization_from_groups(
-                    model_text, paths, experiment,
-                    param_names=param_names,
-                    x0=group_settings["x0"],
-                    bounds=group_settings.get("bounds"),
-                    group_names=[group_name],
-                    method=method,
-                    optimizer_kwargs=group_settings.get("optimizer_kwargs", {}),
-                    wald_analysis=group_settings.get("wald_analysis", False),
-                    slice_analysis=group_settings.get("slice_analysis", False),
-                    profile_likelihood_analysis=group_settings.get("profile_likelihood_analysis", False),
-                    fast_profile_likelihood_analysis=group_settings.get("fast_profile_likelihood_analysis", False),
-                    sobol_analysis=group_settings.get("sobol_analysis", False),
-                    sobol_kwargs={"N": group_settings.get("sobol_N", 128), "mode": group_settings.get("sobol_mode", "loss")},
-                    fit_mode=group_settings.get("fit_mode", settings.get("fit_mode")),
-                    n_workers=group_settings.get("n_workers", settings.get("n_workers")),
-                )
-            except Exception as e:
-                print(f"Warning: optimization for '{group_name}' failed: {e}")
-                continue
-
-            if opt.get("results_dict"):
-                filtered_results = {}
-                for req_id, item in opt["results_dict"].items():
-                    item_group = item.get("replicate", {}).get("Opt_group")
-                    if item_group == group_name or item_group not in known_opt_groups:
-                        filtered_results[req_id] = item
-                all_results.update(filtered_results)
-
-            group_optimizations[group_name] = opt
-
-            # Run analysis plots first so profile_ci is populated before CSV write
-            if group_settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
-                _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
-                                            MODEL_NAME, tag=group_name)
-            if (group_settings.get("profile_likelihood_analysis") or group_settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
-                _save_profile_likelihood_plot(
-                    opt, param_names, paths["plot_path"], MODEL_NAME,
-                    tag=group_name,
-                    profile_kwargs=_profile_kwargs(group_settings))
-            if group_settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
-                from Engine.Sensitivity_analysis import save_sobol_plot
-                save_sobol_plot(opt.get("stats", {}).get("sobol"), paths["plot_path"],
-                                MODEL_NAME, tag=group_name)
-
-            print(f"\nOptimization Summary for {group_name}:")
-            print("-" * 85)
-            print(f"{'Parameter':<30} | {'Optimized Value':<15} | {'Wald SE':<15} | {'Wald 95% CI':<20}")
-            print("-" * 85)
-            x_vals = opt.get("x", [])
-            se = opt.get("stats", {}).get("wald_se")
-            ci = opt.get("stats", {}).get("wald_ci")
-            for i, p_name in enumerate(param_names):
-                val = x_vals[i] if i < len(x_vals) else float('nan')
-                std_err = se[i] if se is not None and i < len(se) else "N/A"
-                std_err_str = f"{std_err:.4g}" if isinstance(std_err, (int, float)) else std_err
-                conf_int = ci[i] if ci is not None and i < len(ci) else ("N/A", "N/A")
-                if isinstance(conf_int, tuple) and len(conf_int) == 2:
-                    if isinstance(conf_int[0], (int, float)) and isinstance(conf_int[1], (int, float)):
-                        conf_int_str = f"[{conf_int[0]:.4g}, {conf_int[1]:.4g}]"
-                    else:
-                        conf_int_str = f"[{conf_int[0]}, {conf_int[1]}]"
-                else:
-                    conf_int_str = str(conf_int)
-                print(f"{p_name:<30} | {val:<15.4g} | {std_err_str:<15} | {conf_int_str:<20}")
-            print("-" * 85)
-            print(f"Final Objective Value (NLL): {opt.get('fun', 'N/A'):.6g}\n")
-
-            corr_matrix = opt.get("stats", {}).get("wald_correlation")
-            if corr_matrix is not None:
-                print(f"\nWald Correlation Matrix:")
-                print("-" * 85)
-                header_str = f"{'':<25} | " + " | ".join(f"{p[:10]:<10}" for p in param_names)
-                print(header_str)
-                print("-" * 85)
-                for i, p_row in enumerate(param_names):
-                    row_str = f"{p_row[:25]:<25} | "
-                    row_vals = []
-                    for j in range(len(param_names)):
-                        if i < len(corr_matrix) and j < len(corr_matrix[i]):
-                            row_vals.append(f"{corr_matrix[i][j]:<10.4g}")
-                        else:
-                            row_vals.append(f"{'N/A':<10}")
-                    row_str += " | ".join(row_vals)
-                    print(row_str)
-                print("-" * 85)
-                print()
-
-            csv_path = os.path.join(
-                paths["plot_path"],
-                f"{MODEL_NAME}_{group_name}_optimization_results.csv",
-            )
-            log_optimization_results(opt, param_names, csv_path,
-                                     model_name=MODEL_NAME, experiment_id=group_name,
-                                     method=method)
-
-        if optimization_settings.get("petab_export"):
-            _write_petab_archive(paths, MODEL_NAME, experiment,
-                                 optimization_settings, group_optimizations)
-
-        if all_results and plot_function:
-            plot_function(paths, all_results)
-        for _o in group_optimizations.values():
-            _shutdown_evaluator(_o)
-        return group_optimizations
-
-    else:
-        # ── Flat (shared) mode ────────────────────────────────────────────
-        param_names = optimization_settings["param_names"]
-        x0          = optimization_settings["x0"]
-        bounds      = optimization_settings.get("bounds")
-        method      = optimization_settings.get("method", "Nelder-Mead")
-        opt_kwargs  = optimization_settings.get("optimizer_kwargs", {})
-        group_names = optimization_settings.get("group_names", None)
-
-        if not param_names:
-            print("Error: No parameters to optimize. Set param_names and x0 in optimization_settings.")
-            return
-
-        opt = run_optimization_from_groups(
-            model_text, paths, experiment,
-            param_names=param_names,
-            x0=x0,
-            bounds=bounds,
-            group_names=group_names,
-            method=method,
-            optimizer_kwargs=opt_kwargs,
-            wald_analysis=optimization_settings.get("wald_analysis", False),
-            slice_analysis=optimization_settings.get("slice_analysis", False),
-            profile_likelihood_analysis=optimization_settings.get("profile_likelihood_analysis", False),
-            fast_profile_likelihood_analysis=optimization_settings.get("fast_profile_likelihood_analysis", False),
-            sobol_analysis=optimization_settings.get("sobol_analysis", False),
-            sobol_kwargs={"N": optimization_settings.get("sobol_N", 128), "mode": optimization_settings.get("sobol_mode", "loss")},
-            fit_mode=optimization_settings.get("fit_mode", settings.get("fit_mode")),
-            n_workers=optimization_settings.get("n_workers", settings.get("n_workers")),
-        )
-
-        groups_tag = "_".join(opt.get("groups", ["ALL"]))
-
-        # Run analysis plots first so profile_ci is populated before CSV write
-        if optimization_settings.get("slice_analysis") and opt["stats"].get("likelihood_slice"):
-            _save_likelihood_slice_plot(opt, param_names, paths["plot_path"],
-                                        MODEL_NAME, tag=groups_tag)
-        if (optimization_settings.get("profile_likelihood_analysis") or optimization_settings.get("fast_profile_likelihood_analysis")) and opt["stats"].get("profile_likelihood"):
-            _save_profile_likelihood_plot(
-                opt, param_names, paths["plot_path"], MODEL_NAME,
-                tag=groups_tag,
-                profile_kwargs=_profile_kwargs(optimization_settings))
-        if optimization_settings.get("sobol_analysis") and opt["stats"].get("sobol"):
-            from Engine.Sensitivity_analysis import save_sobol_plot
-            save_sobol_plot(opt["stats"]["sobol"], paths["plot_path"],
-                            MODEL_NAME, tag=groups_tag)
-
-        csv_path = os.path.join(
-            paths["plot_path"],
-            f"{MODEL_NAME}_{groups_tag}_optimization_results.csv",
-        )
-        log_optimization_results(opt, param_names, csv_path,
-                                 model_name=MODEL_NAME, experiment_id=groups_tag, method=method)
-
-        if optimization_settings.get("petab_export"):
-            _write_petab_archive(paths, MODEL_NAME, experiment,
-                                 optimization_settings, {"__flat__": opt})
-
-        if opt.get("results_dict") is not None and plot_function:
-            plot_function(paths, opt["results_dict"])
-        _shutdown_evaluator(opt)
-        return opt
 
 
 def _write_petab_archive(paths, model_name, experiment,
                          optimization_settings, group_optimizations):
     """Write a PEtab v2 archive to results/<model>/petab/<expid>/.
+
+    NOT CALLED as of 2026-09-09. Its only caller was the per-group dict route,
+    removed that day along with the flat route because nothing could reach
+    either. The function is kept because PEtab export is a feature rather than
+    plumbing, and rewiring it to the spec route is a small job: it wants a
+    {group_name: opt} mapping, which for a spec fit is a single entry. Delete
+    it if PEtab export is not wanted.
 
     ``expid`` is built from the sorted union of optimized group names so
     successive runs against different groups land in distinct subdirs.

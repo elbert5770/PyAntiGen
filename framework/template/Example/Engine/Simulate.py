@@ -173,8 +173,22 @@ def state_vector_ids(r):
         for holder in (r, getattr(r, "model", None)):
             if holder is None:
                 continue
+            # Look the method up on the class, not the instance. RoadRunner's
+            # __getattr__ fallback treats any missed instance attribute as a
+            # possible model symbol and pays for a full _getIds() rebuild of
+            # the symbol table (seconds, not microseconds) before giving up --
+            # which is invisible when a model has rate rules (the first probe
+            # succeeds and short-circuits the loop) and becomes the dominant
+            # cost of every retry once a model has none, since a plain
+            # getattr(holder, accessor) miss on "getRateRuleSymbols" would
+            # trigger that fallback on every single call. Reading from
+            # type(holder) resolves via the normal class MRO and never
+            # touches the instance's __getattr__.
+            method = getattr(type(holder), accessor, None)
+            if method is None:
+                continue
             try:
-                extra = list(getattr(holder, accessor)())
+                extra = list(method(holder))
             except Exception:
                 continue
             if extra:
@@ -222,6 +236,9 @@ class StackedResult(np.ndarray):
         obj = np.asarray(input_array).view(cls)
         obj.colnames = list(colnames)
         return obj
+
+    def __contains__(self, key):
+        return hasattr(self, 'colnames') and key in self.colnames
 
     def __getitem__(self, key):
         if isinstance(key, str):

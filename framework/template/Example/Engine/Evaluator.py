@@ -131,6 +131,17 @@ class EvalSpec:
     # in the parent, which runs the invariance check once; a worker must never
     # make that call on its own, or 40 of them would each re-derive it.
     preequil_cache: bool = False
+    # Modules.utils.noise_floor.export_cache() snapshot, taken in the parent
+    # AFTER its own calibration (see Engine.Optimize.run_optimization_from_groups,
+    # clear_cache() + the post-optimum re-evaluation). Workers seed their own
+    # (otherwise empty, since spawn shares no memory) floor cache from this in
+    # _init_worker, so every worker scores every floored observable against
+    # the SAME calibrated sigma the parent settled on, rather than each one
+    # independently calibrating against whatever parameter vector it happens
+    # to be handed first -- an arbitrary profile-grid point or Sobol sample,
+    # not the converged optimum. Same reasoning as fixed_sigmas above, one
+    # mechanism down: compute once where it's meaningful, ship the answer.
+    floor_cache: dict = field(default_factory=dict)
     # Reserved for future use by the profile grid (Stage 2).
     meta: dict = field(default_factory=dict)
 
@@ -149,8 +160,16 @@ def _init_worker(spec_blob):
     from framework.TelluriumGen import TelluriumGen
     from Engine.Event_times import attach_event_times
     from Engine.Optimize import OptRoadRunnerProxy
+    from Modules.utils.noise_floor import seed_cache
 
     spec = _serializer.loads(spec_blob)
+    # Before any task runs: this worker's own Modules.utils.noise_floor
+    # module was just re-imported fresh (spawn shares no memory with the
+    # parent), so its floor cache starts empty. Seed it from the parent's
+    # already-calibrated snapshot so every worker agrees with the parent --
+    # and with each other -- on every floored observable's sigma, instead of
+    # each recalibrating independently against whichever task it draws first.
+    seed_cache(spec.floor_cache)
     models = {}
     t0 = time.time()
     for sim_name, replicate in spec.replicates.items():
@@ -1125,6 +1144,7 @@ def build_eval_spec(
 ):
     """Convenience constructor mirroring the spec-route local variables."""
     from Engine.Event_times import without_event_times
+    from Modules.utils.noise_floor import export_cache
 
     return EvalSpec(
         model_text=model_text,
@@ -1150,6 +1170,12 @@ def build_eval_spec(
         for_inference=bool(for_inference),
         concentrated=bool(concentrated),
         preequil_cache=bool(preequil_cache),
+        # Captured HERE, at spec-build time -- called in the parent after its
+        # own clear_cache()-and-recalibrate pass (see run_optimization_from_
+        # groups), so this snapshot is the same calibration the parent's own
+        # subsequent diagnostics use, not whatever was cached earlier in the
+        # run (e.g. during the live optimize()).
+        floor_cache=export_cache(),
     )
 
 
