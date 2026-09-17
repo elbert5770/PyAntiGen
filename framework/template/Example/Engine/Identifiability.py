@@ -133,6 +133,17 @@ class UnidentifiableParameters(RuntimeError):
         )
 
 
+def _is_usable(p):
+    """Whether a slice point carries real information rather than a failure
+    sentinel. Shared by :func:`_verdict` (to find the true furthest usable
+    point) and :func:`run_slice_screen` (to decide whether a ladder's
+    outermost rung already settles a side) so the two never disagree about
+    what counts as a real crossing. ``nll < FAILURE_VALUE`` matters because
+    the sentinel is a large *finite* number, not inf or nan -- a failed
+    integration must not read as "crossed"."""
+    return np.isfinite(p["dnll"]) and p["nll"] < FAILURE_VALUE
+
+
 def _se_for(wald_se, param_idx):
     """The Wald SE for one parameter in optimizer space, or None.
 
@@ -313,14 +324,11 @@ def _verdict(points, bound, threshold, p_opt, sign, is_log,
     to be spent there. It is recorded rather than consumed: wiring it into the
     profile's opening grid is a separate change.
     """
-    def _usable(p):
-        return np.isfinite(p["dnll"]) and p["nll"] < FAILURE_VALUE
-
-    finite = [p for p in points if _usable(p)]
+    finite = [p for p in points if _is_usable(p)]
 
     inner = None
     for p in points:                       # points are ordered outward
-        if not _usable(p) or p["dnll"] > threshold:
+        if not _is_usable(p) or p["dnll"] > threshold:
             break
         inner = p["x_linear"]
 
@@ -389,25 +397,46 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
                      max_points=6, growth=2.0, range_factor=2.0,
                      span_decades=SPAN_DECADES,
                      min_reach_decades=MIN_REACH_DECADES, verbose=True):
-    """Evaluate every parameter's slice out across decades, as one batch.
+    """Evaluate every parameter's slice out across decades, stopping each side
+    the moment it crosses.
 
-    A slice point has no dependency on any other, so all of them go out
-    together: this is the cheapest possible use of the pool, one evaluation per
-    point with no optimizer wrapped around it.
+    The screen's job is to hand the profile a starting point, not to walk
+    every side all the way out. So the candidate ladder for each side --
+    :func:`screen_values`, unchanged -- is submitted one round at a time: round
+    *r* asks the pool for every side's *r*-th candidate, all still-active
+    sides together in one batch, which keeps this as parallel as the old
+    single-batch version was. A side is retired the instant one of its points
+    reads ``dnll > threshold`` and never contributes another evaluation --
+    :func:`_verdict` reads a side's state from whichever point is furthest out
+    among those actually evaluated, so nothing is lost by stopping there. A
+    side that never crosses keeps going, round after round, all the way to its
+    candidate list's last point -- the declared bound or ``span_decades`` out,
+    whichever is further, see :func:`screen_target` -- exactly as before,
+    because that is the one thing this screen has to be able to prove.
 
-    That shape has a second use. If evaluations far from the fitted values are
-    pathologically slow -- the region where the integrator struggles and
-    ``safe_simulate`` enters its retry ladder -- this finds out in minutes, and
-    says so plainly, instead of the run discovering it hours into a profile
-    batch where every stuck evaluation is buried inside a nuisance
-    minimization.
+    Why stopping matters now and did not always: once a block's sigma is
+    capped at a data-derived floor (``sigma_floor_from_data``), a point far
+    outside the fitted region can return a genuinely enormous NLL rather than
+    a merely large one -- the self-forgiving log(sigma) term that used to
+    compress a bad far-out fit is exactly what the floor removes -- and that
+    region is also where the integrator is slowest. A declared bound is a
+    user-supplied number with no guaranteed relationship to anything physical,
+    so nothing about it -- not "it is inside the box", not "it is only one
+    point" -- is safe to evaluate unconditionally. The only bound that is safe
+    is not asking for a point once its side has already answered the question.
+
+    The one thing round-by-round stopping gives up: a slice that crosses early
+    and then dips back below threshold at a point it never reaches would have
+    been read as "open" by a full evaluation, and reads "crossed" here
+    instead. That trades a slower profile on a rare, specific slice shape for
+    never paying an unbounded evaluation on the common one.
     """
     from Engine.Optimize import _param_bounds
 
     res_x = np.asarray(res_x, dtype=float)
     scales = list(scales) if scales is not None else ["lin"] * len(param_names)
 
-    plan, xs = [], []
+    plan = []
     for i, name in enumerate(param_names):
         is_log = scales[i] == "log10"
         lb, ub = _param_bounds(bounds, i)
@@ -418,21 +447,48 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
                                  range_factor=range_factor,
                                  span_decades=span_decades)
             plan.append({"index": i, "name": name, "side": side, "sign": sign,
-                         "is_log": is_log, "values": vals,
-                         "p_opt": float(res_x[i]),
-                         "bound": (lb if sign < 0 else ub)})
-            for v in vals:
-                x = res_x.copy()
-                x[i] = v
-                xs.append(x)
+                        "is_log": is_log, "values": vals, "points": [],
+                        "settled": False,
+                        "p_opt": float(res_x[i]),
+                        "bound": (lb if sign < 0 else ub)})
 
+    n_candidates = sum(len(e["values"]) for e in plan)
+    max_rounds = max((len(e["values"]) for e in plan), default=0)
     if verbose:
         print(f"\n[screen] slice screen: {len(param_names)} parameter(s) x 2 "
-              f"side(s) = {len(xs)} evaluation(s), submitted as one batch. "
-              f"No nuisance optimization: each point is an upper bound on the "
-              f"profile, which is all the screen needs.", flush=True)
+              f"side(s); up to {n_candidates} evaluation(s) across at most "
+              f"{max_rounds} round(s), one round per pool submission. A side "
+              f"stops the round it first crosses dNLL={threshold:g}; only "
+              f"sides still undecided pay for the next, further-out point. "
+              f"No nuisance optimization: each point is an upper bound on "
+              f"the profile, which is all the screen needs.", flush=True)
 
-    values = list(nll_batch(xs, label="slice-screen")) if xs else []
+    n_evaluations = 0
+    for r in range(max_rounds):
+        round_xs, round_owner = [], []
+        for entry in plan:
+            if entry["settled"] or r >= len(entry["values"]):
+                continue
+            v = entry["values"][r]
+            x = res_x.copy()
+            x[entry["index"]] = v
+            round_xs.append(x)
+            round_owner.append((entry, v))
+        if not round_xs:
+            break
+        if verbose:
+            print(f"[screen] round {r + 1}: {len(round_xs)} side(s) still "
+                  f"undecided.", flush=True)
+        n_evaluations += len(round_xs)
+        nlls = nll_batch(round_xs, label=f"slice-screen-r{r + 1}")
+        for (entry, v), nll in zip(round_owner, nlls):
+            nll = float(nll)
+            point = {"x": float(v),
+                    "x_linear": float(10.0 ** v if entry["is_log"] else v),
+                    "nll": nll, "dnll": float(nll - nll_at_optimum)}
+            entry["points"].append(point)
+            if _is_usable(point) and point["dnll"] > threshold:
+                entry["settled"] = True
 
     report = {"threshold": float(threshold),
               "anchor": float(nll_at_optimum),
@@ -440,25 +496,17 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
               "param_names": list(param_names),
               "span_decades": float(span_decades),
               "min_reach_decades": float(min_reach_decades),
-              "n_evaluations": len(xs),
+              "n_evaluations": n_evaluations,
+              "n_candidates": n_candidates,
               "parameters": {}}
 
-    pos = 0
     for entry in plan:
-        pts = []
-        for v in entry["values"]:
-            nll = float(values[pos])
-            pos += 1
-            pts.append({
-                "x": float(v),
-                "x_linear": float(10.0 ** v if entry["is_log"] else v),
-                "nll": nll,
-                "dnll": float(nll - nll_at_optimum),
-            })
-        side = _verdict(pts, entry["bound"], threshold, entry["p_opt"],
-                        entry["sign"], entry["is_log"],
+        side = _verdict(entry["points"], entry["bound"], threshold,
+                        entry["p_opt"], entry["sign"], entry["is_log"],
                         min_reach_decades=min_reach_decades)
         side["is_log"] = entry["is_log"]
+        side["stopped_early"] = bool(entry["settled"]
+                                     and len(entry["points"]) < len(entry["values"]))
         report["parameters"].setdefault(entry["name"], {})[entry["side"]] = side
 
     states = [s["state"] for sides in report["parameters"].values()

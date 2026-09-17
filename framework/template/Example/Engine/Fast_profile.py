@@ -281,13 +281,27 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
                      n_rounds=DEFAULT_ROUNDS,
                      near_zero_frac=DEFAULT_NEAR_ZERO_FRAC,
                      span_decades=SPAN_DECADES,
-                     min_reach_decades=MIN_REACH_DECADES, verbose=True):
+                     min_reach_decades=MIN_REACH_DECADES, verbose=True,
+                     nll_at_optimum_profile=None):
     """Screen, then one capped profile point per crossed side, in rounds.
 
     *batch* has the profile_batch signature: ``batch(jobs, on_result, label)``.
     *nll_batch* evaluates a list of full parameter vectors, for the screen.
     Returns the report dict; :func:`print_fast_profile_report` renders it and
     :func:`fast_profile_summary` shrinks it for the results snapshot.
+
+    *nll_at_optimum* anchors the screen, which goes through *nll_batch* and so
+    is never sigma-frozen (see ``Engine.Optimize._freeze_floor``).
+    *nll_at_optimum_profile* anchors the profile points that come back through
+    *batch*, which the caller submits with each floored block's sigma pinned
+    at its own ``sigma_used`` from the fit (``frozen_sigmas=sigma_by_block``,
+    not the raw floor -- see ``Engine.Optimize._freeze_floor``). Reusing the
+    unfrozen anchor for a frozen point's dNLL would compare two different
+    objectives, and if freezing were done at the raw floor instead of the
+    block's own resolved sigma that mismatch could run to hundreds of nats
+    even a fraction of a Wald SE from the optimum, since most floored blocks
+    are not binding at a good fit. Defaults to *nll_at_optimum* when not
+    given, which is correct whenever the caller submits unfrozen points too.
     """
     from Engine.Optimize import _cold_simplex, _param_bounds
 
@@ -295,6 +309,8 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
     n = len(param_names)
     scales = list(scales) if scales is not None else ["lin"] * n
     t_start = time.time()
+    if nll_at_optimum_profile is None:
+        nll_at_optimum_profile = nll_at_optimum
 
     # ── The screen, reused when this fit already has one ──────────────────
     screen = load_screen(ckpt_dir, param_names, res_x, threshold,
@@ -411,7 +427,7 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
         nll = res.get("nll")
         ok = (res.get("status") == "ok" and nll is not None
               and np.isfinite(nll) and nll < FAILURE_VALUE)
-        d = float(nll) - float(nll_at_optimum) if ok else None
+        d = float(nll) - float(nll_at_optimum_profile) if ok else None
         prev = side["dnll"]
         side["status"] = res.get("status")
         side["rounds"].append({
@@ -525,7 +541,10 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
 
     report = {
         "threshold": float(threshold),
-        "anchor": float(nll_at_optimum),
+        # The anchor every dNLL in this report was actually measured against
+        # -- the frozen one, since every round's points come back through
+        # batch(). Not the same number as the screen's own anchor above.
+        "anchor": float(nll_at_optimum_profile),
         "res_x": [float(v) for v in res_x],
         "param_names": list(param_names),
         "round_evals": int(round_evals),

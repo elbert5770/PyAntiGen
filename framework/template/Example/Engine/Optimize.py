@@ -479,6 +479,42 @@ def _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=None):
     return (nf.sigma if nf is not None else None), nf
 
 
+def _freeze_floor(known_sigma, sigma_floor, frozen_value):
+    """Pin a floored block's sigma at *frozen_value* instead of re-concentrating.
+
+    Used during profile-point evaluation, wired from :func:`evaluate_nll_fixed`
+    down from :meth:`ParallelEvaluator.profile_batch`, so a floored block's
+    sigma sits still for the whole nuisance re-optimization instead of being
+    re-estimated at every point the profile visits -- that re-estimation is
+    the self-forgiveness the floor exists to stop when it pushes sigma_hat
+    *above* the floor, and is worth stopping just as much below it, where the
+    floor itself has nothing to say.
+
+    *frozen_value* is the block's own ``sigma_used`` at the fitted optimum
+    (``min(sigma_hat_opt, floor)``; see :func:`block_sigmas`), not the raw
+    floor constant. That matters: most floored blocks are *not* binding at a
+    good optimum (``sigma_hat_opt`` already sits below the floor, which is
+    exactly why the fit was allowed to reach it), and pinning those at the
+    floor anyway would inflate every such block's term for the whole profile,
+    not just far from the optimum where self-forgiveness is the actual risk --
+    flattening the profile's true local sensitivity and reporting a large,
+    spurious dNLL even a fraction of a Wald SE from the fitted value. Pinning
+    at the block's own resolved value instead reproduces the concentrated
+    likelihood exactly at the optimum (the anchor and the profile then agree
+    there by construction) and only departs from it exactly where the block's
+    fit genuinely degrades as the profiled parameter moves.
+
+    The main fit and every other diagnostic (Wald, slice, Sobol) pass
+    ``frozen_value=None`` and keep floored blocks profiled as before; only the
+    profile passes supply one. A block with no floor (``sigma_floor is
+    None``) is untouched either way, and a block with a true declared sigma
+    (``known_sigma`` already set) is never overridden.
+    """
+    if frozen_value is not None and known_sigma is None and sigma_floor is not None:
+        return float(frozen_value), None
+    return known_sigma, sigma_floor
+
+
 def _apply_n_eff_scale(weights, n_eff_scale):
     """Rescale a block's per-point weights to state an effective sample size.
 
@@ -729,6 +765,7 @@ def effective_k(param_names, blocks):
 def collect_loss_blocks(
     sim_results, groups, replicates, param_names, p_lin, p_dict,
     trace_collector=None, loss_components=None, seen=None,
+    frozen_sigmas=None,
 ):
     """Walk every loss element in *groups* and return ``{block: [sse, n]}``.
 
@@ -759,6 +796,9 @@ def collect_loss_blocks(
     every contributing block is added to it. Block count cannot measure data
     coverage once elements share a sigma_block, so coverage checks must count
     these instead.
+
+    ``frozen_sigmas`` is passed straight through to every element's sigma
+    resolution -- see :func:`_freeze_floor`.
     """
     blocks = {}
     for g_name, g_config in groups.items():
@@ -787,6 +827,7 @@ def collect_loss_blocks(
                     trace_collector=trace_collector, blocks=blocks,
                     block_key=elem.get("sigma_block") or key, seen=seen,
                     n_eff_scale=elem.get("n_eff_scale"),
+                    frozen_sigmas=frozen_sigmas,
                 )
             else:
                 sim = elem.get("simulation")
@@ -799,6 +840,7 @@ def collect_loss_blocks(
                     loss_config=lc, trace_collector=trace_collector,
                     blocks=blocks, block_key=elem.get("sigma_block") or key,
                     seen=seen, n_eff_scale=elem.get("n_eff_scale"),
+                    frozen_sigmas=frozen_sigmas,
                 )
 
             if loss_components is not None:
@@ -819,6 +861,7 @@ def loss_function_evaluated(
     block_key=None,
     seen=None,
     n_eff_scale=None,
+    frozen_sigmas=None,
 ):
     """
     Evaluate the loss for already simulated results.
@@ -830,6 +873,10 @@ def loss_function_evaluated(
     runs, so it does not depend on ``loss_type`` or on which sigma heuristic
     fired.  *block_key* lets the caller pin a stable identity for the element
     even when ``results_dict`` is keyed by a display label.
+
+    *frozen_sigmas*, when given, is a ``{(block_key_or_exp_id, obs_label):
+    sigma_used}`` lookup (see :func:`block_sigmas`) consulted for every
+    floored observable -- see :func:`_freeze_floor`.
     """
     loss_config = loss_config or {}
     observables_config = loss_config.get("observables", [])
@@ -920,11 +967,16 @@ def loss_function_evaluated(
             n_eff = obs_weights_v.sum()
             loss_type = obs_cfg.get("loss_type", "nll")
 
+            block_id = block_key if block_key is not None else exp_id
             known_sigma = _known_sigma_for(obs_cfg, obs_df, valid)
             sigma_floor, floor_obj = (
                 _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
                 if known_sigma is None else (None, None))
-            _record_block(blocks, block_key if block_key is not None else exp_id,
+            frozen_value = (frozen_sigmas.get((block_id, _short_obs_label(obs)))
+                           if frozen_sigmas else None)
+            known_sigma, sigma_floor = _freeze_floor(
+                known_sigma, sigma_floor, frozen_value)
+            _record_block(blocks, block_id,
                           obs, residuals, obs_weights_v,
                           known_sigma=known_sigma, sigma_floor=sigma_floor)
             if seen is not None:
@@ -1034,6 +1086,7 @@ def loss_function_composite(
     block_key=None,
     seen=None,
     n_eff_scale=None,
+    frozen_sigmas=None,
 ):
     """
     Evaluate aggregated composite loss across multiple simulated results.
@@ -1177,11 +1230,16 @@ def loss_function_composite(
         n_eff = obs_weights_v.sum()
         loss_type = obs_cfg.get("loss_type", "nll")
 
+        block_id = block_key if block_key is not None else exp_id
         known_sigma = _known_sigma_for(obs_cfg, obs_df, valid)
         sigma_floor, floor_obj = (
             _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
             if known_sigma is None else (None, None))
-        _record_block(blocks, block_key if block_key is not None else exp_id,
+        frozen_value = (frozen_sigmas.get((block_id, _short_obs_label(obs)))
+                       if frozen_sigmas else None)
+        known_sigma, sigma_floor = _freeze_floor(
+            known_sigma, sigma_floor, frozen_value)
+        _record_block(blocks, block_id,
                       obs, residuals, obs_weights_v,
                       known_sigma=known_sigma, sigma_floor=sigma_floor)
         if seen is not None:
@@ -1458,7 +1516,7 @@ def evaluate_nll_fixed(
     p, models, replicates, param_names, scales, groups, group_normalization,
     fixed_sigmas, model_text=None, paths=None, events_dynamic=False,
     failure_value=1e10, for_inference=True, concentrated=True,
-    include_constant=False,
+    include_constant=False, frozen_sigmas=None,
 ):
     """Joint NLL at *p* (optimizer space).
 
@@ -1474,6 +1532,12 @@ def evaluate_nll_fixed(
     ``concentrated=False`` reproduces the older frozen-sigma behaviour, where
     ``fixed_sigmas`` carries sigmas estimated once at the optimum. Retained for
     comparison against archived runs; it is not the inference path.
+
+    ``frozen_sigmas``, when given, pins every data-floored block found in it
+    at its own ``sigma_used`` from the fit (see :func:`block_sigmas`), instead
+    of letting it re-concentrate (up to its floor) at this particular point --
+    see :func:`_freeze_floor`. Only the profile passes supply this; every
+    other diagnostic leaves it None.
     """
     p_lin = _to_linear(p, scales)
     p_dict = dict(zip(param_names, p_lin.tolist()))
@@ -1487,6 +1551,7 @@ def evaluate_nll_fixed(
     if concentrated:
         blocks = collect_loss_blocks(
             sim_results, groups, replicates, param_names, p_lin, p_dict,
+            frozen_sigmas=frozen_sigmas,
         )
         if not blocks:
             return failure_value
@@ -2049,6 +2114,73 @@ def _resolve_profile_optimizer(method, optimizer_kwargs):
     profile_method = kw.get("profile_method") or method or "Nelder-Mead"
     profile_kwargs = kw.get("profile_optimizer_kwargs") or {}
     return profile_method, profile_kwargs
+
+
+def _resolve_named(value, param_names, label):
+    """Normalize a per-parameter spec value (``x0`` or ``bounds``) to a list
+    aligned with ``param_names``.
+
+    Accepts a ``{name: value}`` dict or an explicit sequence already aligned
+    with ``param_names`` position-for-position -- the same duality
+    ``_resolve_scales`` already gives ``parameter_scale``, for the same
+    reason: ``param_names``, ``x0`` and ``bounds`` are three separately
+    authored per-parameter lists that today have no cross-check that they
+    actually correspond, so reordering or editing one without the matching
+    edit to the others is a silent misalignment, not an error. A dict closes
+    that off structurally.
+
+    Unlike ``parameter_scale``'s dict, where an unlisted name safely defaults
+    to "lin", there is no safe default for a missing x0 or bounds entry -- so
+    both an unknown name (a typo, or a name that's no longer in param_names)
+    and a missing one (an omission) raise, naming the parameter, rather than
+    silently doing something plausible-looking with the wrong one or falling
+    back to unbounded.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        names = set(param_names)
+        unknown = sorted(set(value) - names)
+        missing = sorted(names - set(value))
+        if unknown or missing:
+            problems = []
+            if unknown:
+                problems.append(f"unknown name(s) {unknown}")
+            if missing:
+                problems.append(f"missing name(s) {missing}")
+            raise ValueError(
+                f"{label} dict does not match param_names: "
+                + "; ".join(problems)
+            )
+        return [value[name] for name in param_names]
+    values = list(value)
+    if len(values) != len(param_names):
+        raise ValueError(
+            f"{label} has {len(values)} entries but there are "
+            f"{len(param_names)} parameters"
+        )
+    return values
+
+
+def _resolve_bounds(bounds, param_names):
+    """``bounds`` as a ``{name: (lo, hi)}`` dict or an aligned sequence,
+    normalized to the list every downstream consumer (``_param_bounds``,
+    ``_multistart_points``, the Wald Hessian, the profile grid, ``EvalSpec``,
+    checkpoint fingerprinting) already expects. ``None`` means unbounded and
+    passes through unchanged -- see ``_resolve_named``.
+    """
+    return _resolve_named(bounds, param_names, "bounds")
+
+
+def _resolve_x0(x0, param_names):
+    """``x0`` as a ``{name: value}`` dict or an aligned sequence, normalized
+    the same way as ``_resolve_bounds``. Unlike bounds, x0 is required --
+    ``None`` is a spec error, not "no starting point".
+    """
+    resolved = _resolve_named(x0, param_names, "x0")
+    if resolved is None:
+        raise ValueError("x0 is required and was None")
+    return resolved
 
 
 def _auto_scale(value, bound, search_decades=None,
@@ -3773,6 +3905,20 @@ def run_parallel_profile(
     n_params = len(param_names)
     completed = checkpoint.load(param_names) if checkpoint is not None else \
         {n: {} for n in param_names}
+    # A loaded record's dnll was computed against whatever anchor was current
+    # in the launch that wrote it. If that differs from this launch's anchor
+    # -- the frozen-sigma anchor shipping is exactly such a change, see
+    # _run_parallel_profile_with_checkpoint -- every downstream threshold
+    # comparison below would silently compare against the wrong number.
+    # Recomputed here, once, from the anchor-independent nll every record
+    # already carries, so a resume is never wrong about the anchor a fresh
+    # point would use, and no checkpoint has to be discarded when the anchor
+    # definition changes.
+    for pts in completed.values():
+        for r in pts.values():
+            nll = r.get("nll")
+            r["dnll"] = (float(nll) - nll_at_optimum
+                        if nll is not None else float("nan"))
 
     def _lin(v, is_log):
         return 10.0 ** v if is_log else v
@@ -4748,7 +4894,7 @@ def _run_parallel_profile_with_checkpoint(
     n_grid, range_factor, se_span, n_refine, run_id, checkpoint_enabled=True,
     fixed_sigmas=None, warm_passes=1, max_extend=8, extend_growth=2.0,
     bracket_rtol=0.05, screen_span_decades=None, screen_min_reach_decades=None,
-    replicates=None,
+    replicates=None, sigma_by_block=None,
 ):
     """Wire the pool, the checkpoint store, the wall budget and the profile."""
     from Engine.Profile_checkpoint import (
@@ -4829,12 +4975,34 @@ def _run_parallel_profile_with_checkpoint(
     )
 
     def batch(jobs, on_result=None, label=None):
+        # sigma_by_block: every profile point is a nuisance re-optimization,
+        # and letting a floored block's sigma re-concentrate at each point is
+        # the same self-forgiveness the floor exists to stop. Pinned instead
+        # at the block's own sigma_used from the fit -- its floor only when
+        # the floor was actually binding there, its sharper sigma_hat
+        # otherwise -- for the whole profile. See _freeze_floor.
         return evaluator.profile_batch(jobs, on_result=on_result, label=label,
-                                       budget=budget)
+                                       budget=budget,
+                                       frozen_sigmas=sigma_by_block)
+
+    # Every profile point comes back frozen (batch, above), so dNLL has to be
+    # read against an anchor computed the same way -- reusing nll_at_optimum
+    # (unfrozen; correct for the screen just above) would compare a frozen
+    # point's NLL against an unfrozen anchor. Freezing each block at its own
+    # sigma_used from the fit (rather than always at the raw floor) means this
+    # reproduces the concentrated likelihood exactly at the optimum, so the
+    # two anchors should differ only by float noise -- a real gap here means
+    # sigma_by_block does not match opt_blocks, not that floors are binding.
+    nll_at_optimum_frozen = evaluator.evaluate_batch(
+        [res_x], label="profile-anchor-frozen", frozen_sigmas=sigma_by_block)[0]
+    drift = nll_at_optimum_frozen - nll_at_optimum
+    print(f"[profile] frozen anchor at the optimum: {nll_at_optimum_frozen:.6g} "
+          f"(unfrozen: {nll_at_optimum:.6g}, {drift:+.6g}) -- every profile "
+          f"dNLL below is measured from the frozen value.")
 
     try:
         traces, anchor, where, convergence = run_parallel_profile(
-            batch, res_x, nll_at_optimum, param_names,
+            batch, res_x, nll_at_optimum_frozen, param_names,
             bounds, scales, method=method, optimizer_kwargs=optimizer_kwargs,
             wald_se=wald_se, n_grid=n_grid, range_factor=range_factor,
             se_span=se_span, n_refine=n_refine, checkpoint=ckpt,
@@ -4859,6 +5027,7 @@ def _run_fast_profile_with_checkpoint(
     checkpoint_enabled=True, fixed_sigmas=None, replicates=None,
     round_evals=None, n_rounds=None, near_zero_frac=None,
     screen_span_decades=None, screen_min_reach_decades=None,
+    sigma_by_block=None,
 ):
     """Wire the pool, the checkpoint store and the wall budget to the fast pass.
 
@@ -4898,11 +5067,35 @@ def _run_fast_profile_with_checkpoint(
     print(f"[fast profile] {budget.describe()}")
 
     def batch(jobs, on_result=None, label=None):
+        # Same reasoning as the full profile's own batch() -- a fast-profile
+        # point is also a nuisance re-optimization, so each floored block's
+        # sigma is pinned at its own sigma_used from the fit (its floor only
+        # where that was actually binding) for the point rather than
+        # re-concentrated at it. See _freeze_floor.
         return evaluator.profile_batch(jobs, on_result=on_result, label=label,
-                                       budget=budget)
+                                       budget=budget,
+                                       frozen_sigmas=sigma_by_block)
 
     def nll_batch(xs, label=None):
+        # Plain evaluations for the screen this pass reuses -- no nuisance
+        # re-optimization happens here, so left unfrozen like every other
+        # slice-style evaluation.
         return evaluator.evaluate_batch(xs, label=label)
+
+    # See the full profile's own comment at the matching line: batch() above
+    # submits every point frozen at sigma_by_block, so its dNLL has to be
+    # read against an anchor computed the same way, not the unfrozen
+    # nll_at_optimum the screen (nll_batch) uses. Freezing at each block's own
+    # sigma_used (not the raw floor) means this should equal nll_at_optimum to
+    # float noise -- a real gap means sigma_by_block is stale, not that floors
+    # are binding.
+    nll_at_optimum_frozen = evaluator.evaluate_batch(
+        [res_x], label="profile-anchor-frozen", frozen_sigmas=sigma_by_block)[0]
+    drift = nll_at_optimum_frozen - nll_at_optimum
+    print(f"[fast profile] frozen anchor at the optimum: "
+          f"{nll_at_optimum_frozen:.6g} (unfrozen: {nll_at_optimum:.6g}, "
+          f"{drift:+.6g}) -- every profile-point dNLL below is measured "
+          f"from the frozen value.")
 
     try:
         report = run_fast_profile(
@@ -4910,6 +5103,7 @@ def _run_fast_profile_with_checkpoint(
             scales, method=method, optimizer_kwargs=optimizer_kwargs,
             wald_se=wald_se, wald_cov=wald_cov, checkpoint=ckpt,
             ckpt_dir=ckpt.dir, threshold=_PROFILE_THRESHOLD,
+            nll_at_optimum_profile=nll_at_optimum_frozen,
             round_evals=(round_evals if round_evals is not None
                          else DEFAULT_ROUND_EVALS),
             n_rounds=n_rounds if n_rounds is not None else DEFAULT_ROUNDS,
@@ -5327,8 +5521,14 @@ def run_optimization_from_groups(
     # =========================================================================
     if optimization_spec is not None:
         param_names = optimization_spec.param_names
-        x0_lin = optimization_spec.x0
-        bounds_lin = optimization_spec.bounds
+        # x0 and bounds may each be authored as a {name: value} dict or a
+        # sequence already aligned with param_names -- resolved to the aligned
+        # list here, once, so every consumer below and in every module this
+        # spec's fields get threaded into (Engine.Evaluator's EvalSpec,
+        # checkpoint fingerprinting, the profile grid, ...) keeps working with
+        # plain positional values exactly as before. See _resolve_named.
+        x0_lin = _resolve_x0(optimization_spec.x0, param_names)
+        bounds_lin = _resolve_bounds(optimization_spec.bounds, param_names)
         method = optimization_spec.method
         optimizer_kwargs = optimization_spec.optimizer_kwargs or {}
         selected_group_names = set(optimization_spec.groups.keys())
@@ -6075,6 +6275,7 @@ def run_optimization_from_groups(
                                 screen_span_decades=screen_span_decades,
                                 screen_min_reach_decades=(
                                     screen_min_reach_decades),
+                                sigma_by_block=sigma_by_block,
                             )
                         )
                 elif profile_likelihood_analysis:
@@ -6120,6 +6321,7 @@ def run_optimization_from_groups(
                                 screen_min_reach_decades=(
                                     screen_min_reach_decades),
                                 replicates=active_replicates,
+                                sigma_by_block=sigma_by_block,
                             )
                         )
 

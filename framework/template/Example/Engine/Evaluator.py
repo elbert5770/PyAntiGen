@@ -208,7 +208,7 @@ def _init_worker(spec_blob):
           f"{time.time() - t0:.1f}s", flush=True)
 
 
-def _worker_nll(x):
+def _worker_nll(x, frozen_sigmas=None):
     """The joint NLL, evaluated with this worker's own compiled models."""
     from Engine.Optimize import evaluate_nll_fixed
 
@@ -221,17 +221,18 @@ def _worker_nll(x):
         events_dynamic=spec.events_dynamic, failure_value=FAILURE_VALUE,
         for_inference=getattr(spec, "for_inference", True),
         concentrated=getattr(spec, "concentrated", True),
+        frozen_sigmas=frozen_sigmas,
     )
 
 
-def _eval_task(x):
+def _eval_task(x, frozen_sigmas=None):
     """Evaluate one parameter vector. Never raises across the pool boundary."""
     if _WORKER["spec"] is None:
         return (FAILURE_VALUE, "worker-not-initialized", 0.0)
 
     t0 = time.time()
     try:
-        val = _worker_nll(x)
+        val = _worker_nll(x, frozen_sigmas=frozen_sigmas)
         _WORKER["n_evals"] += 1
         status = "ok" if np.isfinite(val) and val < FAILURE_VALUE else "sentinel"
         return (float(val), status, time.time() - t0)
@@ -522,7 +523,17 @@ def _profile_task(job):
         cache = {}
         cache_order = []
 
-        raw_objective = _make_nuisance_objective(_worker_nll, param_idx, n_params)
+        # Every profile point pins each floored block at its own sigma_used
+        # from the fit rather than letting it re-concentrate (see
+        # Engine.Optimize._freeze_floor) -- stamped onto the job by
+        # profile_batch's frozen_sigmas, not decided here, so the caller
+        # controls it per batch.
+        frozen = job.get("frozen_sigmas")
+
+        def _pinned_nll(x_full):
+            return _worker_nll(x_full, frozen_sigmas=frozen)
+
+        raw_objective = _make_nuisance_objective(_pinned_nll, param_idx, n_params)
 
         def nuisance_objective(x_nuisance, fixed_val):
             x_arr = np.asarray(x_nuisance, dtype=float)
@@ -877,32 +888,50 @@ class ParallelEvaluator:
 
     # -- evaluation --------------------------------------------------------
 
-    def evaluate_batch(self, xs, label=None):
-        """Evaluate every parameter vector in *xs*; return losses in input order."""
+    def evaluate_batch(self, xs, label=None, heartbeat_s=_HEARTBEAT_SECONDS,
+                       frozen_sigmas=None):
+        """Evaluate every parameter vector in *xs*; return losses in input order.
+
+        Uses submit/wait, not map -- see profile_batch's docstring for the
+        general reasoning. map() (the previous implementation here) returns
+        nothing until the WHOLE batch is done, so one slow straggler among
+        many fast points -- a slice-screen point far from the optimum landing
+        in a stiff numerical regime, say -- makes the entire batch silent for
+        as long as that one point takes, indistinguishable from a hang. A
+        heartbeat every heartbeat_s while nothing has landed answers that
+        directly: it says how many are done, how many are still in flight, and
+        an ETA once at least one has finished.
+
+        chunk_size no longer applies to this method: submitting one task per
+        vector is what makes the heartbeat and per-point completion visibility
+        possible at all, and no caller in this codebase sets chunk_size to
+        anything but the default anyway.
+
+        Still returns losses in INPUT order, not completion order -- unlike
+        profile_batch, whose callers key off fields in each job/result dict,
+        callers here (the slice screen especially) index into the return value
+        positionally.
+        """
         xs = [np.asarray(x, dtype=float) for x in xs]
-        if not xs:
+        n = len(xs)
+        if n == 0:
             return []
         if self._pool is None:
             self.start()
 
-        chunk = self.chunk_size
-        if chunk is None:
-            # Enough chunks to keep every worker fed, few enough to avoid
-            # per-task overhead dominating.
-            chunk = max(1, len(xs) // (self.n_workers * 4) or 1)
+        from concurrent.futures import wait, FIRST_COMPLETED
 
         t0 = time.time()
+        tag = f" [{label}]" if label else ""
         if self.verbose:
-            # map() returns nothing until the whole batch is done, so this line
-            # is the only warning the caller gets that the next stretch of
-            # silence is expected. Individual points are reported by
-            # profile_batch; this path deliberately trades that for chunking.
-            tag = f" [{label}]" if label else ""
-            print(f"[pool]{tag} {len(xs)} evaluation(s) submitted to "
-                  f"{self.n_workers} worker(s) in chunks of {chunk}; "
-                  f"no output until the batch completes.", flush=True)
+            print(f"[pool]{tag} {n} evaluation(s) submitted to "
+                  f"{self.n_workers} worker(s); progress every "
+                  f"{_fmt_dur(heartbeat_s)} until results start landing.",
+                  flush=True)
+
         try:
-            out = list(self._pool.map(_eval_task, xs, chunksize=chunk))
+            futures = {self._pool.submit(_eval_task, x, frozen_sigmas): i
+                      for i, x in enumerate(xs)}
         except RuntimeError as exc:
             if "bootstrapping phase" in str(exc):
                 # spawn re-imports the __main__ module in every worker. If the
@@ -922,15 +951,46 @@ class ParallelEvaluator:
                 ) from exc
             raise
 
-        losses = []
+        pending = set(futures)
+        out = [None] * n
+        work = 0.0
+        done = 0
         failures = []
-        for i, (val, status, secs) in enumerate(out):
-            losses.append(val)
-            self.total_worker_seconds += secs
-            if status != "ok":
-                failures.append((i, status))
 
-        self.n_evals += len(xs)
+        while pending:
+            finished, pending = wait(pending, timeout=heartbeat_s,
+                                     return_when=FIRST_COMPLETED)
+
+            if not finished:
+                if self.verbose:
+                    now = time.time()
+                    msg = (f"  [pool{tag}] {done}/{n} done, "
+                           f"{len(pending)} in flight, "
+                           f"{_fmt_dur(now - t0)} elapsed")
+                    if done:
+                        rate = done / max(now - t0, 1e-9)
+                        msg += f", ~{_fmt_dur((n - done) / rate)} remaining"
+                    else:
+                        msg += " (no point has finished yet, so no estimate)"
+                    print(msg, flush=True)
+                continue
+
+            for fut in finished:
+                i = futures[fut]
+                try:
+                    val, status, secs = fut.result()
+                except Exception as exc:
+                    val = FAILURE_VALUE
+                    status = f"error: {type(exc).__name__}: {exc}"
+                    secs = 0.0
+                out[i] = val
+                work += secs
+                self.total_worker_seconds += secs
+                if status != "ok":
+                    failures.append((i, status))
+                done += 1
+
+        self.n_evals += n
         self.n_failures += len(failures)
 
         if self.verbose:
@@ -939,21 +999,30 @@ class ParallelEvaluator:
             # wall time is the speedup actually realized. On the first batch it
             # includes worker startup, so it understates steady-state throughput
             # -- report both numbers rather than one flattering one.
-            work = sum(o[2] for o in out)
-            tag = f" [{label}]" if label else ""
-            print(f"[pool]{tag} {len(xs)} evals in {elapsed:.1f}s wall "
+            print(f"[pool]{tag} {n} evals in {elapsed:.1f}s wall "
                   f"({work:.1f}s of work, {work / elapsed:.1f}x, "
-                  f"{len(xs) / elapsed:.1f} eval/s)", flush=True)
+                  f"{n / elapsed:.1f} eval/s)", flush=True)
             if failures:
                 shown = "; ".join(f"#{i}: {s}" for i, s in failures[:3])
                 more = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
                 print(f"[pool]{tag} {len(failures)} failed — {shown}{more}", flush=True)
 
-        return losses
+        return out
 
     def profile_batch(self, jobs, on_result=None, label=None,
-                      heartbeat_s=_HEARTBEAT_SECONDS, budget=None):
+                      heartbeat_s=_HEARTBEAT_SECONDS, budget=None,
+                      frozen_sigmas=None):
         """Run profile-likelihood points in parallel, within a wall budget.
+
+        ``frozen_sigmas``, stamped onto every job here rather than left to
+        each caller's job-building code, is a ``{(block_key_or_exp_id,
+        obs_label): sigma_used}`` lookup (see ``Engine.Optimize.
+        block_sigmas``) pinning each data-floored block found in it at its own
+        resolved sigma for the point's whole nuisance re-optimization, instead
+        of letting it re-concentrate as the nuisance vector moves -- see
+        ``Engine.Optimize._freeze_floor``. Every profile pass submitted
+        through one ``batch()`` closure gets it uniformly this way, with no
+        change needed at the individual job-building sites.
 
         Unlike ``evaluate_batch`` this uses submit/wait rather than map, because
         each job is minutes to hours long and results must be checkpointed *as
@@ -994,7 +1063,10 @@ class ParallelEvaluator:
 
         t0 = time.time()
         results = []
-        backlog = list(jobs)
+        # Stamped once here, not per admitted job: unlike deadline/sec_per_eval
+        # this does not depend on the clock, so every job in the batch gets it
+        # up front.
+        backlog = [dict(j, frozen_sigmas=frozen_sigmas) for j in jobs]
         futures = {}
         pending = set()
         n_jobs = len(jobs)
