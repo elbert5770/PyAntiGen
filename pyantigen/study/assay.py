@@ -26,14 +26,35 @@ from .refs import from_ref, to_ref
 
 @dataclass
 class Obs:
-    expr: str
+    """A model quantity, in one of two forms.
+
+    expression   ``expr`` evaluated by the Engine on the simulation output,
+                 optionally log10-transformed (``Obs.log10``).
+    baseline     the sum of ``columns``, divided by its own value at the last
+                 output time at or before ``baseline_at`` and multiplied by
+                 ``scale`` (100 = percent of baseline, 1 = fraction). The
+                 baseline time is an arithmetic expression over the
+                 occasion's attributes, e.g. "Age*365.0*24.0 + 1.0", so one
+                 declaration serves every occasion (``Obs.of_baseline``).
+    """
+    expr: str = None
     name: str = None
     transform: str = None           # None | "log10"
     floor: float = 1e-12            # log10 guard, as in the 1.x Flipflop spec
+    columns: list = None
+    baseline_at: str = None
+    scale: float = 100.0
 
     def __post_init__(self):
         if self.transform not in (None, "log10"):
             raise ValueError(f"Obs {self.expr!r}: unknown transform {self.transform!r}")
+        if (self.expr is None) == (self.columns is None):
+            raise ValueError("Obs: give either expr or columns (with baseline_at)")
+        if self.columns is not None:
+            if not self.baseline_at or not self.name:
+                raise ValueError("Obs: a baseline observable needs baseline_at and a name")
+            _check_arith(self.baseline_at)
+            self.columns = list(self.columns)
         if self.name is None:
             self.name = self.expr if self.transform is None else f"log10({self.expr})"
 
@@ -41,18 +62,31 @@ class Obs:
     def log10(cls, expr, name=None, floor=1e-12):
         return cls(expr, name=name, transform="log10", floor=floor)
 
-    def engine_form(self):
-        """What the Engine's observed_variable receives.
+    @classmethod
+    def of_baseline(cls, columns, at, name, scale=100.0):
+        return cls(columns=list(columns), baseline_at=at, name=name, scale=scale)
 
-        A plain expression string, identical to what a hand-written 1.x
-        loss_config would have used, so a lowered study scores exactly as its
-        1.x original did.
+    def engine_form(self, attrs=None):
+        """What the Engine's observed_variable receives for one occasion.
+
+        For an expression, a plain string identical to what a hand-written 1.x
+        loss_config would have used. For a baseline observable, a picklable
+        callable whose arithmetic is the 1.x one's, operation for operation,
+        so a lowered study scores exactly as its 1.x original did.
         """
+        if self.columns is not None:
+            t0 = _eval_arith(self.baseline_at, attrs or {})
+            return BaselineObs(self.columns, t0, self.name, self.scale)
         if self.transform == "log10":
             return f"np.log10(np.maximum({self.expr}, {self.floor!r}))"
         return self.expr
 
     def to_json(self):
+        if self.columns is not None:
+            d = {"columns": self.columns, "baseline_at": self.baseline_at, "name": self.name}
+            if self.scale != 100.0:
+                d["scale"] = self.scale
+            return d
         d = {"expr": self.expr}
         if self.name != self.expr:
             d["name"] = self.name
@@ -66,35 +100,122 @@ class Obs:
     def from_json(cls, d):
         if isinstance(d, str):
             return cls(d)
+        if "columns" in d:
+            return cls.of_baseline(d["columns"], d["baseline_at"], d["name"],
+                                   d.get("scale", 100.0))
         return cls(d["expr"], d.get("name"), d.get("transform"), d.get("floor", 1e-12))
+
+
+class BaselineObs:
+    """sum(columns) / its value at the last output time <= t0, times scale.
+
+    Module-level and holding only plain fields, so it pickles to pool
+    workers. ``__name__`` is what the Engine keys sigma blocks and plots by.
+    """
+
+    def __init__(self, columns, t0, name, scale=100.0):
+        self.columns = list(columns)
+        self.t0 = t0
+        self.scale = scale
+        self.__name__ = name
+
+    def __call__(self, result):
+        total = None
+        cols = getattr(result, "colnames", None)
+        for c in self.columns:
+            if cols is not None and c not in cols:
+                raise KeyError(f"{c} is not in the simulation output, so {self.__name__} "
+                               "cannot be built; add it to the protocol's observed species.")
+            v = np.asarray(result[c], dtype=float)
+            total = v if total is None else total + v
+        t = np.asarray(result["time"], dtype=float)
+        pre = np.flatnonzero(t <= self.t0 + 1e-6)
+        if pre.size == 0:
+            raise ValueError(f"No simulation output at or before t={self.t0}, so "
+                             f"{self.__name__} has no baseline to normalize by.")
+        base = float(total[pre[-1]])
+        if not np.isfinite(base) or base <= 0:
+            raise ValueError(f"{self.__name__} baseline is not positive; got {base!r}.")
+        if self.scale == 100.0:
+            return 100.0 * total / base
+        if self.scale == 1.0:
+            return total / base
+        return self.scale * total / base
+
+
+def _check_arith(expr):
+    import ast
+    allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult,
+               ast.Div, ast.USub, ast.UAdd, ast.Constant, ast.Name, ast.Load)
+    tree = ast.parse(expr, mode="eval")
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            raise ValueError(f"{expr!r}: only + - * / numbers and attribute names are allowed")
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
+            raise ValueError(f"{expr!r}: only numeric constants are allowed")
+    return tree
+
+
+def _eval_arith(expr, attrs):
+    """Evaluate +-*/ arithmetic over occasion attributes, left to right as Python does."""
+    import ast
+    tree = _check_arith(expr)
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    missing = names - set(attrs)
+    if missing:
+        raise KeyError(f"{expr!r} names {sorted(missing)}, which this occasion does not have")
+    return eval(compile(tree, "<baseline_at>", "eval"), {"__builtins__": {}},
+                {n: attrs[n] for n in names})
 
 
 # --- data ------------------------------------------------------------------
 
 @dataclass
 class DataSource:
-    file: str                        # relative to the data folder; may use "{attr}"
-    time: str
-    value: object                    # column name, or list of replicate columns
+    """Where one observable's data are.
+
+    Either a CSV ``file`` (relative to the data folder; may use "{attr}"), or
+    ``input``: the name of a table the occasion's protocol loader produced
+    (Protocol.data), for data that need Python to prepare -- unit
+    conversion, vehicle correction, a shared time grid.
+    """
+    file: str = None
+    time: str = None
+    value: object = None             # column name, or list of replicate columns
     where: dict = field(default_factory=dict)   # column -> value or "{attr}"
     sd: str = None                   # per-point SD column, if the data have one
     dropna: bool = True
+    input: str = None
 
-    def rows_for(self, attrs, data_path, _cache=None):
+    def __post_init__(self):
+        if (self.file is None) == (self.input is None):
+            raise ValueError("DataSource: give exactly one of file= or input=")
+        if self.time is None or self.value is None:
+            raise ValueError("DataSource: time= and value= are required")
+
+    def rows_for(self, attrs, data_path, _cache=None, inputs=None):
         """The rows belonging to one occasion, as a (time, value[, sd]) frame.
 
         Replicate value columns are stacked into one "value" column, in the
         order listed, which is how the 1.x loaders stacked B1/B2/B3.
+        ``inputs`` is the protocol loader's output, needed for ``input=``.
         """
         import os
         import pandas as pd
-        path = os.path.join(data_path, _fill(self.file, attrs))
-        if _cache is not None and path in _cache:
-            df = _cache[path]
+        if self.input is not None:
+            if inputs is None or self.input not in inputs:
+                raise KeyError(f"protocol data has no table {self.input!r}")
+            df = inputs[self.input]
+            if df is None:
+                raise KeyError(f"protocol data table {self.input!r} is empty for this occasion")
         else:
-            df = pd.read_csv(path)
-            if _cache is not None:
-                _cache[path] = df
+            path = os.path.join(data_path, _fill(self.file, attrs))
+            if _cache is not None and path in _cache:
+                df = _cache[path]
+            else:
+                df = pd.read_csv(path)
+                if _cache is not None:
+                    _cache[path] = df
         mask = np.ones(len(df), dtype=bool)
         for col, want in self.where.items():
             if col not in df.columns:
@@ -118,7 +239,8 @@ class DataSource:
         return out
 
     def to_json(self):
-        d = {"file": self.file, "time": self.time, "value": self.value}
+        d = {"input": self.input} if self.input else {"file": self.file}
+        d.update({"time": self.time, "value": self.value})
         if self.where:
             d["where"] = dict(self.where)
         if self.sd:
@@ -129,8 +251,8 @@ class DataSource:
 
     @classmethod
     def from_json(cls, d):
-        return cls(d["file"], d["time"], d["value"], d.get("where", {}),
-                   d.get("sd"), d.get("dropna", True))
+        return cls(d.get("file"), d["time"], d["value"], d.get("where", {}),
+                   d.get("sd"), d.get("dropna", True), d.get("input"))
 
 
 def _fill(template, attrs):

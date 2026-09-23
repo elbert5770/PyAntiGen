@@ -79,14 +79,18 @@ class LoweredExperiment:
 # --- hooks (module level, picklable) ----------------------------------------
 
 class ApplyFixed:
-    """Update_parameters: the fixed part of resolve(), before the pre-dose block."""
+    """Update_parameters: the fixed part of resolve(), before the pre-dose block,
+    then the protocol's own update_parameters hook if it has one."""
 
-    def __init__(self, values):
+    def __init__(self, values, project_hook=None):
         self.values = dict(values)
+        self.project_hook = project_hook
 
     def __call__(self, r, replicate, mode=None):
         for k, v in self.values.items():
             r[k] = v
+        if self.project_hook is not None:
+            self.project_hook(r, replicate)
 
 
 class ApplyResolved:
@@ -98,10 +102,11 @@ class ApplyResolved:
     rules    [(target, value)] that apply to this occasion, in order
     """
 
-    def __init__(self, fixed, fitted, rules):
+    def __init__(self, fixed, fitted, rules, project_hook=None):
         self.fixed = dict(fixed)
         self.fitted = dict(fitted)
         self.rules = list(rules)
+        self.project_hook = project_hook
 
     def values(self, parameters):
         out = dict(self.fixed)
@@ -115,23 +120,32 @@ class ApplyResolved:
     def __call__(self, r, replicate, parameters):
         for k, v in self.values(parameters).items():
             r[k] = v
+        if self.project_hook is not None:
+            self.project_hook(r, replicate, parameters)
 
 
 class LoadData:
-    """Data: the rows of every DataSource scored on this occasion.
+    """Data: the protocol's inputs, plus the rows of every DataSource scored
+    on this occasion.
 
-    sources is [(key, attrs, DataSource, column_name)]; each is read with the
-    occasion's (or, for a contrast, the numerator's) attributes and stored
-    under its key with its value column renamed to column_name.
+    protocol_data, if given, is called first with the replicate; its tables
+    are passed through unchanged (the event builder reads them) and are what
+    DataSource(input=...) selects from. sources is
+    [(key, attrs, DataSource, column_name)]; each is read with the occasion's
+    (or, for a contrast, the numerator's) attributes and stored under its
+    key with its value column renamed to column_name.
     """
 
-    def __init__(self, sources):
+    def __init__(self, sources, protocol_data=None):
         self.sources = list(sources)
+        self.protocol_data = protocol_data
 
     def __call__(self, replicate, data_path):
-        cache, out = {}, {}
+        inputs = (self.protocol_data(replicate, data_path)
+                  if self.protocol_data is not None else {})
+        cache, out = {}, dict(inputs)
         for key, attrs, src, col in self.sources:
-            df = src.rows_for(attrs, data_path, _cache=cache)
+            df = src.rows_for(attrs, data_path, _cache=cache, inputs=inputs)
             out[key] = df.rename(columns={"value": col})
         return out
 
@@ -142,8 +156,8 @@ def _measured_key(assay, measured):
     return f"{assay}.{measured.name}"
 
 
-def _obs_cfg(assay_name, m):
-    cfg = {"observed_variable": m.model.engine_form(),
+def _obs_cfg(assay_name, m, attrs):
+    cfg = {"observed_variable": m.model.engine_form(attrs),
            "data_column": m.name,
            "time_column": "time",
            "data_dict_key": _measured_key(assay_name, m)}
@@ -216,7 +230,7 @@ def lower(study, est):
                     data_needs[num.id].append((key, attrs, m.data, m.name))
                     e = {"type": "composite", "simulations": [num.id, den.id],
                          "data_simulation": num.id, "aggregation": op,
-                         "loss_config": {"observables": [_obs_cfg(meas.assay, m)]}}
+                         "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
                     blk = _sigma_block(study, meas.assay, m, num)
                     if blk:
                         e["sigma_block"] = blk
@@ -233,7 +247,7 @@ def lower(study, est):
                     key = _measured_key(meas.assay, m)
                     data_needs[occ.id].append((key, attrs, m.data, m.name))
                     e = {"simulation": occ.id,
-                         "loss_config": {"observables": [_obs_cfg(meas.assay, m)]}}
+                         "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
                     blk = _sigma_block(study, meas.assay, m, occ)
                     if blk:
                         e["sigma_block"] = blk
@@ -248,6 +262,7 @@ def lower(study, est):
     for occ in study.occasions.values():
         proto = study.protocols[occ.protocol]
         events, solver, observed = proto.resolved()
+        p_data, p_update, p_update_opt = proto.hooks()
         attrs = study.attributes(occ)
         fixed = resolve(study, occ, None)
         lv = occ.level_dict
@@ -263,11 +278,11 @@ def lower(study, est):
         rep.update({
             "Label": occ.id,
             "Events": events,
-            "Data": LoadData(_dedupe(data_needs[occ.id])),
+            "Data": LoadData(_dedupe(data_needs[occ.id]), p_data),
             "Observed_species": observed,
             "Solver_settings": solver,
-            "Update_parameters": ApplyFixed(fixed),
-            "Update_opt_parameters": ApplyResolved(fixed, fitted, rules),
+            "Update_parameters": ApplyFixed(fixed, p_update),
+            "Update_opt_parameters": ApplyResolved(fixed, fitted, rules, p_update_opt),
         })
         replicates[occ.id] = rep
 

@@ -41,7 +41,8 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
 
     # protocols resolve to real functions
     for name, p in study.protocols.items():
-        for part in ("events", "solver", "observed"):
+        for part in ("events", "solver", "observed") + tuple(
+                k for k in p._OPTIONAL if getattr(p, k) is not None):
             try:
                 fn = from_ref(getattr(p, part))
                 if not callable(fn):
@@ -85,14 +86,22 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
         scored_any = False
         for occ in occs:
             attrs = study.attributes(occ)
+            inputs = None
             for m in assay.observables:
                 if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
                     continue
                 scored_any = True
                 if data_path is None:
                     continue
+                if m.data.input is not None and inputs is None:
+                    loader = study.protocols[occ.protocol].hooks()[0]
+                    if loader is None:
+                        err(f"{where}/{m.name}: input={m.data.input!r} but protocol "
+                            f"{occ.protocol!r} has no data loader")
+                        continue
+                    inputs = loader(dict(attrs, Label=occ.id), data_path)
                 try:
-                    n = len(m.data.rows_for(attrs, data_path))
+                    n = len(m.data.rows_for(attrs, data_path, inputs=inputs))
                 except (KeyError, FileNotFoundError, OSError) as exc:
                     err(f"{where}/{m.name} on {occ.id!r}: {exc}")
                     continue

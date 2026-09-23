@@ -82,22 +82,46 @@ class Protocol:
     events(replicate, df_dict, r_ic=None) -> Antimony event text
     solver(replicate) -> solver settings dict
     observed(r) -> list of recorded species
+
+    Optional:
+    data(replicate, data_path) -> {name: table}: the protocol's inputs (a
+        measured drug curve the events write in, a tracer forcing) and any
+        prepared tables a DataSource(input=...) scores. Its output is also
+        what ``events`` receives as df_dict.
+    update_parameters(r, replicate) / update_opt_parameters(r, replicate,
+        parameters): model adjustments not yet expressible as Params or
+        Rules (a species anatomy overlay, say). They run AFTER resolve()'s
+        values are applied, at the same two points 1.x ran them.
     """
     name: str
     events: object
     solver: object
     observed: object
+    data: object = None
+    update_parameters: object = None
+    update_opt_parameters: object = None
+
+    _OPTIONAL = ("data", "update_parameters", "update_opt_parameters")
 
     def to_json(self):
-        return {"events": to_ref(self.events), "solver": to_ref(self.solver),
-                "observed": to_ref(self.observed)}
+        d = {"events": to_ref(self.events), "solver": to_ref(self.solver),
+             "observed": to_ref(self.observed)}
+        for k in self._OPTIONAL:
+            if getattr(self, k) is not None:
+                d[k] = to_ref(getattr(self, k))
+        return d
 
     @classmethod
     def from_json(cls, name, d):
-        return cls(name, d["events"], d["solver"], d["observed"])
+        return cls(name, d["events"], d["solver"], d["observed"],
+                   *(d.get(k) for k in cls._OPTIONAL))
 
     def resolved(self):
         return (from_ref(self.events), from_ref(self.solver), from_ref(self.observed))
+
+    def hooks(self):
+        """(data, update_parameters, update_opt_parameters), imported."""
+        return tuple(from_ref(getattr(self, k)) for k in self._OPTIONAL)
 
 
 @dataclass(frozen=True)
@@ -152,10 +176,12 @@ class Study:
         self.subjects[id] = s
         return s
 
-    def protocol(self, name, events, solver, observed):
+    def protocol(self, name, events, solver, observed, data=None,
+                 update_parameters=None, update_opt_parameters=None):
         if name in self.protocols:
             raise ValueError(f"protocol {name!r} already defined")
-        p = Protocol(name, events, solver, observed)
+        p = Protocol(name, events, solver, observed, data,
+                     update_parameters, update_opt_parameters)
         self.protocols[name] = p
         return p
 

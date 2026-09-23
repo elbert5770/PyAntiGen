@@ -272,3 +272,77 @@ def test_remarks_are_timestamped_append_only_and_linkable(tmp_path):
     assert f"id='{a}'" in text and "superseded by" in text
     with pytest.raises(KeyError):
         rm2.add("x", "y", supersedes="missing")
+
+
+# --- baseline observables, protocol inputs and hooks ------------------------------
+
+class _Result(dict):
+    """Minimal stand-in for a RoadRunner result: columns by name, colnames."""
+    @property
+    def colnames(self):
+        return list(self)
+
+
+def test_baseline_observable_matches_hand_arithmetic():
+    import numpy as np
+    from pyantigen.study.assay import Obs
+    o = Obs.of_baseline(["[A]", "[A_L]"], "Age*365.0*24.0 + 1.0", "A_pct")
+    t0 = 2.0 * 365.0 * 24.0 + 1.0
+    fn = o.engine_form({"Age": 2.0})
+    res = _Result({"time": np.array([t0 - 5, t0, t0 + 3]),
+                   "[A]": np.array([1.0, 2.0, 4.0]), "[A_L]": np.array([0.0, 0.5, 1.0])})
+    assert fn.__name__ == "A_pct" and fn.t0 == t0
+    assert list(fn(res)) == list(100.0 * (res["[A]"] + res["[A_L]"]) / 2.5)
+    import pickle
+    assert list(pickle.loads(pickle.dumps(fn))(res)) == list(fn(res))
+
+
+def test_baseline_time_is_arithmetic_only():
+    from pyantigen.study.assay import Obs
+    with pytest.raises(ValueError):
+        Obs.of_baseline(["x"], "__import__('os').getcwd()", "bad")
+    with pytest.raises(KeyError, match="Agee"):
+        Obs.of_baseline(["x"], "Agee*2", "n").engine_form({"Age": 1})
+
+
+def _loader(replicate, data_path):
+    import pandas as pd
+    return {"pk": pd.DataFrame({"t": [0.0, 1.0]}),
+            "prepared": pd.DataFrame({"t": [1.0, 2.0, 3.0], "v": [5.0, None, 7.0],
+                                      "arm": [replicate["dose"]] * 3})}
+
+
+def _hook(r, replicate):
+    r["hooked"] = 1.0
+
+
+def _opt_hook(r, replicate, parameters):
+    r["opt_hooked"] = r.get("KI", -1)
+
+
+def test_protocol_inputs_reach_events_and_scored_tables():
+    s = crossover()
+    s.protocols["p"].data = _loader
+    s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")))
+    s.measure("a")
+    exp, _ = lower(s, Estimation("e", params=[]))
+    d = exp.replicates["M1_30"]["Data"]({"dose": "30"}, "unused")
+    assert list(d["pk"]["t"]) == [0.0, 1.0]           # passed through for the events
+    assert list(d["a.v"]["v"]) == [5.0, 7.0]           # NaN row dropped, column renamed
+
+
+def test_protocol_hooks_run_after_resolved_values_and_round_trip():
+    s = crossover()
+    s.protocols["p"].update_parameters = _hook
+    s.protocols["p"].update_opt_parameters = _opt_hook
+    s.assay("a", Measured("v", Obs("v"), DataSource("d.csv", "t", "v")))
+    s.measure("a")
+    s.param("KI", x0=0.3)
+    exp, _ = lower(s, Estimation("e"))
+    r = {}
+    exp.replicates["M1_30"]["Update_parameters"](r, {})
+    exp.replicates["M1_30"]["Update_opt_parameters"](r, {}, {"KI": 0.02})
+    assert r == {"hooked": 1.0, "KI": 0.02, "opt_hooked": 0.02}
+    d = to_dict(s)
+    assert d["protocols"]["p"]["update_opt_parameters"].endswith(":_opt_hook")
+    assert to_dict(from_dict(json.loads(json.dumps(d)))) == d
