@@ -44,6 +44,7 @@ class Obs:
     columns: list = None
     baseline_at: str = None
     scale: float = 100.0
+    tol: float = 1e-6               # baseline = last output time <= baseline_at + tol
 
     def __post_init__(self):
         if self.transform not in (None, "log10"):
@@ -63,8 +64,8 @@ class Obs:
         return cls(expr, name=name, transform="log10", floor=floor)
 
     @classmethod
-    def of_baseline(cls, columns, at, name, scale=100.0):
-        return cls(columns=list(columns), baseline_at=at, name=name, scale=scale)
+    def of_baseline(cls, columns, at, name, scale=100.0, tol=1e-6):
+        return cls(columns=list(columns), baseline_at=at, name=name, scale=scale, tol=tol)
 
     def engine_form(self, attrs=None):
         """What the Engine's observed_variable receives for one occasion.
@@ -76,7 +77,7 @@ class Obs:
         """
         if self.columns is not None:
             t0 = _eval_arith(self.baseline_at, attrs or {})
-            return BaselineObs(self.columns, t0, self.name, self.scale)
+            return BaselineObs(self.columns, t0, self.name, self.scale, self.tol)
         if self.transform == "log10":
             return f"np.log10(np.maximum({self.expr}, {self.floor!r}))"
         return self.expr
@@ -86,6 +87,8 @@ class Obs:
             d = {"columns": self.columns, "baseline_at": self.baseline_at, "name": self.name}
             if self.scale != 100.0:
                 d["scale"] = self.scale
+            if self.tol != 1e-6:
+                d["tol"] = self.tol
             return d
         d = {"expr": self.expr}
         if self.name != self.expr:
@@ -102,7 +105,7 @@ class Obs:
             return cls(d)
         if "columns" in d:
             return cls.of_baseline(d["columns"], d["baseline_at"], d["name"],
-                                   d.get("scale", 100.0))
+                                   d.get("scale", 100.0), d.get("tol", 1e-6))
         return cls(d["expr"], d.get("name"), d.get("transform"), d.get("floor", 1e-12))
 
 
@@ -113,10 +116,11 @@ class BaselineObs:
     workers. ``__name__`` is what the Engine keys sigma blocks and plots by.
     """
 
-    def __init__(self, columns, t0, name, scale=100.0):
+    def __init__(self, columns, t0, name, scale=100.0, tol=1e-6):
         self.columns = list(columns)
         self.t0 = t0
         self.scale = scale
+        self.tol = tol
         self.__name__ = name
 
     def __call__(self, result):
@@ -129,7 +133,7 @@ class BaselineObs:
             v = np.asarray(result[c], dtype=float)
             total = v if total is None else total + v
         t = np.asarray(result["time"], dtype=float)
-        pre = np.flatnonzero(t <= self.t0 + 1e-6)
+        pre = np.flatnonzero(t <= self.t0 + self.tol)
         if pre.size == 0:
             raise ValueError(f"No simulation output at or before t={self.t0}, so "
                              f"{self.__name__} has no baseline to normalize by.")
@@ -177,7 +181,9 @@ class DataSource:
     Either a CSV ``file`` (relative to the data folder; may use "{attr}"), or
     ``input``: the name of a table the occasion's protocol loader produced
     (Protocol.data), for data that need Python to prepare -- unit
-    conversion, vehicle correction, a shared time grid.
+    conversion, vehicle correction, a shared time grid. Both may use
+    "{attr}" placeholders, so each occasion can name its own table
+    (``input="{silk_data}"`` with a per-cohort ``silk_data`` covariate).
     """
     file: str = None
     time: str = None
@@ -203,11 +209,12 @@ class DataSource:
         import os
         import pandas as pd
         if self.input is not None:
-            if inputs is None or self.input not in inputs:
-                raise KeyError(f"protocol data has no table {self.input!r}")
-            df = inputs[self.input]
+            name = _fill(self.input, attrs)
+            if inputs is None or name not in inputs:
+                raise KeyError(f"protocol data has no table {name!r}")
+            df = inputs[name]
             if df is None:
-                raise KeyError(f"protocol data table {self.input!r} is empty for this occasion")
+                raise KeyError(f"protocol data table {name!r} is empty for this occasion")
         else:
             path = os.path.join(data_path, _fill(self.file, attrs))
             if _cache is not None and path in _cache:
@@ -328,6 +335,14 @@ class Measured:
     # Only score occasions whose attributes match this (e.g. {"has_A_data":
     # True}); the 1.x equivalent was an if-statement inside a loss_config.
     only: dict = field(default_factory=dict)
+    # Applied to the prediction AFTER it is interpolated onto the data times,
+    # to match data normalized the same way: "peak" divides by its own
+    # maximum over those times (relative tracer signal, arbitrary units).
+    normalize: str = None
+
+    def __post_init__(self):
+        if self.normalize not in (None, "peak"):
+            raise ValueError(f"Measured {self.name!r}: normalize must be None or 'peak'")
 
     def to_json(self):
         d = {"model": self.model.to_json(), "data": self.data.to_json()}
@@ -336,12 +351,15 @@ class Measured:
             d["noise"] = nj
         if self.only:
             d["only"] = dict(self.only)
+        if self.normalize:
+            d["normalize"] = self.normalize
         return d
 
     @classmethod
     def from_json(cls, name, d):
         return cls(name, Obs.from_json(d["model"]), DataSource.from_json(d["data"]),
-                   Noise.from_json(d.get("noise", {})), d.get("only", {}))
+                   Noise.from_json(d.get("noise", {})), d.get("only", {}),
+                   d.get("normalize"))
 
 
 @dataclass
@@ -381,6 +399,21 @@ def difference(parts):
     """numerator - denominator, on predictions already at the data times."""
     num, den = _pair(parts, "diff")
     return num - den
+
+
+def peak_normalize(parts):
+    """One prediction, already at the data times, divided by its own peak.
+
+    A prediction with no positive peak (no tracer at all) returns zeros, so
+    the objective stays finite and simply scores badly.
+    """
+    if len(parts) != 1:
+        raise ValueError(f"peak_normalize expects one prediction; got {len(parts)}")
+    y = np.asarray(parts[0], dtype=float)
+    peak = np.nanmax(y) if y.size else np.nan
+    if not np.isfinite(peak) or peak <= 0:
+        return np.zeros_like(y)
+    return y / peak
 
 
 CONTRAST_OPS = {"ratio_pct": ratio_pct, "diff": difference}

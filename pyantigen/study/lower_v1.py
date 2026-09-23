@@ -27,7 +27,7 @@ Lowering rules
 """
 from dataclasses import dataclass, field
 
-from .assay import CONTRAST_OPS
+from .assay import CONTRAST_OPS, peak_normalize
 from .design import _matches
 from .params import by_name, resolve
 from .refs import from_ref
@@ -242,6 +242,10 @@ def lower(study, est):
                 for m in assay.observables:
                     if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
                         continue
+                    if m.normalize:
+                        raise ValueError(
+                            f"assay {meas.assay!r}/{m.name}: normalize={m.normalize!r} is not "
+                            "supported on a contrast; normalize the contrast's result instead")
                     pair = f"{num.id}/{den.id}"
                     key = _measured_key(meas.assay, m, pair)
                     loader = study.protocols[num.protocol].hooks()[0]
@@ -265,8 +269,15 @@ def lower(study, est):
                         continue
                     key = _measured_key(meas.assay, m)
                     data_needs[occ.id].append((key, attrs, m.data, m.name, None))
-                    e = {"simulation": occ.id,
-                         "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
+                    if m.normalize == "peak":
+                        # The Engine's one hook that sees predictions already
+                        # at the data times is a composite's aggregation.
+                        e = {"type": "composite", "simulations": [occ.id],
+                             "data_simulation": occ.id, "aggregation": peak_normalize,
+                             "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
+                    else:
+                        e = {"simulation": occ.id,
+                             "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
                     blk = _sigma_block(study, meas.assay, m, occ)
                     if blk:
                         e["sigma_block"] = blk

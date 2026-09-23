@@ -374,3 +374,40 @@ def test_remark_ids_never_end_in_a_hyphen(tmp_path):
     rm = Remarks(str(tmp_path / "remarks.json"))
     rid = rm.add("BACEI_KI_MBI5 refits to 0.181 uM on the current setup", "<p>x</p>")
     assert not rid.endswith("-") and len(rid) <= 11 + 48
+
+
+def test_templated_input_names_pick_each_occasions_table():
+    s = crossover()
+    s.protocols["p"].data = _loader
+    for sid in ("M1", "M2", "M3"):
+        s.subjects[sid].covariates["table"] = "prepared"
+    s.assay("a", Measured("v", Obs("v"), DataSource(input="{table}", time="t", value="v")))
+    s.measure("a")
+    exp, _ = lower(s, Estimation("e", params=[]))
+    rep = exp.replicates["M2_30"]
+    assert list(rep["Data"](rep, "unused")["a.v"]["v"]) == [5.0, 7.0]
+
+
+def test_peak_normalized_measurement_lowers_to_a_one_simulation_composite():
+    from pyantigen.study.assay import peak_normalize
+    s = crossover()
+    s.assay("gad", Measured("CM", Obs("[G_CM]"), DataSource("d.csv", "t", "v"), normalize="peak"))
+    s.measure("gad", on={"subject": "M1", "dose": "0"})
+    _, spec = lower(s, Estimation("e", params=[]))
+    (e,) = spec.groups["gad"]["loss_elements"]
+    assert e["simulations"] == ["M1_0"] and e["aggregation"] is peak_normalize
+    assert list(peak_normalize([[1.0, 4.0, 2.0]])) == [0.25, 1.0, 0.5]
+    assert list(peak_normalize([[0.0, 0.0]])) == [0.0, 0.0]
+    d = to_dict(s)
+    assert to_dict(from_dict(json.loads(json.dumps(d)))) == d
+
+
+def test_baseline_tolerance_is_part_of_the_observable():
+    import numpy as np
+    from pyantigen.study.assay import Obs
+    o = Obs.of_baseline(["[A]"], "t0", "A0", tol=0.0)
+    res = _Result({"time": np.array([1.0, 2.0 + 5e-7]), "[A]": np.array([2.0, 4.0])})
+    assert list(o.engine_form({"t0": 2.0})(res)) == [100.0, 200.0]      # 2+5e-7 is AFTER t0
+    loose = Obs.of_baseline(["[A]"], "t0", "A1")
+    assert list(loose.engine_form({"t0": 2.0})(res)) == [50.0, 100.0]   # within 1e-6
+    assert Obs.from_json(o.to_json()).tol == 0.0
