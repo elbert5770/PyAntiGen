@@ -1,0 +1,50 @@
+{
+ "pyantigen_design": 1,
+ "name": "example",
+ "factors": {
+  "status": {
+   "ADneg": {"amyloid_positive": false, "params": {"k_A_to_B": 0.1}},
+   "ADpos": {"amyloid_positive": true, "params": {"k_A_to_B": 0.2}}
+  },
+  "treatment": {"Early": {"dose": 10, "delay": 5}, "Late": {"dose": 5, "delay": 10}}
+ },
+ "subjects": {
+  "ADneg": {"kind": "cohort", "levels": {"status": "ADneg"}},
+  "ADpos": {"kind": "cohort", "levels": {"status": "ADpos"}}
+ },
+ "protocols": {
+  "dose_at_delay": {
+   "events": "Modules.Events:Example_event",
+   "solver": "Modules.Solver_settings:solver_settings_Example",
+   "observed": "Modules.Observed_species:all_species"
+  }
+ },
+ "occasions": [
+  {
+   "cross": {
+    "subjects": ["ADneg", "ADpos"],
+    "protocol": "dose_at_delay",
+    "factors": {"treatment": "*"}
+   }
+  }
+ ],
+ "assays": {
+  "B": {
+   "B": {
+    "model": {"expr": "predicted_B"},
+    "data": {
+     "file": "{status}.csv",
+     "time": "time",
+     "value": ["B1", "B2", "B3"],
+     "where": {"Treatment": "{treatment}"}
+    }
+   }
+  }
+ },
+ "measurements": [{"assay": "B"}],
+ "params": {
+  "k_A_to_B": {"x0": 0.5, "bounds": [0.01, 10.0]},
+  "SF": {"x0": 2.0, "bounds": [0.01, 10.0]},
+  "V_Comp1": {"x0": 0.5, "bounds": [0.01, 10.0]}
+ }
+}

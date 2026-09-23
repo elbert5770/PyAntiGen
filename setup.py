@@ -12,6 +12,7 @@ setup(
         'pyantigen': [
             'template/Example/*.py',
             'template/Example/Modules/*.py',
+            'template/Example/studies/*.py',
             'template/data/*.csv',
             'template/data/*.py',
             'template/Example/*.md',
