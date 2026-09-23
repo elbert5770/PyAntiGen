@@ -368,3 +368,9 @@ def test_both_sides_of_a_contrast_pair_hold_the_numerators_rows():
     # numerator's own loader call
     assert list(d["a.v|M1_30/M1_0"]["v"]) == [5.0, 7.0]
     assert set(d) >= {"a.v|M1_30/M1_0", "a.v|M1_125/M1_0"}
+
+
+def test_remark_ids_never_end_in_a_hyphen(tmp_path):
+    rm = Remarks(str(tmp_path / "remarks.json"))
+    rid = rm.add("BACEI_KI_MBI5 refits to 0.181 uM on the current setup", "<p>x</p>")
+    assert not rid.endswith("-") and len(rid) <= 11 + 48

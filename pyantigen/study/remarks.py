@@ -34,7 +34,7 @@ FORMAT = 1
 
 def _slug(text):
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s[:48] or "remark"
+    return s[:48].rstrip("-") or "remark"
 
 
 class Remarks:
