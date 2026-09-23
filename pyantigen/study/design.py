@@ -189,8 +189,9 @@ class Study:
         """Add one occasion. Returns it."""
         occ = self._make_occasion(subject, protocol, period, id, levels)
         rec = [subject, protocol, dict(levels)]
-        if period is not None or id is not None:
-            rec.append({"period": period, "id": id})
+        extra = {k: v for k, v in (("period", period), ("id", id)) if v is not None}
+        if extra:
+            rec.append(extra)
         self._occasion_records.append(rec)
         return occ
 
