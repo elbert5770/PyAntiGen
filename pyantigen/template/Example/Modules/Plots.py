@@ -50,7 +50,7 @@ def plot_results(paths, results_dict):
     plot_name = os.path.join(plot_path, MODEL_NAME + (f"_{tag}" if tag else "") + ".png")
     plt.savefig(plot_name, bbox_inches="tight")
     print(f"Plot saved to: {plot_name}")
-    plt.show()
+    plt.close(fig)
 
 
 
@@ -86,4 +86,4 @@ def plot_flipflop(paths, results_dict):
     plot_name = os.path.join(plot_path, MODEL_NAME + (f"_{tag}" if tag else "") + "_flipflop.png")
     plt.savefig(plot_name, bbox_inches="tight")
     print(f"Plot saved to: {plot_name}")
-    plt.show()
+    plt.close(fig)
