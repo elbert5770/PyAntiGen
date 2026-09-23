@@ -197,6 +197,10 @@ def _init_worker(spec_blob):
         replicate["Update_parameters"](
             OptRoadRunnerProxy(r, spec.param_names), replicate
         )
+        # Every run in this worker starts from here; see
+        # Optimize.restore_parameter_baseline.
+        from pyantigen.engine.Optimize import remember_parameter_baseline
+        remember_parameter_baseline(r)
         # The parent's attachment closes over the parent's RoadRunner and could
         # not be shipped here, so it was stripped from the spec. A worker must
         # attach against the model it will integrate anyway -- reusing the

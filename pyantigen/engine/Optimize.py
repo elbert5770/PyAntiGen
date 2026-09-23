@@ -301,6 +301,60 @@ def _resolve_obs_df(df_dict, obs_cfg):
     )
 
 
+# ---------------------------------------------------------------------------
+# Global parameters an event assigned survive r.reset()
+# ---------------------------------------------------------------------------
+#
+# RoadRunner's reset() restores time, floating species and rate-rule values,
+# but NOT a global parameter that an event assigned during the previous run.
+# An arm whose events switch something on and leave it on -- a labelling
+# fraction, a washout rate, a catheter drain -- therefore starts every
+# simulation after the first from birth with that switch already thrown, and
+# the objective stops being a function of the parameters alone: the first
+# evaluation differs from every later one at the same point.
+#
+# Measured on a 48 h drug arm whose events set a labelling fraction, a drain
+# and a washout rate: at the SAME parameter vector the first evaluation
+# scored 216.798 and every later one 221.075. Nelder-Mead,
+# believing x0 was 4.3 better than anything nearby, shrank onto it for 200
+# iterations and reported x0 unchanged, while a direct scan showed the
+# objective falling steeply away from it.
+#
+# The fix records each model's global parameter values once, when the Engine
+# builds it, and run_all puts back any that differ after every reset(). Only
+# parameters the run changed are touched, and assignment-rule parameters,
+# which cannot be set, are skipped. A model built elsewhere is recorded the
+# first time run_all sees it.
+
+def remember_parameter_baseline(r):
+    """Record r's settable global parameter values as its per-run start."""
+    ids = list(r.getGlobalParameterIds())
+    rules = set(r.getAssignmentRuleIds())
+    idx = np.array([i for i, p in enumerate(ids) if p not in rules], dtype=int)
+    vals = np.asarray(r.getGlobalParameterValues(), dtype=float)
+    r._pyantigen_param_baseline = (ids, idx, vals[idx].copy())
+
+
+def restore_parameter_baseline(r):
+    """Put back every settable global parameter that differs from the baseline.
+
+    Returns the names restored (empty when nothing had changed).
+    """
+    base = getattr(r, "_pyantigen_param_baseline", None)
+    if base is None:
+        remember_parameter_baseline(r)
+        return []
+    ids, idx, vals = base
+    cur = np.asarray(r.getGlobalParameterValues(), dtype=float)[idx]
+    changed = np.flatnonzero(~((cur == vals) | (np.isnan(cur) & np.isnan(vals))))
+    names = []
+    for j in changed:
+        name = ids[idx[j]]
+        r[name] = float(vals[j])
+        names.append(name)
+    return names
+
+
 def run_all(r, exp_num, experiment, df_dict, set_parameters=None, parameters=None,
             preequil_cache=None):
     """
@@ -318,6 +372,9 @@ def run_all(r, exp_num, experiment, df_dict, set_parameters=None, parameters=Non
     Returns a results dict keyed by treatment label.
     """
     r.reset()
+    # reset() leaves event-assigned global parameters at their end-of-run
+    # values; see restore_parameter_baseline.
+    restore_parameter_baseline(r)
 
     # Re-apply treatment-specific parameters which were wiped out by r.reset()
     update_params = experiment.get("Update_parameters")
@@ -5575,6 +5632,7 @@ def run_optimization(
         r          = TelluriumGen(model_text + "\n" + events_str, paths)
         r_proxy    = OptRoadRunnerProxy(r, param_names)
         experiment["Update_parameters"](r_proxy, experiment)
+        remember_parameter_baseline(r)
         attach_event_times(experiment, r, verbose=True)
 
         models[exp_num] = {"r_ic": r_ic, "r": r, "df_dict": df_dict}
@@ -6015,6 +6073,8 @@ def run_optimization_from_groups(
             r = TelluriumGen(model_text + "\n" + events_str, paths)
             r_proxy = OptRoadRunnerProxy(r, param_names)
             replicate["Update_parameters"](r_proxy, replicate)
+            # Before anything integrates it: every later run starts from here.
+            remember_parameter_baseline(r)
 
             # Where this arm's discontinuities are, read off the compiled model.
             # Attached rather than computed, because a trigger built on a fitted
