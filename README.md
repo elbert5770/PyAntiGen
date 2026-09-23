@@ -2,6 +2,13 @@
 
 PyAntiGen is a declarative, object-oriented framework for generating compartmental biological models in Antimony format. It is designed to abstract away the repetitive boilerplate of defining reactions and compartments manually, allowing researchers to build complex, scalable models using clean Python syntax.
 
+> **v2 branch — breaking changes in progress.** The package is now `pyantigen`
+> (was `framework`): model generation is `pyantigen.generate`, and the Engine
+> is `pyantigen.engine`, imported from the installed package instead of being
+> copied into every project. Antimony modules must import
+> `pyantigen.generate.module_base` / `pyantigen.generate.reaction_creation`.
+> See `docs/V2_DESIGN.md` for the Study-centred design this branch is building.
+
 ## Features
 
 - **Object-Oriented Modules:** Encapsulate tissues, flows, synthesis, and excretion into reusable Python classes.
@@ -39,14 +46,14 @@ MyNewModel/
 ├── .agents/
 │   └── skills/          (agent skills, e.g. module generation, ODE conversion)
 ├── Projects/
-│   ├── Example/         (full example: generate, run + Modules/, Engine/)
+│   ├── Example/         (full example: generate, run + Modules/)
 │   │   ├── Model_generate.py
 │   │   ├── Model_run.py
-│   │   └── Modules/     (Data, AntimonyGen, Plots, Simulate, Optimize, Experiment, Events)
+│   │   └── Modules/     (Data, Events, Experiment, Loss_config, Optimizer_settings, Plots, ...)
 │   └── MyNewModel/      (same structure, Modules/ pre-populated from Example)
 │       ├── Model_generate.py
 │       ├── Model_run.py
-│       └── Modules/     (Data, AntimonyGen, Plots, Simulate, Optimize, Experiment, Events)
+│       └── Modules/     (Data, Events, Experiment, Loss_config, Optimizer_settings, Plots, ...)
 ├── antimony_modules/
 │   └── __init__.py      (plus Basic/ for the example)
 ├── data/                (Example experiment CSVs copied for the example)

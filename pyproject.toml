@@ -35,10 +35,10 @@ dependencies = [
 Homepage = "https://github.com/you/PyAntiGen"
 
 [project.scripts]
-pyantigen-create = "framework.cli:create_project"
+pyantigen-create = "pyantigen.cli:create_project"
 
 [tool.setuptools.packages.find]
-include = ["framework*"]
+include = ["pyantigen*"]
 
 # Version is derived from the latest git tag (v1.0.10 -> 1.0.10; the leading "v"
 # is stripped automatically). Releasing is therefore: commit, tag, build.
@@ -53,5 +53,5 @@ include = ["framework*"]
 #
 # CI must fetch full history and tags; a default shallow clone sees no tags.
 [tool.setuptools_scm]
-version_file = "framework/_version.py"
+version_file = "pyantigen/_version.py"
 fallback_version = "0.0.0+unknown"

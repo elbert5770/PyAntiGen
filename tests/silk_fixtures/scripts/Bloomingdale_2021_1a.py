@@ -9,7 +9,7 @@ current_dir = os.path.dirname(__file__)
 project_root = os.path.abspath(os.path.join(current_dir, '..'))
 sys.path.insert(0, project_root)
 
-from framework.pyantigen import PyAntiGen
+from pyantigen.generate.pyantigen import PyAntiGen
 from modules.Tissue_Flows.cns_flows_bloomingdale_1a import CNS_FlowsModule
 from modules.Tissue_Flows.Tissue_flows_bloomingdale_1a import Tissue_FlowsModule
 from modules.Tissue_Flows.FCRn_flows_bloomingdale_1a import FcRn_FlowsModule

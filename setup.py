@@ -7,12 +7,16 @@ setup(
     # error. This file now only carries package_data, which pyproject does not.
     description='A declarative framework for building compartmental Antimony models',
     author='Open Source Contributor',
-    packages=find_packages(include=['framework*']),
+    packages=find_packages(include=['pyantigen*']),
     package_data={
-        'framework': [
+        'pyantigen': [
             'template/Example/*.py',
             'template/Example/Modules/*.py',
             'template/data/*.csv',
+            'template/data/*.py',
+            'template/Example/*.md',
+            'engine/*.md',
+            '.agents/skills/*/*.md',
         ],
     },
     install_requires=[
@@ -25,7 +29,7 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'pyantigen-create=framework.cli:create_project',
+            'pyantigen-create=pyantigen.cli:create_project',
         ],
     },
 )

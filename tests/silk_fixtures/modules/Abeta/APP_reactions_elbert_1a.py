@@ -15,7 +15,7 @@ SILK Support:
 - The labeled designation can be modified by the Modifications list
 """
 
-from framework.module_base import PyAntiGenModule
+from pyantigen.generate.module_base import PyAntiGenModule
 
 class APP_ReactionsModule(PyAntiGenModule):
     """

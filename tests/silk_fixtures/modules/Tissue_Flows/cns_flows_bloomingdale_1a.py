@@ -4,8 +4,8 @@ CNS Flows Module 1f
 """
 
 # Import the reaction_creation function from the reaction_creation module
-from framework.reaction_creation import reaction_creation
-from framework.module_base import PyAntiGenModule
+from pyantigen.generate.reaction_creation import reaction_creation
+from pyantigen.generate.module_base import PyAntiGenModule
 
 class CNS_FlowsModule(PyAntiGenModule):
     """
