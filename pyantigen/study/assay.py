@@ -359,16 +359,27 @@ class Assay:
 
 # --- contrasts -------------------------------------------------------------
 
+def _pair(parts, op):
+    # The Engine builds this list from the pair's simulations, skipping any
+    # that did not run or had no data table -- which would otherwise surface
+    # as a one-armed "contrast" that looks like a plausible curve.
+    if len(parts) != 2:
+        raise ValueError(
+            f"{op} needs exactly two predictions (numerator, denominator); got "
+            f"{len(parts)}. One simulation of the pair failed or had no data table.")
+    return (np.asarray(p, dtype=float) for p in parts)
+
+
 def ratio_pct(parts):
     """100 * numerator / denominator, on predictions already at the data times."""
-    num, den = (np.asarray(p, dtype=float) for p in parts)
+    num, den = _pair(parts, "ratio_pct")
     with np.errstate(divide="ignore", invalid="ignore"):
         return 100.0 * num / den
 
 
 def difference(parts):
     """numerator - denominator, on predictions already at the data times."""
-    num, den = (np.asarray(p, dtype=float) for p in parts)
+    num, den = _pair(parts, "diff")
     return num - den
 
 

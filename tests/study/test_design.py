@@ -326,7 +326,8 @@ def test_protocol_inputs_reach_events_and_scored_tables():
     s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")))
     s.measure("a")
     exp, _ = lower(s, Estimation("e", params=[]))
-    d = exp.replicates["M1_30"]["Data"]({"dose": "30"}, "unused")
+    rep = exp.replicates["M1_30"]
+    d = rep["Data"](rep, "unused")
     assert list(d["pk"]["t"]) == [0.0, 1.0]           # passed through for the events
     assert list(d["a.v"]["v"]) == [5.0, 7.0]           # NaN row dropped, column renamed
 
@@ -346,3 +347,24 @@ def test_protocol_hooks_run_after_resolved_values_and_round_trip():
     d = to_dict(s)
     assert d["protocols"]["p"]["update_opt_parameters"].endswith(":_opt_hook")
     assert to_dict(from_dict(json.loads(json.dumps(d)))) == d
+
+
+def test_both_sides_of_a_contrast_pair_hold_the_numerators_rows():
+    """The Engine interpolates each composite simulation at its OWN table's
+    times and silently drops one without the table; so the denominator must
+    carry the numerator's rows, under a key unique to the pair."""
+    s = crossover()
+    s.protocols["p"].data = _loader
+    s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")))
+    s.contrast("c", "ratio_pct", {"dose": ["30", "125"]}, {"dose": "0"})
+    s.measure("a", contrast="c")
+    exp, spec = lower(s, Estimation("e", params=[]))
+    keys = [e["loss_config"]["observables"][0]["data_dict_key"]
+            for e in spec.groups["a:c"]["loss_elements"]]
+    assert keys[:2] == ["a.v|M1_30/M1_0", "a.v|M1_125/M1_0"]
+    veh = exp.replicates["M1_0"]
+    d = veh["Data"](veh, "unused")
+    # the vehicle holds both numerators' tables, each read through the
+    # numerator's own loader call
+    assert list(d["a.v|M1_30/M1_0"]["v"]) == [5.0, 7.0]
+    assert set(d) >= {"a.v|M1_30/M1_0", "a.v|M1_125/M1_0"}

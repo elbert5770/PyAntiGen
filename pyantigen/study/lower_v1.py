@@ -130,10 +130,14 @@ class LoadData:
 
     protocol_data, if given, is called first with the replicate; its tables
     are passed through unchanged (the event builder reads them) and are what
-    DataSource(input=...) selects from. sources is
-    [(key, attrs, DataSource, column_name)]; each is read with the occasion's
-    (or, for a contrast, the numerator's) attributes and stored under its
-    key with its value column renamed to column_name.
+    DataSource(input=...) selects from.
+
+    sources is [(key, attrs, DataSource, column_name, loader)]. Each is read
+    with ``attrs`` -- this occasion's, or, for either side of a contrast
+    pair, the NUMERATOR's -- and stored under ``key`` with its value column
+    renamed. ``loader`` is the protocol loader of the occasion ``attrs``
+    describe, needed when that is not this occasion (a contrast's
+    denominator reading its numerator's table).
     """
 
     def __init__(self, sources, protocol_data=None):
@@ -143,24 +147,36 @@ class LoadData:
     def __call__(self, replicate, data_path):
         inputs = (self.protocol_data(replicate, data_path)
                   if self.protocol_data is not None else {})
-        cache, out = {}, dict(inputs)
-        for key, attrs, src, col in self.sources:
-            df = src.rows_for(attrs, data_path, _cache=cache, inputs=inputs)
+        own = replicate.get("occasion")
+        cache, out, other_inputs = {}, dict(inputs), {}
+        for key, attrs, src, col, loader in self.sources:
+            src_inputs = inputs
+            if src.input is not None and attrs.get("occasion") != own:
+                occ = attrs.get("occasion")
+                if occ not in other_inputs:
+                    other_inputs[occ] = loader(dict(attrs, Label=occ), data_path)
+                src_inputs = other_inputs[occ]
+            df = src.rows_for(attrs, data_path, _cache=cache, inputs=src_inputs)
             out[key] = df.rename(columns={"value": col})
         return out
 
 
 # --- lowering ---------------------------------------------------------------
 
-def _measured_key(assay, measured):
-    return f"{assay}.{measured.name}"
+def _measured_key(assay, measured, pair=None):
+    """Data-table key. A contrast pair gets its own key, because the Engine
+    evaluates EACH simulation of a composite at the times of that
+    simulation's own copy of the table: both sides must hold the numerator's
+    rows, and one denominator can serve several numerators."""
+    key = f"{assay}.{measured.name}"
+    return key if pair is None else f"{key}|{pair}"
 
 
-def _obs_cfg(assay_name, m, attrs):
+def _obs_cfg(assay_name, m, attrs, pair=None):
     cfg = {"observed_variable": m.model.engine_form(attrs),
            "data_column": m.name,
            "time_column": "time",
-           "data_dict_key": _measured_key(assay_name, m)}
+           "data_dict_key": _measured_key(assay_name, m, pair)}
     cfg.update(m.noise.engine_keys())
     return cfg
 
@@ -226,11 +242,14 @@ def lower(study, est):
                 for m in assay.observables:
                     if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
                         continue
-                    key = _measured_key(meas.assay, m)
-                    data_needs[num.id].append((key, attrs, m.data, m.name))
+                    pair = f"{num.id}/{den.id}"
+                    key = _measured_key(meas.assay, m, pair)
+                    loader = study.protocols[num.protocol].hooks()[0]
+                    data_needs[num.id].append((key, attrs, m.data, m.name, loader))
+                    data_needs[den.id].append((key, attrs, m.data, m.name, loader))
                     e = {"type": "composite", "simulations": [num.id, den.id],
                          "data_simulation": num.id, "aggregation": op,
-                         "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
+                         "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs, pair)]}}
                     blk = _sigma_block(study, meas.assay, m, num)
                     if blk:
                         e["sigma_block"] = blk
@@ -245,7 +264,7 @@ def lower(study, est):
                     if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
                         continue
                     key = _measured_key(meas.assay, m)
-                    data_needs[occ.id].append((key, attrs, m.data, m.name))
+                    data_needs[occ.id].append((key, attrs, m.data, m.name, None))
                     e = {"simulation": occ.id,
                          "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
                     blk = _sigma_block(study, meas.assay, m, occ)
@@ -297,8 +316,8 @@ def lower(study, est):
 
 def _dedupe(needs):
     seen, out = set(), []
-    for key, attrs, src, col in needs:
-        if key not in seen:
-            seen.add(key)
-            out.append((key, attrs, src, col))
+    for need in needs:
+        if need[0] not in seen:
+            seen.add(need[0])
+            out.append(need)
     return out
