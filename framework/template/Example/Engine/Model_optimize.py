@@ -478,7 +478,9 @@ def _profile_report_text(opt, param_names, params_estimated, profile_ci,
     se_raw = stats.get("wald_se")
     se_arr = (np.atleast_1d(se_raw) if se_raw is not None
               else np.full(len(param_names), np.nan))
-    wald_ci = stats.get("wald_ci") or [(np.nan, np.nan)] * len(param_names)
+    wald_ci_raw = stats.get("wald_ci")
+    wald_ci = (wald_ci_raw if wald_ci_raw is not None
+               else [(np.nan, np.nan)] * len(param_names))
 
     _reach_word = {"crossed": "crossed the threshold",
                    "bound": "stopped at the parameter bound",
@@ -1213,6 +1215,14 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
         )
 
         groups_tag = "_".join(opt.get("groups", ["ALL"]))
+        # run_label (e.g. "Example4", set by the CLI selection in Model_run.py)
+        # distinguishes runs that share the same optimization groups -- e.g.
+        # Example4 and Example5 both fit group "Flipflop" -- so their CSVs and
+        # figures no longer land on the same filename, told apart only by an
+        # opaque timestamp.
+        run_label = settings.get("run_label")
+        if run_label:
+            groups_tag = f"{run_label}_{groups_tag}"
 
         if settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, optimization_settings.param_names, paths["plot_path"],
@@ -1236,6 +1246,10 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                  model_name=MODEL_NAME, experiment_id=groups_tag, method=optimization_settings.method)
 
         if opt.get("results_dict") is not None and plot_function:
+            # plot_tag is what Modules/Plots.py reads to tag the fit-curve
+            # figure filename; without it, every run overwrote the same
+            # untagged {MODEL_NAME}.png.
+            paths["plot_tag"] = groups_tag
             plot_function(paths, opt["results_dict"])
         _shutdown_evaluator(opt)
         return opt

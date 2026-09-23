@@ -15,9 +15,8 @@ from framework.TelluriumGen import TelluriumGen
 from Engine.Event_times import attach_event_times
 from Engine.Simulate import simulate
 from Engine.Profile_checkpoint import record_is_better as _profile_record_is_better
-from Modules.Loss_config import no_optimization
-from Modules.utils.noise_floor import get_noise_floor
-from Modules.utils.noise_floor import clear_cache as _clear_noise_floor_cache
+from Engine.Noise_floor import get_noise_floor
+from Engine.Noise_floor import clear_cache as _clear_noise_floor_cache
 
 
 # Persistent state for the live optimization-progress overlay plot. The figure
@@ -446,8 +445,8 @@ def _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=None):
     see ``concentrated_nll`` -- it only bounds it above. The value is frozen
     the first time it is computed for a given observable and safe to look up
     on every objective evaluation thereafter; the lookup is cached in
-    ``Modules.utils.noise_floor`` so the LOOCV span search itself only ever
-    runs once per observable.
+    ``Engine.Noise_floor`` so the LOOCV span search itself only ever runs
+    once per observable.
 
     Must be called with ``t_data``/``y_data`` BEFORE any model-dependent mask
     (``valid = np.isfinite(y_pred) & ...``) is applied to them -- filtering by
@@ -461,7 +460,7 @@ def _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=None):
     -- consulted only on the first (cache-miss) call for this observable, to
     calibrate the smallest LOESS window worth trusting against the model's
     own shape rather than the data's potentially-correlated noise; see that
-    function and the ``Modules.utils.noise_floor`` module docstring for why
+    function and the ``Engine.Noise_floor`` module docstring for why
     this one-time use doesn't reintroduce model-dependence into the frozen,
     per-evaluation value everything downstream actually reads.
 
@@ -662,9 +661,23 @@ def concentrated_nll(blocks, include_constant=False):
             continue
         if ks is not None:
             ks = max(float(ks), 1e-300)
-            total += sse / (2.0 * ks * ks)
+            # n*log(ks) is unconditional, matching the floor branch below --
+            # a genuinely declared sigma never depends on the fitted
+            # parameters, so this is a true per-block constant that moves no
+            # minimizer or gradient in the live fit (safe to always include).
+            # A frozen-floor block also arrives in this branch (see
+            # Engine.Optimize._freeze_floor) with a sigma pinned from the
+            # fit, not literally declared, so its n*log(sigma) is exactly the
+            # term the floor branch would have kept had it not been
+            # converted here -- dropping it (as this branch used to, behind
+            # include_constant) silently detached the profile's frozen NLL
+            # from the unfrozen one it is supposed to reproduce exactly at
+            # the optimum, by sum(n*log(sigma_used)) over every floored
+            # block -- thousands of nats on a spec with many tightly-floored
+            # SILK blocks.
+            total += n * np.log(ks) + sse / (2.0 * ks * ks)
             if include_constant:
-                total += n * np.log(ks) + 0.5 * n * np.log(2.0 * np.pi)
+                total += 0.5 * n * np.log(2.0 * np.pi)
         elif floor is not None:
             sigma_hat = np.sqrt(max(sse / n, _SIGMA2_FLOOR))
             sigma_used = min(sigma_hat, max(float(floor), 1e-300))
@@ -2111,7 +2124,17 @@ def _resolve_profile_optimizer(method, optimizer_kwargs):
     optimizer_kwargs.
     """
     kw = optimizer_kwargs or {}
-    profile_method = kw.get("profile_method") or method or "Nelder-Mead"
+    explicit = kw.get("profile_method")
+    profile_method = explicit or method or "Nelder-Mead"
+    # A global search is how the FIT finds its basin; it is not what a profile
+    # point's nuisance minimization wants. Every point is a local minimization
+    # started at a known good place, and running differential evolution on each
+    # of them would multiply the cost by a population and search a box the
+    # profile has no use for. Inheriting the fit's method is right for every
+    # local method and wrong for these, so they fall back to Nelder-Mead unless a
+    # spec asks otherwise in profile_method.
+    if not explicit and profile_method.lower() in _GLOBAL_METHODS:
+        profile_method = "Nelder-Mead"
     profile_kwargs = kw.get("profile_optimizer_kwargs") or {}
     return profile_method, profile_kwargs
 
@@ -2711,6 +2734,23 @@ def nuisance_option_budget(method, n_nuisance, optimizer_kwargs=None):
     return {k: int(options[k]) for k in ("maxiter", "maxfev") if k in options}
 
 
+def nuisance_options(method, n_nuisance, optimizer_kwargs=None):
+    """``(options, other_kwargs)`` exactly as :func:`_minimize_nuisance` merges them.
+
+    The engine's own defaults for the method, overridden by the caller's
+    ``options``, with the engine-only keys removed from what is left. Split out
+    so the resumable Nelder-Mead path in the profile worker reads the same
+    settings the scipy path does; the two must agree or a spec would mean
+    different things depending on which one ran.
+    """
+    kwargs = dict(optimizer_kwargs or {})
+    options = dict(_profile_nuisance_defaults(method, n_nuisance))
+    options.update(kwargs.pop("options", {}) or {})
+    for key in _ENGINE_ONLY_OPTIMIZER_KEYS:
+        kwargs.pop(key, None)
+    return options, kwargs
+
+
 def _minimize_nuisance(fun, x0, args, method, bounds, optimizer_kwargs=None,
                        extra_options=None):
     """Minimize over the nuisance parameters with the caller's chosen method.
@@ -2720,8 +2760,11 @@ def _minimize_nuisance(fun, x0, args, method, bounds, optimizer_kwargs=None,
     profile run degrades rather than dying.
 
     *extra_options* is merged last and is how a resumed point carries its
-    optimizer state back in: the remaining slice of its iteration budget, and
-    for Nelder-Mead the simplex it had reached when the clock stopped it.
+    optimizer state back in: the remaining part of its iteration budget, and
+    for Nelder-Mead the simplex it had reached when the clock stopped it. (The
+    profile worker now runs Nelder-Mead through Engine.Nelder_mead, which
+    resumes from its own state; this remains the path for other methods and
+    for callers that resume from a stored record.)
     """
     import scipy.optimize as opt
 
@@ -2748,6 +2791,346 @@ def _minimize_nuisance(fun, x0, args, method, bounds, optimizer_kwargs=None,
             fun, x0, args=args, method="Nelder-Mead", bounds=bounds,
             options=fallback,
         )
+
+
+def _restore_calibration(objective, resume, scales):
+    """Score against the same noise floors the run that wrote *resume* used.
+
+    The objective is not a pure function of the parameters across processes:
+    Engine.Noise_floor calibrates each floored observable on the first call it
+    sees and freezes it. A resumed fit whose first evaluation is the best point
+    on record would calibrate there, and every value it computed from then on
+    would differ from the saved simplex or population energies it is compared
+    against -- measured on aggregation_silk, the same vector scored 2,319 in the
+    first launch and -59.4 in the resumed one. The fit cache therefore records the
+    point the floors were first calibrated at; evaluating it once, on a cleared
+    cache and before anything else, reproduces the calibration exactly (the
+    model is deterministic). A record without one (older, or a spec with no
+    floors) leaves the behaviour as it was.
+    """
+    cal = None if resume is None else resume.get("cal_x_lin")
+    if cal is None:
+        return False
+    _clear_noise_floor_cache()
+    print("[opt] restoring the noise-floor calibration of the run that wrote "
+          "this checkpoint (one evaluation at its first point), so saved "
+          "values and new ones are scores of the same function.", flush=True)
+    objective(_to_opt_space(np.asarray(cal, dtype=float), scales))
+    return True
+
+
+def _run_fit_nelder_mead(objective, x_start, bounds, opt_kw, scales, fit_cache,
+                         resume, budget):
+    """The main fit as one resumable Nelder-Mead run.
+
+    The fit that anchors the whole run is a serial optimization that can take
+    hours, and on a preemptible partition the process is stopped without notice.
+    :mod:`Engine.Nelder_mead` is scipy's optimizer with its state in a dict that
+    can be written down at any evaluation, so this simply runs it and lets the
+    fit cache keep that dict current: a kill costs the evaluation in flight, a
+    restart repeats nothing, and the answer is the one an uninterrupted scipy
+    run would have given (``tests/test_nelder_mead.py`` checks that call for
+    call).
+
+    Nothing here predicts anything. The clock is consulted in one place, as a
+    plain "stop now" checked between evaluations, and only when the run has a
+    stop time at all (``--wall-time``, or a partition that runs to its limit).
+    Stopping saves the state and raises
+    :class:`~Engine.Deadline.DeadlineReached`; being killed instead is the same
+    thing minus a few seconds.
+
+    *resume* is what ``FitCache.load_partial`` returned, or None. Its
+    ``nm_state`` is the exact resume; failing that a saved simplex restarts the
+    search from that shape (n+1 evaluations to re-measure it, the price of a
+    record written before states were saved); failing that the fit starts from
+    *x_start*, which the caller has already set to the best point on record.
+
+    Raises DeadlineReached when the stop time arrives before the fit converges.
+    There is nothing for the caller to hand the rest of the pipeline in that
+    case -- no finished optimum to simulate, profile or plot from -- so it is
+    expected to stop the run rather than press on.
+    """
+    from Engine.Deadline import DeadlineReached
+    from Engine.Fit_cache import NM_STATE_SAVE_INTERVAL_S
+    from Engine.Nelder_mead import (
+        STATUS_STOPPED, best_of, bounds_arrays, minimize_nelder_mead,
+        new_state, state_to_json,
+    )
+
+    n = len(np.atleast_1d(x_start))
+    _restore_calibration(objective, resume, scales)
+    cal_lin = (resume.get("cal_x_lin") if resume is not None else None)
+    if cal_lin is None:
+        cal_lin = _to_linear(np.asarray(x_start, dtype=float), scales)
+    state = None
+    if resume is not None:
+        state = resume.get("nm_state")
+        if state is None and resume.get("nm_simplex") is not None:
+            lb, ub = bounds_arrays(bounds, n)
+            state = new_state(
+                x_start, lb, ub, initial_simplex=resume["nm_simplex"],
+                nfev=int(resume.get("nfev_total") or 0),
+                nit=max(1, int(resume.get("nit_total") or 0)))
+
+    def save(st, force=False):
+        x_best, f_best = best_of(st)
+        if x_best is None:
+            return False                # nothing evaluated yet; nothing to keep
+        return fit_cache.save_partial(
+            _to_linear(x_best, scales), f_best, n_evals=st["nfev"],
+            nm_state=state_to_json(st), force=force,
+            interval=NM_STATE_SAVE_INTERVAL_S, cal_x_lin=cal_lin)
+
+    stop_at = budget.work_deadline() if budget is not None else None
+    should_stop = (None if stop_at is None
+                   else (lambda: time.time() >= stop_at))
+
+    res, state = minimize_nelder_mead(
+        objective, x_start, bounds=bounds or None,
+        options=opt_kw.get("options"), tol=opt_kw.get("tol"), state=state,
+        on_step=save, should_stop=should_stop)
+
+    if res.status == STATUS_STOPPED:
+        save(state, force=True)
+        print(f"[opt] stopping: the run's stop time arrived mid-fit, after "
+              f"{state['nfev']} evaluation(s). This is the expected way a run "
+              f"with a --wall-time ends, not a failure -- the state is saved, "
+              f"and relaunching continues the same search rather than starting "
+              f"over.")
+        raise DeadlineReached(0, label="fit")
+    return res
+
+
+# Options for the differential-evolution fit. Deliberately closed: scipy's option
+# names mostly mean something else to the search in Engine.Differential_evolution
+# (``polish`` is a bool here too but selects a Nelder-Mead polish, ``strategy`` and
+# ``atol`` do not exist), and an option that is accepted and silently ignored is
+# worse than one that is refused.
+_DE_DEFAULTS = {
+    # Members per parameter (the population is popsize * n). 10 is a third
+    # smaller than scipy's 15: a generation is one pool batch, and on a 40-core
+    # node 160 members is four waves.
+    "popsize": 10,
+    "maxiter": 300,
+    "mutation": (0.5, 1.0),
+    "recombination": 0.7,
+    # Fixed by default so a search is reproducible; change it for a second,
+    # independent search.
+    "seed": 42,
+    "stall_gens": 25,
+    "stall_tol": 1e-2,
+    "xtol": 1e-3,
+    # Draw the initial population within this many optimizer units (decades, for a
+    # log10 parameter) of the starting point rather than over the whole box.
+    "init_radius": None,
+    # One capped attempt per simulation, in nothing but the search. Measured on
+    # aggregation_silk: healthy simulations need 1,500-2,200 CVODE steps, so
+    # 10,000 leaves 4.5x headroom. See Engine.Simulate "Search mode". None turns
+    # it off (and brings back the retry ladder, and the eight-minute evaluations).
+    "search_max_steps": 10000,
+    # Polish the search's best point with Nelder-Mead in normal solver mode. The
+    # search finds a basin; the profile needs the tolerance only a local method
+    # gives it.
+    "polish": True,
+    "polish_options": {"maxiter": 1500},
+}
+
+
+def _de_options(opt_kw):
+    """The differential-evolution options in *opt_kw*, defaults filled in."""
+    given = dict(opt_kw or {})
+    given.pop("tol", None)      # scipy's tolerance: nothing here means that
+    unknown = sorted(set(given) - set(_DE_DEFAULTS))
+    if unknown:
+        raise ValueError(
+            f"unsupported differential_evolution option(s) {unknown}. This "
+            f"search takes {sorted(_DE_DEFAULTS)}; scipy's own options (strategy, "
+            f"atol, workers, updating, ...) are not implemented and are refused "
+            f"rather than silently ignored.")
+    merged = dict(_DE_DEFAULTS)
+    merged.update(given)
+    return merged
+
+
+def _run_fit_differential_evolution(objective, x0, bounds, opt_kw, scales,
+                                    fit_cache, resume, budget, build_pool):
+    """The main fit as a global search followed by a local polish.
+
+    The search (:mod:`Engine.Differential_evolution`) evaluates a generation at a
+    time on the worker pool, in solver *search mode* so that a parameter vector
+    the integrator cannot solve costs one capped attempt instead of the retry
+    ladder that made an earlier attempt at this never finish. Its complete state
+    is written to the fit cache after every generation, so a kill costs at most
+    the generation in flight. Nelder-Mead then polishes the best point in normal
+    mode -- which is where the answer is verified with the full solver, and where
+    the tolerance the profile needs comes from.
+
+    *resume* is what ``FitCache.load_partial`` returned, or None. A ``nm_state`` in
+    it means the search finished and the polish is what to continue; a
+    ``de_state`` continues the search; failing both, a fresh population is seeded
+    with *x0* (which the caller has set to the best point on record).
+
+    *build_pool(search_max_steps)* returns a ParallelEvaluator whose workers are in
+    search mode, or None (one worker, or the pool could not start), in which case
+    generations are evaluated serially in this process.
+
+    Raises DeadlineReached when the stop time arrives first, with the state saved.
+    """
+    import Engine.Simulate as _sim
+    from Engine.Deadline import DeadlineReached
+    from Engine.Differential_evolution import (
+        STATUS_STOPPED, best_of, differential_evolution, new_state,
+        state_to_json,
+    )
+
+    o = _de_options(opt_kw)
+    n = len(np.atleast_1d(x0))
+    cap = o["search_max_steps"]
+    failure = 1e10
+    # Before ANY evaluation: put this process's noise floors where the run that
+    # wrote the checkpoint had them (see _restore_calibration). A fresh run
+    # calibrates at its own start, which is recorded so a later resume can.
+    # (A resume straight into the polish is restored by the Nelder-Mead driver,
+    # which the polish calls with the same record.)
+    polishing = resume is not None and resume.get("nm_state") is not None
+    if not polishing:
+        _restore_calibration(objective, resume, scales)
+    cal_lin = (resume.get("cal_x_lin") if resume is not None else None)
+    if cal_lin is None:
+        cal_lin = _to_linear(np.asarray(x0, dtype=float), scales)
+    t_start = time.time()
+    stop_at = budget.work_deadline() if budget is not None else None
+    should_stop = (None if stop_at is None
+                   else (lambda: time.time() >= stop_at))
+
+    state = None if resume is None else resume.get("de_state")
+    m_expected = max(5, int(o["popsize"]) * n)
+    if state is not None and len(state["pop"]) != m_expected:
+        print(f"[de] the saved search has {len(state['pop'])} members but "
+              f"popsize={o['popsize']} asks for {m_expected}; starting the "
+              f"search afresh.")
+        state = None
+    fresh = state is None
+
+    res = None
+    if not polishing:
+        # The starting point, evaluated here in normal mode: it is the number the
+        # search has to beat, and evaluating it in this process is also what
+        # calibrates the noise floors the pool's workers are then seeded with.
+        f0 = objective(np.asarray(x0, dtype=float))
+        print(f"[de] starting point: NLL {f0:.6g}. Population {m_expected} "
+              f"({o['popsize']} x {n} parameters), up to {o['maxiter']} "
+              f"generation(s); search-mode step cap "
+              f"{cap if cap is not None else 'off'}.", flush=True)
+
+        pool = build_pool(cap)
+        pool_ref = {"pool": pool}
+
+        def batch_fn(X):
+            xs = [np.asarray(x, dtype=float) for x in X]
+            ev = pool_ref["pool"]
+            if ev is not None:
+                try:
+                    return np.asarray(ev.evaluate_batch(xs, label="de"),
+                                      dtype=float)
+                except Exception as exc:
+                    print(f"[de] pool batch failed ({type(exc).__name__}: "
+                          f"{exc}); evaluating serially from here on.",
+                          flush=True)
+                    try:
+                        ev.shutdown()
+                    except Exception:
+                        pass
+                    pool_ref["pool"] = None
+            with _sim.search_mode(cap):
+                return np.array([objective(x) for x in xs], dtype=float)
+
+        if state is None:
+            state = new_state(bounds, popsize=o["popsize"], x0=x0,
+                              seed=o["seed"], init_radius=o["init_radius"])
+        else:
+            print(f"[de] resuming the search at generation {state['gen']} "
+                  f"({state['nfev']} evaluation(s) so far); nothing already "
+                  f"evaluated is evaluated again.", flush=True)
+
+        def save():
+            x_best, f_best = best_of(state)
+            if fit_cache is None or x_best is None:
+                return
+            fit_cache.save_partial(
+                _to_linear(x_best, scales), f_best, n_evals=state["nfev"],
+                de_state=state_to_json(state), force=True, cal_x_lin=cal_lin)
+
+        def on_init_chunk(st):
+            done = int(np.sum(np.isfinite(st["energies"])))
+            print(f"[de] initial population: {done}/{len(st['pop'])} evaluated",
+                  flush=True)
+            save()
+
+        def on_generation(st, info):
+            if info["gen"] == 0 and fresh and st["energies"][0] >= failure:
+                raise ValueError(
+                    f"search_max_steps={cap} is too small for this model: the "
+                    f"starting point itself failed under it. Raise it (or set it "
+                    f"to None). A healthy simulation on aggregation_silk needs "
+                    f"1,500-2,200 CVODE steps; measure yours before trusting a "
+                    f"cap.")
+            print(f"[de] gen {info['gen']:4d}  best {info['best']:.6g}  "
+                  f"median(feasible) {info['median_feasible']:.4g}  feasible "
+                  f"{info['n_feasible']}/{len(st['pop'])}  failed this gen "
+                  f"{info['n_failed']}  improved {info['n_improved']}  "
+                  f"range med/max {info['spread_median']:.3g}/"
+                  f"{info['spread']:.3g}  nfev {info['nfev']}  "
+                  f"{(time.time() - t_start) / 60.0:.1f} min", flush=True)
+            save()
+
+        n_workers = getattr(pool, "n_workers", None) or 4
+        try:
+            res = differential_evolution(
+                batch_fn, state, maxiter=o["maxiter"], mutation=o["mutation"],
+                recombination=o["recombination"], stall_gens=o["stall_gens"],
+                stall_tol=o["stall_tol"], xtol=o["xtol"], failure_value=failure,
+                init_chunk=2 * int(n_workers), on_generation=on_generation,
+                on_init_chunk=on_init_chunk, should_stop=should_stop)
+        finally:
+            ev = pool_ref["pool"]
+            if ev is not None:
+                try:
+                    ev.shutdown()
+                except Exception:
+                    pass
+
+        if res.status == STATUS_STOPPED:
+            save()
+            print(f"[de] stopping: the run's stop time arrived at generation "
+                  f"{state['gen']}. The search state is saved; relaunching "
+                  f"continues the same search.")
+            raise DeadlineReached(0, label="fit")
+
+        x_best, f_best = best_of(state)
+        print(f"[de] search finished: {res.message} Best NLL {f_best:.6g} (start "
+              f"{f0:.6g}) after {state['gen']} generation(s), {state['nfev']} "
+              f"evaluation(s), {(time.time() - t_start) / 60.0:.1f} min.",
+              flush=True)
+        x0 = x_best
+        if fit_cache is not None:
+            fit_cache.save_partial(_to_linear(x_best, scales), f_best,
+                                   n_evals=state["nfev"],
+                                   de_state=state_to_json(state), force=True,
+                                   cal_x_lin=cal_lin)
+
+    if not o["polish"]:
+        return res
+
+    print("[de] polishing with Nelder-Mead in normal solver mode.", flush=True)
+    polished = _run_fit_nelder_mead(
+        objective, x0, bounds, {"options": dict(o["polish_options"])}, scales,
+        fit_cache, resume if polishing else None, budget)
+    if res is not None:
+        polished.de_nfev = res.nfev
+        polished.de_generations = res.nit
+        polished.de_message = res.message
+    return polished
 
 
 def _enable_preequil_cache(models, active_replicates, param_names, x0_lin,
@@ -2846,7 +3229,7 @@ def _enable_preequil_cache(models, active_replicates, param_names, x0_lin,
 
 def _try_build_evaluator(model_text, paths, models, active_replicates, param_names,
                          scales, optimization_spec, fixed_sigmas, events_dynamic,
-                         n_workers, preequil_cache=False):
+                         n_workers, preequil_cache=False, search_max_steps=None):
     """Build a ParallelEvaluator, or return None with the reason printed.
 
     Every failure mode here is recoverable by running serially, so this never
@@ -2880,6 +3263,7 @@ def _try_build_evaluator(model_text, paths, models, active_replicates, param_nam
             fixed_sigmas=fixed_sigmas,
             events_dynamic=events_dynamic,
             preequil_cache=preequil_cache,
+            search_max_steps=search_max_steps,
         )
     except Exception as exc:
         print(f"[pool] could not build an eval spec ({exc}); evaluating serially.")
@@ -3788,9 +4172,9 @@ def _carry_resume_state(keep, res):
     """Move a resumed point's bookkeeping onto whichever record we are keeping.
 
     Needed because the value and the state can come from different places. If a
-    resumed slice did not improve on the stored value, the stored value is what
+    resumed job did not improve on the stored value, the stored value is what
     we keep -- but the *spend counters and the simplex* still have to come from
-    the slice that just ran, or the point would be resumed forever with its
+    the job that just ran, or the point would be resumed forever with its
     allowance never advancing and its optimizer state never moving.
     """
     for field in ("interrupted", "converged", "nfev_total", "nit_total",
@@ -3986,7 +4370,7 @@ def run_parallel_profile(
             job["initial_simplex"] = warm_sim
         if resume_from is not None:
             # Continuing a point the clock stopped. The simplex is the real
-            # payload: without it the next slice rebuilds from one vertex and
+            # payload: without it the next job rebuilds from one vertex and
             # spends itself relearning what this record already knows. The
             # spend counters come along so the point's total allowance is
             # shared across launches rather than reset by each one.
@@ -3995,7 +4379,7 @@ def run_parallel_profile(
                 "nit_used": int(resume_from.get("nit_total") or 0),
                 "initial_simplex": resume_from.get("nm_simplex"),
                 # The value this point has already reached. Needed for the case
-                # where the allowance turns out to be spent and no slice runs
+                # where the allowance turns out to be spent and nothing runs
                 # at all: without it the job would report an infinite NLL,
                 # which is a sentinel, which is never checkpointed -- so the
                 # stored record would keep its interrupted flag and the point
@@ -4162,12 +4546,14 @@ def run_parallel_profile(
     # that reads dNLL is reading a wrong number until it is done. Depth before
     # breadth: finish what is started.
     #
-    # This is a loop rather than a single batch because a job is capped at a
-    # slice of wall clock -- so that a preemption costs one slice rather than
-    # everything since the point began -- and one slice rarely finishes a
-    # point. Each turn of the loop is one more slice for every point that still
-    # needs one, checkpointed as it lands. The loop ends when every point is
-    # finished, or when the batch runs out of clock and raises.
+    # Points are only ever unfinished here because an earlier launch's stop
+    # time ended them (a preemption does not: a killed point resumes from its
+    # own state file when its job is next dispatched, and never reaches the
+    # store half done). This is a loop rather than a single batch so that a
+    # point which still comes back unfinished -- a stop time that arrives
+    # again -- is offered to the next turn instead of being left. The loop ends
+    # when every point is finished or has spent its allowance, or when the
+    # batch runs out of clock and raises.
     def _drain_signature():
         """What is unfinished, and how much each has spent.
 
@@ -4214,9 +4600,8 @@ def run_parallel_profile(
         # ── Pass 1: the coarse grid assembled above ───────────────────────
         if jobs:
             nll_batch_profile(jobs, on_result=record, label="profile-pass1")
-            # Grid points are capped by the same slice, so most of them come
-            # back unfinished on a long-point model. Carry them on rather than
-            # leaving the rest of the link idle.
+            # Anything a stop time cut short is carried on here rather than
+            # left for the next launch.
             drain_unfinished()
 
         # Passes 2-5 all decide *where to spend the next point* by reading
@@ -4256,9 +4641,9 @@ def run_parallel_profile(
                 refine_rounds(n_refine, 2 * n_refine, "pass 5",
                               "profile-rebracket")
 
-            # Extension, refinement and warm points are capped by the same
-            # slice as everything else, so finish any they left part-way
-            # rather than reporting a curve built partly from upper bounds.
+            # Extension, refinement and warm points can be cut short by a stop
+            # time like any other, so finish any they left part-way rather than
+            # reporting a curve built partly from upper bounds.
             drain_unfinished()
     except DeadlineReached as exc:
         stopped_early = exc
@@ -4466,7 +4851,7 @@ def _run_warm_passes(nll_batch_profile, completed, param_names, res_x, meta,
                         stats_out["n_improved"] += 1
                         stats_out["nats_recovered"] += gain
                 else:
-                    # The warm slice may itself have been stopped by the clock,
+                    # The warm job may itself have been stopped by the clock,
                     # so its spend and its optimizer state travel onto the
                     # record even when its value lost.
                     keep = _carry_resume_state(dict(prev), res)
@@ -4921,15 +5306,11 @@ def _run_parallel_profile_with_checkpoint(
     if ckpt.dir:
         print(f"\n[profile] checkpointing to {ckpt.dir}")
 
-    # The timing history lives beside the points it describes, so it is scoped
-    # to this exact model and spec: a run whose points got ten times slower
-    # gets a new directory and starts measuring afresh rather than admitting
-    # work on the previous version's costs.
-    budget = RunBudget(
-        deadline=resolve_deadline(),
-        timing_path=os.path.join(ckpt.dir, "timing.json") if ckpt.dir else None,
-    )
+    budget = RunBudget(deadline=resolve_deadline())
     print(f"[profile] {budget.describe()}")
+    # Each running point keeps its resumable optimizer state here, beside the
+    # store of finished points and scoped to the same model and spec.
+    state_dir = os.path.join(ckpt.dir, "state") if ckpt.dir else None
 
     # How much of this launch went on getting to the point where profile points
     # could start. Everything before this line -- model generation, the fit or
@@ -4983,7 +5364,8 @@ def _run_parallel_profile_with_checkpoint(
         # otherwise -- for the whole profile. See _freeze_floor.
         return evaluator.profile_batch(jobs, on_result=on_result, label=label,
                                        budget=budget,
-                                       frozen_sigmas=sigma_by_block)
+                                       frozen_sigmas=sigma_by_block,
+                                       state_dir=state_dir)
 
     # Every profile point comes back frozen (batch, above), so dNLL has to be
     # read against an anchor computed the same way -- reusing nll_at_optimum
@@ -5017,7 +5399,6 @@ def _run_parallel_profile_with_checkpoint(
         convergence["screen"] = screen_summary(screen)
         return traces, anchor, where, convergence
     finally:
-        budget.save()
         ckpt.close()
 
 
@@ -5060,11 +5441,9 @@ def _run_fast_profile_with_checkpoint(
     if ckpt.dir:
         print(f"\n[fast profile] checkpointing to {ckpt.dir}")
 
-    budget = RunBudget(
-        deadline=resolve_deadline(),
-        timing_path=os.path.join(ckpt.dir, "timing.json") if ckpt.dir else None,
-    )
+    budget = RunBudget(deadline=resolve_deadline())
     print(f"[fast profile] {budget.describe()}")
+    state_dir = os.path.join(ckpt.dir, "state") if ckpt.dir else None
 
     def batch(jobs, on_result=None, label=None):
         # Same reasoning as the full profile's own batch() -- a fast-profile
@@ -5074,7 +5453,8 @@ def _run_fast_profile_with_checkpoint(
         # re-concentrated at it. See _freeze_floor.
         return evaluator.profile_batch(jobs, on_result=on_result, label=label,
                                        budget=budget,
-                                       frozen_sigmas=sigma_by_block)
+                                       frozen_sigmas=sigma_by_block,
+                                       state_dir=state_dir)
 
     def nll_batch(xs, label=None):
         # Plain evaluations for the screen this pass reuses -- no nuisance
@@ -5120,7 +5500,6 @@ def _run_fast_profile_with_checkpoint(
             print(f"[fast profile] report written to {path}")
         return report
     finally:
-        budget.save()
         ckpt.close()
 
 
@@ -5664,7 +6043,12 @@ def run_optimization_from_groups(
 
         _debug_calls = [0]
         _progress = {"best": float("inf"), "t0": None,
-                     "best_x": None, "best_dirty": False}
+                     "best_x": None, "best_dirty": False,
+                     # Set when the Nelder-Mead driver is writing the fit's
+                     # partial record itself, state and all. The best-point-only
+                     # write below then stands down: it would be a second,
+                     # older writer of the same record.
+                     "driver_saves": False}
 
         # The fit's own cache. Keyed on the problem rather than the answer, so
         # a relaunch of the same job finds the optimum it already paid for and
@@ -5776,7 +6160,8 @@ def run_optimization_from_groups(
             # evaluation rather than only on an improvement, so a best that
             # arrived while the throttle was closed is still written by the
             # next evaluation after it opens.
-            if fit_cache is not None and _progress["best_dirty"]:
+            if (fit_cache is not None and _progress["best_dirty"]
+                    and not _progress["driver_saves"]):
                 if fit_cache.save_partial(_progress["best_x"], _progress["best"],
                                           n_evals=n):
                     _progress["best_dirty"] = False
@@ -5865,6 +6250,43 @@ def run_optimization_from_groups(
                       f"changed, so the fit runs afresh.")
         if res is not None:
             pass  # settled above: x0 evaluated, or a cached fit reused
+        elif method.lower() == "differential_evolution":
+            # Not scipy's: the search in Engine.Differential_evolution, which
+            # evaluates a generation at a time on the worker pool in solver
+            # search mode, keeps its state in the fit cache so a kill costs one
+            # generation, and hands its best point to Nelder-Mead to polish.
+            partial = fit_cache.load_partial() if fit_cache is not None else None
+            x_start = x0
+            if partial is not None:
+                x_start = _to_opt_space(partial["x_lin"], scales)
+                print(f"[opt] resuming an unfinished fit from its best point "
+                      f"(nll {partial.get('fun')}, after {partial.get('n_evals')} "
+                      f"evaluation(s), saved {partial.get('saved')}).")
+
+            def _build_search_pool(search_max_steps):
+                return _try_build_evaluator(
+                    model_text, paths, models, active_replicates, param_names,
+                    scales, optimization_spec, {}, _events_dynamic, n_workers,
+                    preequil_cache=preequil_ok,
+                    search_max_steps=search_max_steps)
+
+            from Engine.Deadline import (
+                DeadlineReached, RunBudget, resolve_deadline,
+            )
+            budget = RunBudget(deadline=resolve_deadline())
+            if budget.is_limited:
+                print(f"[opt] {budget.describe()}")
+            _progress["driver_saves"] = True
+            try:
+                res = _run_fit_differential_evolution(
+                    objective, x_start, bounds, opt_kw, scales, fit_cache,
+                    partial, budget, _build_search_pool)
+            except DeadlineReached:
+                print("\n[opt] INCOMPLETE: this run reached its stop time before "
+                      "the fit converged. The search state is saved; relaunch the "
+                      "same command to continue.")
+                import sys
+                sys.exit(0)
         elif method.lower() in _GLOBAL_METHODS:
             # A global method searches the whole domain by construction, so
             # wrapping it in multi-start would only pay for the same thing twice.
@@ -5882,15 +6304,67 @@ def run_optimization_from_groups(
                 if partial is not None:
                     # A previous launch of this same fit was killed before it
                     # returned. Its best point is a better start than x0 by
-                    # exactly the work it did; the simplex is rebuilt around
-                    # it, which costs n+1 evaluations rather than the hours.
+                    # exactly the work it did.
                     x_start = _to_opt_space(partial["x_lin"], scales)
-                    print(f"[opt] resuming an unfinished fit from its best point "
+                    msg = (f"[opt] resuming an unfinished fit from its best point "
                           f"(nll {partial.get('fun')}, after "
                           f"{partial.get('n_evals')} evaluation(s), saved "
                           f"{partial.get('saved')}) rather than from x0.")
-                res = minimize(objective, x_start, method=method,
-                               bounds=bounds or None, **opt_kw)
+                    if partial.get("nm_state") is not None:
+                        msg += (" Its saved optimizer state will be reused: the "
+                                "same search continues, and nothing already "
+                                "evaluated is evaluated again.")
+                    elif partial.get("nm_simplex") is not None:
+                        msg += (" Its saved simplex (an older checkpoint, with no "
+                                "function values) will be reused, at the cost of "
+                                "re-evaluating it: n+1 evaluations.")
+                    else:
+                        msg += (" No optimizer state was saved for it; the simplex "
+                                "is rebuilt around the best point, costing n+1 "
+                                "evaluations rather than the hours.")
+                    print(msg)
+
+                # The resumable driver runs wherever there is somewhere to
+                # keep its state and it implements what the spec asks for; it
+                # is scipy's optimizer step for step, so nothing about the
+                # answer depends on which one ran. Anything else is the plain
+                # scipy call it always was.
+                from Engine.Nelder_mead import can_run
+                use_driver = (
+                    fit_cache is not None and method.lower() == "nelder-mead"
+                    and can_run(opt_kw.get("options"),
+                                {k: v for k, v in opt_kw.items()
+                                 if k != "options"}))
+                if use_driver:
+                    from Engine.Deadline import (
+                        DeadlineReached, RunBudget, resolve_deadline,
+                    )
+                    budget = RunBudget(deadline=resolve_deadline())
+                    if budget.is_limited:
+                        print(f"[opt] {budget.describe()}")
+                    _progress["driver_saves"] = True
+                    try:
+                        res = _run_fit_nelder_mead(
+                            objective, x_start, bounds, opt_kw, scales,
+                            fit_cache, partial, budget)
+                    except DeadlineReached:
+                        # Unlike a stopped profile -- which still has an anchor
+                        # from an earlier fit and can report a partial curve --
+                        # there is no res.x here at all, so nothing past this
+                        # point (simulate-at-optimum, Wald, profile, plots) can
+                        # run. The driver has already saved the state; the only
+                        # honest thing left to do is stop cleanly rather than
+                        # let an empty result fall through 150 lines of code
+                        # that assume one exists.
+                        print("\n[opt] INCOMPLETE: this run reached its stop "
+                              "time before the fit converged. The optimizer "
+                              "state is saved; relaunch the same command to "
+                              "continue.")
+                        import sys
+                        sys.exit(0)
+                else:
+                    res = minimize(objective, x_start, method=method,
+                                   bounds=bounds or None, **opt_kw)
             else:
                 res, start_records, _best_start = _run_multistart(
                     objective, starts, method, bounds, opt_kw, scales
@@ -5962,7 +6436,7 @@ def run_optimization_from_groups(
         # profile likelihood, Sobol -- all of which route through the same
         # cache via collect_loss_blocks) sees one stable, better-calibrated
         # floor from here on, not the one the live search happened to start
-        # with. See Modules.utils.noise_floor.clear_cache.
+        # with. See Engine.Noise_floor.clear_cache.
         #
         # The one thing this does NOT retroactively fix is res.fun itself --
         # it was already returned by the live optimizer, minimized under the

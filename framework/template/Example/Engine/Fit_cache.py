@@ -25,11 +25,14 @@ the fit runs as it always has.
 Two records live under one key:
 
 * ``complete`` -- a fit that returned. Reused as the optimum outright.
-* ``partial`` -- the best point seen so far by a fit that has not returned.
-  Written on a throttle from inside the objective, so that a fit killed at
-  hour three restarts from hour three's best point rather than from x0. The
-  simplex itself is not saved; Nelder-Mead rebuilds one around the point,
-  which costs n+1 evaluations rather than the hours already spent.
+* ``partial`` -- a fit that has not returned. Always the best point seen so far,
+  so a fit killed at hour three restarts from hour three's best point rather
+  than from x0. For Nelder-Mead it also carries ``nm_state``, the optimizer's
+  complete state (Engine.Nelder_mead), written every few seconds by the fit
+  driver: a restart then continues the exact search, repeating no evaluation,
+  and a kill costs the evaluation in flight. Records written before that
+  existed carry at most a simplex (``nm_simplex``), which restarts the search
+  from that shape at the cost of n+1 evaluations to re-measure it.
 
 Layout::
 
@@ -59,6 +62,11 @@ _FORMAT = "fit-v1"
 # thousands of evaluations a second it stops the objective becoming a disk
 # benchmark.
 PARTIAL_SAVE_INTERVAL_S = 60.0
+
+# The same for the Nelder-Mead state, which is the record a kill is recovered
+# from, so it is written more often: at ~20 s an evaluation this is about one
+# write per iteration, and a kill loses the evaluation in flight.
+NM_STATE_SAVE_INTERVAL_S = 15.0
 
 
 def _json_default(obj):
@@ -228,6 +236,57 @@ class FitCache:
             return None
         return x
 
+    def _calibration_point(self, block):
+        """Where the noise floors were first calibrated, or None on any miss."""
+        if not isinstance(block, dict) or block.get("cal_x_lin") is None:
+            return None
+        return self._vector({"x_lin": block.get("cal_x_lin")})
+
+    def _de_state(self, block):
+        """The saved differential-evolution state, validated, or None on any miss.
+
+        A miss costs the exact resume of the global search and nothing else: it
+        restarts from a fresh population seeded with the best point on record.
+        """
+        if not isinstance(block, dict):
+            return None
+        from Engine.Differential_evolution import state_from_json
+        return state_from_json(block.get("de_state"), self.n_params)
+
+    def _nm_state(self, block):
+        """The saved Nelder-Mead state, validated, or None on any miss.
+
+        A miss costs the exact resume and nothing else: the fit falls back to
+        the legacy simplex or to its best point. Never a reason to fail the run.
+        """
+        if not isinstance(block, dict):
+            return None
+        from Engine.Nelder_mead import state_from_json
+        return state_from_json(block.get("nm_state"), self.n_params)
+
+    def _simplex(self, block):
+        """A simplex from a record written before ``nm_state`` existed, or None.
+
+        In opt space. A miss here costs exactly what it always cost before this
+        existed: the fit resumes from its best point and rebuilds a simplex around
+        it in n+1 evaluations, rather than resuming its exact search path. Never
+        a reason to fail the run over -- a corrupt or wrongly-shaped array is
+        silently equivalent to no simplex having been saved at all.
+        """
+        if not isinstance(block, dict):
+            return None
+        raw = block.get("nm_simplex")
+        if raw is None:
+            return None
+        try:
+            sim = np.asarray(raw, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if (sim.ndim != 2 or sim.shape[0] != self.n_params + 1
+                or sim.shape[1] != self.n_params or not np.all(np.isfinite(sim))):
+            return None
+        return sim
+
     def load_complete(self):
         """A finished fit for this problem: ``{"x_lin", "fun", ...}`` or None."""
         data = self._read()
@@ -243,7 +302,14 @@ class FitCache:
         return out
 
     def load_partial(self):
-        """The best point of an unfinished fit, or None."""
+        """The best point of an unfinished fit, or None.
+
+        ``nm_state`` in the returned dict is the optimizer's complete state, as
+        :func:`Engine.Nelder_mead.state_from_json` returns it, when one was saved
+        and still matches ``n_params``, else None. ``nm_simplex`` is the older,
+        simplex-only form, likewise validated (an ``np.ndarray`` in opt space).
+        A caller never has to re-validate what this already checked.
+        """
         data = self._read()
         if data is None:
             return None
@@ -253,6 +319,10 @@ class FitCache:
             return None
         out = dict(block)
         out["x_lin"] = x
+        out["nm_state"] = self._nm_state(block)
+        out["de_state"] = self._de_state(block)
+        out["cal_x_lin"] = self._calibration_point(block)
+        out["nm_simplex"] = self._simplex(block)
         out["path"] = self.path
         return out
 
@@ -306,23 +376,62 @@ class FitCache:
         data["complete"] = block
         return self._write(data)
 
-    def save_partial(self, x_lin, fun, n_evals=None, force=False):
-        """Record the best point so far, at most once per interval.
+    def save_partial(self, x_lin, fun, n_evals=None, force=False, nm_state=None,
+                     interval=None, de_state=None, cal_x_lin=None):
+        """Record the best point so far, at most once per *interval*.
 
         Never overwrites a ``complete`` record: a finished fit is strictly
         better information than any point along the way to it, and a partial
         from a *later* process (a relaunch that found no complete record yet,
         then raced one that did) must not demote it.
+
+        *nm_state*, when given, is the optimizer's state as
+        :func:`Engine.Nelder_mead.state_to_json` returns it -- plain lists and
+        numbers -- and is what lets a resumed fit continue its exact
+        Nelder-Mead search instead of rebuilding a simplex from the best point.
+        It carries its own evaluation and iteration counts, so a resume's
+        allowance is what remains of the spec's budget rather than a fresh one.
+        A best-point-only write (no *nm_state*) leaves a saved state alone
+        rather than erasing it, so the two writers cannot undo each other.
+
+        *de_state* is the differential-evolution search's state
+        (:func:`Engine.Differential_evolution.state_to_json`). A fit that runs
+        that search and then polishes with Nelder-Mead writes both, in turn, and
+        each write keeps the other's block: a ``nm_state`` on record therefore
+        means the search finished and the polish is what a resume continues.
+
+        *cal_x_lin* is the parameter vector (linear units) at which the run's noise
+        floors were first calibrated. The objective is NOT the same function in
+        every process: Engine.Noise_floor calibrates a floored observable on the
+        first call it sees and freezes the result, so a process that resumes a fit
+        and evaluates the best point first calibrates *there*, and scores every
+        vector differently from the process that wrote the saved energies. The
+        first writer wins and later writes keep it, so a resume can re-evaluate
+        exactly this point, before anything else, and be scoring against the same
+        floors again.
         """
         if not self.enabled:
             return False
         now = time.time()
-        if not force and now - self._last_partial_save < PARTIAL_SAVE_INTERVAL_S:
+        wait_s = PARTIAL_SAVE_INTERVAL_S if interval is None else float(interval)
+        if not force and now - self._last_partial_save < wait_s:
             return False
         data = self._read() or {}
         if data.get("complete") is not None:
             return False
-        data["partial"] = self._block(x_lin, fun, n_evals=n_evals)
+        extra = {"n_evals": n_evals}
+        prior = data.get("partial")
+        prior = prior if isinstance(prior, dict) else {}
+        for key, new in (("nm_state", nm_state), ("de_state", de_state)):
+            if new is not None:
+                extra[key] = new
+            elif prior.get(key) is not None:
+                extra[key] = prior[key]
+        if prior.get("cal_x_lin") is not None:
+            extra["cal_x_lin"] = prior["cal_x_lin"]          # first writer wins
+        elif cal_x_lin is not None:
+            extra["cal_x_lin"] = [float(v) for v in np.atleast_1d(cal_x_lin)]
+        data["partial"] = self._block(x_lin, fun, **extra)
         ok = self._write(data)
         if ok:
             self._last_partial_save = now

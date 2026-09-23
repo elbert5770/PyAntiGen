@@ -304,6 +304,74 @@ def _adjust_settings_for_error(err_msg, cur_abs_tol, cur_rel_tol, cur_max_steps,
     return cur_abs_tol, cur_rel_tol, cur_max_steps, cur_initial_step
 
 
+# ---------------------------------------------------------------------------
+# Search mode: a bounded price for a bad parameter vector
+# ---------------------------------------------------------------------------
+#
+# safe_simulate is built to rescue a run: when CVODE gives up it loosens the
+# tolerances, doubles the step allowance up to 400,000 and, if that fails,
+# halves the time span recursively to depth 4 with ten more attempts on every
+# piece. That is the right behaviour for a vector someone cares about and the
+# wrong one for a global search, which throws thousands of vectors at the model
+# and expects most of them to be nonsense. Measured on aggregation_silk (the
+# 6-decade box, 16 parameters): a healthy simulation takes 0.03-0.3 s and needs
+# between 1,500 and 2,200 CVODE steps, while one box vertex failed its first
+# attempt at the 200,000-step limit and was still climbing the ladder more than
+# eight minutes later. Differential evolution samples exactly such points, so
+# that one evaluation was the whole run.
+#
+# In search mode a simulation is one attempt with the step allowance capped, and
+# a failure raises at once. The caller's existing handling turns that into the
+# 1e10 failure value, so the search treats the vector as infeasible and moves on:
+# 6.9 s for the vertex above at a 10,000-step cap, against minutes.
+#
+# It only ever REMOVES candidates. A value returned in search mode is the same
+# fast-path value a normal run would have returned; nothing is computed with
+# looser tolerances. The answer is polished in normal mode afterwards.
+_SEARCH_MAX_STEPS = None
+
+
+def set_search_mode(max_steps):
+    """Cap every simulation at *max_steps* CVODE steps and never retry.
+
+    ``None`` switches search mode off. Returns the previous setting so a caller
+    can restore it. Process-global, like the integrator settings it governs:
+    each pool worker sets its own (see Engine.Evaluator._init_worker).
+    """
+    global _SEARCH_MAX_STEPS
+    previous = _SEARCH_MAX_STEPS
+    _SEARCH_MAX_STEPS = None if max_steps is None else int(max_steps)
+    return previous
+
+
+class search_mode:
+    """``with search_mode(10000): ...`` -- search mode for the block."""
+
+    def __init__(self, max_steps):
+        self.max_steps = max_steps
+
+    def __enter__(self):
+        self._previous = set_search_mode(self.max_steps)
+        return self
+
+    def __exit__(self, *exc):
+        set_search_mode(self._previous)
+        return False
+
+
+def _simulate_search(r, start, end, points, observed_species):
+    """One capped attempt. Raises on failure; leaves the step allowance as found."""
+    original = r.integrator.maximum_num_steps
+    # Never raise a model's own, lower limit: the cap is a ceiling.
+    r.integrator.maximum_num_steps = int(min(original, _SEARCH_MAX_STEPS))
+    try:
+        res = r.simulate(start, end, points, observed_species)
+    finally:
+        r.integrator.maximum_num_steps = original
+    return res, {"start": start, "end": end, "attempts": 1, "subdivided": False,
+                 "search_mode": True}
+
+
 def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
     # Extract start, end, points, variable_step_size
     start = solver_settings.get("start")
@@ -321,6 +389,9 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
     start = float(start)
     end = float(end)
     points = int(points)
+
+    if _SEARCH_MAX_STEPS is not None:
+        return _simulate_search(r, start, end, points, observed_species)
 
     # Save original state before any simulation is attempted.
     # This is critical because if the fast path fails, it leaves the model in a

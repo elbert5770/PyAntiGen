@@ -82,6 +82,112 @@ def sweep_stale_temp_files(directory, max_age_s=_TEMP_MAX_AGE_S):
     return removed
 
 
+# ---------------------------------------------------------------------------
+# In-progress point state
+# ---------------------------------------------------------------------------
+#
+# The JSONL store holds *finished* points. A point that is still being
+# optimized when its process is killed has produced no record, so what it has
+# learned would be lost -- for a point that runs for hours, hours. The worker
+# therefore keeps a small file of its own beside the store, rewritten every few
+# seconds with the complete Nelder-Mead state (Engine.Nelder_mead), and a later
+# launch that reaches the same point picks it up and continues from it.
+#
+# It is a separate file from the store on purpose. The store is append-only and
+# merges by lowest value; this is overwritten in place and means "resume
+# exactly here", which is a different thing and must never be mistaken for a
+# result. It is written by the worker rather than sent to the parent because
+# the whole point is that it survives the parent dying too.
+
+_POINT_STATE_FORMAT = "point-state-v1"
+
+# How often a running point rewrites its state at most. An evaluation costs
+# tens of seconds on the models this exists for, so this is a write per
+# iteration or so; on a toy objective that runs thousands of evaluations a
+# second it stops the state file becoming a disk benchmark.
+POINT_STATE_INTERVAL_S = 20.0
+
+
+def point_state_path(state_dir, param_name, x_fixed):
+    """Where the in-progress state of one profile point lives, or None."""
+    if not state_dir:
+        return None
+    key = round(float(x_fixed), 12)
+    return os.path.join(state_dir, _safe_name(f"{param_name}__{key!r}") + ".json")
+
+
+def point_identity(param_idx, x_fixed, n_nuisance, method):
+    """What a saved state must match to be resumed by a job.
+
+    Deliberately not the job's starting point or its simplex: those differ
+    between the job that made the state and the one that resumes it (a point
+    stopped on the clock is resumed from a record, not from the job that began
+    it), and a state is the more exact of the two resume sources whenever it
+    exists. What it must never be is another *problem*.
+    """
+    return {"param_idx": int(param_idx),
+            "x_fixed": round(float(x_fixed), 12),
+            "n": int(n_nuisance), "method": str(method).lower()}
+
+
+def save_point_state(path, identity, nm_state):
+    """Write the state atomically. Returns False on any failure.
+
+    A failure to save must never fail the point: the state is insurance, and an
+    uninsured point still finishes.
+    """
+    if not path:
+        return False
+    tmp = f"{path}.{os.getpid()}{_TEMP_SUFFIX}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"format": _POINT_STATE_FORMAT, "identity": identity,
+                       "nm": nm_state,
+                       "saved": datetime.now().isoformat(timespec="seconds")},
+                      fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def load_point_state(path, identity):
+    """The saved ``nm`` block for this point, or None on any miss.
+
+    A file that is corrupt, from another format, or for a different point is a
+    miss and costs the resume it would have provided -- never the run.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(data, dict)
+            or data.get("format") != _POINT_STATE_FORMAT
+            or data.get("identity") != identity):
+        return None
+    return data.get("nm")
+
+
+def clear_point_state(path):
+    """Remove a finished point's state so nothing later resumes it."""
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def record_is_better(rec, prev):
     """Whether *rec* should replace *prev* as the value stored at a grid point.
 
@@ -382,9 +488,19 @@ class ProfileCheckpoint:
 
 
 def _jsonable(obj):
-    """Convert numpy scalars/arrays so json.dump accepts them."""
+    """Convert numpy scalars/arrays so json.dump accepts them.
+
+    Dict keys are stringified too: block-keyed fields (e.g. sigma_by_block)
+    use tuple keys like (replicate, observable), which json.dump rejects
+    outright. A checkpoint write failing here silently loses the profile
+    point (the append is wrapped by evaluation, not by the caller), so this
+    has to accept whatever key shape a record carries.
+    """
     if isinstance(obj, dict):
-        return {k: _jsonable(v) for k, v in obj.items()}
+        return {(k if isinstance(k, (str, int, float, bool)) or k is None
+                 else "|".join(str(p) for p in k) if isinstance(k, tuple)
+                 else str(k)): _jsonable(v)
+                for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_jsonable(v) for v in obj]
     if isinstance(obj, np.ndarray):

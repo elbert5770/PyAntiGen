@@ -131,7 +131,7 @@ class EvalSpec:
     # in the parent, which runs the invariance check once; a worker must never
     # make that call on its own, or 40 of them would each re-derive it.
     preequil_cache: bool = False
-    # Modules.utils.noise_floor.export_cache() snapshot, taken in the parent
+    # Engine.Noise_floor.export_cache() snapshot, taken in the parent
     # AFTER its own calibration (see Engine.Optimize.run_optimization_from_groups,
     # clear_cache() + the post-optimum re-evaluation). Workers seed their own
     # (otherwise empty, since spawn shares no memory) floor cache from this in
@@ -142,6 +142,12 @@ class EvalSpec:
     # not the converged optimum. Same reasoning as fixed_sigmas above, one
     # mechanism down: compute once where it's meaningful, ship the answer.
     floor_cache: dict = field(default_factory=dict)
+    # When set, every simulation in this worker is one attempt capped at this many
+    # CVODE steps and a failure is scored as the failure value at once, instead
+    # of climbing safe_simulate's retry ladder. For a global search, which throws
+    # vectors at the model that are mostly nonsense; see Engine.Simulate's
+    # "Search mode". None (the default) leaves normal behaviour untouched.
+    search_max_steps: int = None
     # Reserved for future use by the profile grid (Stage 2).
     meta: dict = field(default_factory=dict)
 
@@ -160,16 +166,20 @@ def _init_worker(spec_blob):
     from framework.TelluriumGen import TelluriumGen
     from Engine.Event_times import attach_event_times
     from Engine.Optimize import OptRoadRunnerProxy
-    from Modules.utils.noise_floor import seed_cache
+    from Engine.Noise_floor import seed_cache
 
     spec = _serializer.loads(spec_blob)
-    # Before any task runs: this worker's own Modules.utils.noise_floor
+    # Before any task runs: this worker's own Engine.Noise_floor
     # module was just re-imported fresh (spawn shares no memory with the
     # parent), so its floor cache starts empty. Seed it from the parent's
     # already-calibrated snapshot so every worker agrees with the parent --
     # and with each other -- on every floored observable's sigma, instead of
     # each recalibrating independently against whichever task it draws first.
     seed_cache(spec.floor_cache)
+    # Set here, once per worker: the setting is process-global, like the
+    # integrator state it governs, and a spawned worker starts with it off.
+    from Engine.Simulate import set_search_mode
+    set_search_mode(getattr(spec, "search_max_steps", None))
     models = {}
     t0 = time.time()
     for sim_name, replicate in spec.replicates.items():
@@ -240,206 +250,8 @@ def _eval_task(x, frozen_sigmas=None):
         return (FAILURE_VALUE, f"error: {type(exc).__name__}: {exc}", time.time() - t0)
 
 
-class _TimeUp(Exception):
-    """Raised inside the objective when a point's wall slice has run out."""
-
-
-# How much wall clock one inner minimization slice aims to cover. Every slice
-# boundary is a chance to capture the optimizer's state, so this sets how much
-# progress a hard kill can cost; the cost of more slices is near zero because
-# the vertices they re-evaluate come from the cache below.
-_SLICE_TARGET_S = 600.0
-
-# Evaluations in the opening slice when nothing is known about their cost yet.
-# Enough to measure a rate, few enough to be cheap if each one is slow.
-_SLICE_PROBE_EVALS = 24
-
-# Fraction of the remaining time a slice is allowed to plan for. The margin
-# absorbs variance in per-evaluation cost, which on an ODE model is
-# substantial: a stiff parameter vector can take several times the median. A
-# slice that overruns is stopped by the backstop and hands back no simplex, so
-# finishing early is worth much more than the evaluations it gives up.
-_SLICE_SAFETY = 0.8
-
-# Objective values kept for reuse. A slice boundary makes scipy re-evaluate
-# every simplex vertex, which is exactly what was computed just before, so a
-# handful of entries turns the restart cost into nothing.
-_EVAL_CACHE_SIZE = 128
-
-
-def _simplex_including(sim, fsim, x, f):
-    """The simplex with *x* substituted for its worst vertex, if *x* beats it.
-
-    Used when a slice is killed by the clock rather than returning normally: the
-    last complete simplex is the optimizer state worth keeping, but the best
-    point found during the killed slice would otherwise be thrown away. Swapping
-    it in for the worst vertex keeps both, and yields a simplex that is still
-    a valid starting shape.
-    """
-    if sim is None or fsim is None or x is None or not np.isfinite(f):
-        return sim
-    sim = np.asarray(sim, dtype=float).copy()
-    fsim = np.asarray(fsim, dtype=float)
-    if sim.shape[0] != fsim.shape[0]:
-        return sim
-    worst = int(np.argmax(fsim))
-    if f < fsim[worst]:
-        sim[worst] = np.asarray(x, dtype=float)
-    return sim
-
-
-def _minimize_in_slices(objective, x0, args, method, bounds, optimizer_kwargs,
-                        fev_left, it_left, simplex, deadline, sec_per_eval,
-                        eval_count):
-    """Minimize in slices so the optimizer's state is never out of reach.
-
-    The problem this solves: a profile point can want far more wall clock than
-    the queue will give it, so it has to be stoppable and resumable. Stopping is
-    easy -- raise out of the objective. Resuming is the hard half, because for
-    Nelder-Mead the optimizer's entire state is its simplex, and an exception
-    thrown through ``scipy.optimize.minimize`` takes that simplex with it. A
-    resume from the best point alone re-derives the simplex from scratch and
-    spends most of its next slice relearning what it already knew: measured on a
-    4-parameter quadratic, thirty further evaluations from the bare best point
-    moved the objective from 6.71 to 6.63, while the same thirty with the
-    simplex restored reached 4.99.
-
-    So the minimization is run as a sequence of bounded slices. Each one returns
-    normally, which means each one hands back ``final_simplex``, so there is
-    always a complete and current state to write down. Slices are sized from the
-    measured cost of an evaluation to land near ``_SLICE_TARGET_S``, and the
-    last one is sized to finish just before the deadline.
-
-    Slicing is close to free because of the evaluation cache: the vertices scipy
-    re-evaluates when handed an ``initial_simplex`` are precisely the points the
-    previous slice just computed.
-
-    Returns ``(res, simplex, outcome)`` where *outcome* is one of ``"done"``
-    (the optimizer stopped on its own terms), ``"capped"`` (the point's total
-    allowance across all launches is spent) or ``"interrupted"`` (the clock).
-    """
-    from Engine.Optimize import _minimize_nuisance
-
-    supports_simplex = str(method).lower() == "nelder-mead"
-    n = max(1, len(np.atleast_1d(x0)))
-    res = None
-    x_cur = np.asarray(x0, dtype=float)
-
-    # Below n+1 evaluations scipy cannot even establish a simplex, so a slice
-    # that short returns no state at all and the point resumes cold. Above it,
-    # a slice returns a usable simplex whether or not it also made progress.
-    state_floor = n + 1
-    useful = 2 * (n + 1)
-
-    # One measured evaluation before committing to a slice length. Without a
-    # rate the first slice has to be guessed at, and guessing high on a slow
-    # objective is how a point ends up killed by the backstop with nothing
-    # saved -- which is exactly what happened on the first cluster run: five
-    # evaluations of a 116 s objective inside an eight-minute slice, when
-    # sixteen were needed before any state existed. The probe is close to free
-    # because its result is cached, so the slice that follows re-uses it
-    # instead of recomputing it.
-    if (deadline is not None and not sec_per_eval and eval_count["n"] == 0
-            and time.time() < deadline):
-        try:
-            objective(x_cur, *args)
-        except _TimeUp:
-            return None, simplex, "interrupted"
-
-    while True:
-        if fev_left <= 0 or it_left <= 0:
-            return res, simplex, "capped"
-
-        slice_fev = fev_left
-        if deadline is not None:
-            t_left = deadline - time.time()
-            if t_left <= 0:
-                return res, simplex, "interrupted"
-            rate = sec_per_eval or (eval_count["seconds"] / eval_count["n"]
-                                    if eval_count["n"] else None)
-            if rate and rate > 0:
-                # Deliberately short of what the clock allows. A slice sized to
-                # consume every remaining second finishes only if the rate
-                # estimate is perfect; any variance trips the backstop, and the
-                # backstop is the one exit that returns no simplex. Aiming to
-                # land early is what makes the state reliably saveable.
-                affordable = int(_SLICE_SAFETY * t_left / rate)
-                if affordable < state_floor:
-                    if res is not None:
-                        # Not even enough left to re-establish a simplex. Stop
-                        # while the state from the last slice is intact rather
-                        # than spending the remainder and losing it.
-                        return res, simplex, "interrupted"
-                    # No slice here can reach a state worth saving: scipy needs
-                    # n+1 evaluations before a simplex exists, and there is not
-                    # time for them. Attempting it anyway spends the whole
-                    # slice and hands back nothing.
-                    #
-                    # That is not hypothetical. One SILK link ran with the
-                    # 30-minute default cap and no timing history, against a
-                    # 15-nuisance-parameter model at 113 s per evaluation: a
-                    # simplex costs 30.2 minutes, so every point burned its
-                    # entire slice on exactly n+1 evaluations, took zero
-                    # Nelder-Mead iterations, and came back with its nuisance
-                    # vector still equal to its starting point and no simplex.
-                    # Across 39 workers that is hours of wall clock for
-                    # nothing.
-                    #
-                    # Stopping now costs one evaluation instead of sixteen, and
-                    # -- the point of it -- that evaluation measures the rate,
-                    # which is written to timing.json and lets the next round
-                    # size its cap correctly.
-                    if eval_count["n"] == 0:
-                        try:
-                            objective(x_cur, *args)
-                        except _TimeUp:
-                            pass
-                    return None, simplex, "interrupted"
-                else:
-                    # Ask for what actually fits, not for what would be ideal.
-                    # Requesting more than the clock allows guarantees the
-                    # backstop fires, and the backstop is the one exit that
-                    # returns no simplex.
-                    slice_fev = min(fev_left, affordable,
-                                    max(useful, int(_SLICE_TARGET_S / rate)))
-                    slice_fev = max(slice_fev, min(fev_left, state_floor))
-            else:
-                slice_fev = min(slice_fev, max(state_floor, _SLICE_PROBE_EVALS))
-
-        extra = {"maxfev": int(slice_fev),
-                 "maxiter": int(min(it_left, slice_fev))}
-        if simplex is not None and supports_simplex:
-            extra["initial_simplex"] = np.asarray(simplex, dtype=float)
-
-        before = eval_count["n"]
-        try:
-            res = _minimize_nuisance(objective, x_cur, args, method, bounds,
-                                     optimizer_kwargs, extra_options=extra)
-        except _TimeUp:
-            # The rate estimate was too optimistic -- one evaluation took far
-            # longer than the others. The previous slice's simplex is still the
-            # best state available, so keep it rather than losing everything.
-            return res, simplex, "interrupted"
-
-        final = getattr(res, "final_simplex", None)
-        if final is not None:
-            simplex = np.asarray(final[0], dtype=float)
-        x_cur = np.asarray(res.x, dtype=float)
-
-        # The point's allowance is spent in *evaluations of the model*, so it
-        # is charged what actually ran. scipy's own nfev counts the vertex
-        # re-evaluations at each slice boundary, which the cache serves for
-        # free; charging those would make a heavily-sliced point exhaust its
-        # budget without doing the work the budget was meant to buy.
-        fev_left -= max(0, eval_count["n"] - before)
-        it_left -= max(1, int(getattr(res, "nit", 0) or 0))
-
-        # Stopping short of the slice cap means the optimizer stopped for its
-        # own reasons -- converged, or on xatol/fatol -- and there is nothing
-        # more to do. Filling the slice means it was cut off by us, not by the
-        # problem, so there is more to do if there is time to do it.
-        if int(getattr(res, "nfev", 0) or 0) < slice_fev:
-            return res, simplex, "done"
+class _Stopped(Exception):
+    """Raised inside a non-Nelder-Mead objective when the point's time is up."""
 
 
 def _profile_task(job):
@@ -447,39 +259,53 @@ def _profile_task(job):
     with parameter ``param_idx`` pinned at ``x_fixed``.
 
     A profile point is a whole optimization, not a single evaluation, so the
-    scipy call runs *inside* the worker against its local models. That is what
+    optimizer runs *inside* the worker against its local models. That is what
     makes the profile parallel: 2k x n_grid independent optimizations in flight,
     instead of one adaptive walk stepping sequentially.
 
-    **A point does not have to fit in one job.** On a four-hour queue a single
-    nuisance minimization can easily want forty, so the point carries a
-    ``deadline`` and stops itself when it arrives, reporting where it had got
-    to. That is sound rather than merely convenient: every evaluation of this
-    objective is an upper bound on the profile, so a half-finished point is a
-    real point that happens to sit too high, and the store keeps the lowest
-    value seen at each fixed value. Resuming can therefore only lower the
-    curve, never raise it -- the same invariant the warm-continuation pass
-    already relies on.
+    **A point survives being killed.** A point can take hours, and on a
+    preemptible partition the process is stopped without notice. For
+    Nelder-Mead -- the method every spec here uses -- the worker runs
+    :mod:`Engine.Nelder_mead`, whose entire state is a small dict, and rewrites
+    that state to ``job["state_path"]`` every few seconds. A later job for the
+    same point loads it and continues: no evaluation is repeated, and the
+    result is identical to an uninterrupted run. A kill loses the evaluation in
+    flight and nothing more, which is why nothing on this path needs to know
+    when the job will end.
 
-    Two things are carried across the interruption, and the second is what
-    makes it worth doing:
+    ``deadline`` is the one place the clock is consulted, and it is a plain "stop
+    here": when it passes the point saves its state, returns marked
+    ``interrupted`` and reports where it got to. That is sound rather than
+    merely convenient: every evaluation of this objective is an upper bound on
+    the profile, so a half-finished point is a real point that happens to sit too
+    high, and the store keeps the lowest value seen at each fixed value.
+    Resuming can therefore only lower the curve, never raise it -- the same
+    invariant the warm-continuation pass already relies on.
+
+    Two things are carried across an interruption:
 
     * ``nuisance_x`` -- the best nuisance vector reached so far, which becomes
       the next job's starting point.
-    * ``nm_simplex`` -- for Nelder-Mead, the whole simplex. Without it a resume
-      restarts the simplex from a single point and spends most of its next
-      slice rebuilding what it already knew; measured on a 4-parameter
-      quadratic, 30 further evaluations from the bare best point recovered
-      almost nothing while the same 30 with the simplex restored made normal
-      progress. The optimizer's state *is* the simplex, so saving it is the
-      difference between resuming and starting over.
+    * ``nm_simplex`` -- for Nelder-Mead, the whole simplex, so a job started
+      from a *record* rather than from the state file (a continuation round, a
+      point stopped on the clock and resumed by a later launch) restarts from
+      the simplex instead of one vertex. The state file is the exact resume and
+      wins when it exists; the simplex is what the record path has.
 
     ``job`` is a plain dict so it pickles cheaply. Returns a result dict that is
     written straight to the checkpoint file.
     """
+    from Engine.Nelder_mead import (
+        STATUS_STOPPED, best_of, bounds_arrays, can_run, minimize_nelder_mead,
+        new_state, state_from_json, state_to_json,
+    )
     from Engine.Optimize import (
         _make_nuisance_objective, _minimize_nuisance, nuisance_convergence,
-        nuisance_option_budget,
+        nuisance_options,
+    )
+    from Engine.Profile_checkpoint import (
+        POINT_STATE_INTERVAL_S, clear_point_state, load_point_state,
+        point_identity, save_point_state,
     )
 
     t0 = time.time()
@@ -489,6 +315,14 @@ def _profile_task(job):
     # alongside the nm_simplex it actually needs to store. The resume path
     # reads nm_simplex, never this.
     out.pop("initial_simplex", None)
+    # Also an input, not a result -- reconstructed identically from
+    # sigma_by_block on every launch, so a resume needs nothing from here.
+    # Worse than bulky: its keys are (block_key, obs_label) tuples (see
+    # Evaluator.profile_batch), which json.dump rejects outright, so leaving
+    # it in `out` fails every checkpoint write for the whole profile.
+    out.pop("frozen_sigmas", None)
+    # A location on this machine's disk, meaningless in a stored record.
+    out.pop("state_path", None)
     out.update({"nll": None, "status": "ok", "n_evals": 0, "wall_s": 0.0,
                 "worker": os.getpid(), "converged": True, "nit": -1,
                 "nfev": -1, "opt_message": "", "interrupted": False})
@@ -505,6 +339,7 @@ def _profile_task(job):
         x_start = np.asarray(job["x_start"], dtype=float)
         method = job.get("method", "Nelder-Mead")
         deadline = job.get("deadline")
+        state_path = job.get("state_path")
 
         # What earlier jobs on this same point already spent. The caps are a
         # total across every launch, so a point that keeps being interrupted
@@ -512,16 +347,13 @@ def _profile_task(job):
         nfev_used = int(job.get("nfev_used") or 0)
         nit_used = int(job.get("nit_used") or 0)
 
-        # Real evaluations and the time they cost, which is what sizes the next
-        # slice. Cache hits are excluded from both: they are neither work done
-        # nor budget spent.
-        eval_count = {"n": 0, "seconds": 0.0}
-        # The best point seen. Tracked here rather than read off an
-        # OptimizeResult because when the clock stops a slice there is no
-        # OptimizeResult to read it from.
+        # Real evaluations this job made; the point's running totals live in
+        # the optimizer state and are reported as nfev_total/nit_total.
+        eval_count = {"n": 0}
+        # The best point seen. Tracked here as well as in the optimizer state
+        # because a point stopped before its first simplex is complete has no
+        # sorted vertex to read it from.
         best = {"f": float("inf"), "x": x_start}
-        cache = {}
-        cache_order = []
 
         # Every profile point pins each floored block at its own sigma_used
         # from the fit rather than letting it re-concentrate (see
@@ -537,34 +369,21 @@ def _profile_task(job):
 
         def nuisance_objective(x_nuisance, fixed_val):
             x_arr = np.asarray(x_nuisance, dtype=float)
-            key = x_arr.tobytes()
-            hit = cache.get(key)
-            if hit is not None:
-                return hit
-
-            t_eval = time.time()
             v = raw_objective(x_arr, fixed_val)
             eval_count["n"] += 1
-            eval_count["seconds"] += time.time() - t_eval
-
-            cache[key] = v
-            cache_order.append(key)
-            if len(cache_order) > _EVAL_CACHE_SIZE:
-                cache.pop(cache_order.pop(0), None)
-
             if np.isfinite(v) and v < best["f"]:
                 best["f"] = float(v)
                 best["x"] = x_arr.copy()
-            # Checked after recording, so the value just computed is never lost
-            # to the interruption that follows it.
-            if deadline is not None and time.time() >= deadline:
-                raise _TimeUp()
             return v
+
+        def time_is_up():
+            return deadline is not None and time.time() >= deadline
 
         bounds = job.get("nuisance_bounds")
         if bounds is not None:
             bounds = [tuple(b) if b is not None else None for b in bounds]
 
+        nm_state = None
         if x_start.size == 0:
             # Single-parameter fit: nothing to re-optimize, so the profile value
             # is just the objective at the fixed value -- exact by definition.
@@ -573,40 +392,109 @@ def _profile_task(job):
             out.update({"converged": True, "nit": 0, "nfev": 1})
             eval_count["n"] = 1
         else:
-            caps = nuisance_option_budget(method, x_start.size,
-                                          job.get("optimizer_kwargs"))
-            fev_left = caps.get("maxfev", 10 ** 9) - nfev_used
-            it_left = caps.get("maxiter", 10 ** 9) - nit_used
+            options, extra_kwargs = nuisance_options(
+                method, x_start.size, job.get("optimizer_kwargs"))
+            max_fev = options.get("maxfev", float("inf"))
+            max_it = options.get("maxiter", float("inf"))
+            resumable = str(method).lower() == "nelder-mead" and can_run(
+                options, extra_kwargs)
 
-            simplex = job.get("initial_simplex")
-            res, simplex, outcome = _minimize_in_slices(
-                nuisance_objective, x_start, (x_fixed,), method, bounds,
-                job.get("optimizer_kwargs"), fev_left, it_left, simplex,
-                deadline, job.get("sec_per_eval"), eval_count,
-            )
+            res = None
+            outcome = "done"
+            if resumable:
+                identity = point_identity(param_idx, x_fixed, x_start.size, method)
+                nm_state = state_from_json(
+                    load_point_state(state_path, identity), x_start.size)
+                if nm_state is not None:
+                    out["resumed_from_state"] = True
+                else:
+                    sim = job.get("initial_simplex")
+                    lb, ub = bounds_arrays(bounds, x_start.size)
+                    try:
+                        nm_state = new_state(x_start, lb, ub, initial_simplex=sim,
+                                             nfev=nfev_used,
+                                             nit=max(1, nit_used))
+                    except ValueError:
+                        # A simplex of the wrong shape is a hint that did not
+                        # fit, not a reason to lose the point.
+                        nm_state = new_state(x_start, lb, ub, nfev=nfev_used,
+                                             nit=max(1, nit_used))
+
+                if nm_state["nfev"] >= max_fev or nm_state["nit"] >= max_it:
+                    # The allowance was spent before this job began; nothing to
+                    # run, and nothing to save either.
+                    outcome = "capped"
+                else:
+                    interval = float(job.get("state_interval_s",
+                                             POINT_STATE_INTERVAL_S))
+                    last_save = [0.0]
+
+                    def on_step(st):
+                        now = time.time()
+                        if state_path and now - last_save[0] >= interval:
+                            save_point_state(state_path, identity,
+                                             state_to_json(st))
+                            last_save[0] = now
+
+                    res, nm_state = minimize_nelder_mead(
+                        nuisance_objective, x_start, args=(x_fixed,),
+                        bounds=bounds, options=options, state=nm_state,
+                        on_step=on_step, should_stop=time_is_up)
+                    if res.status == STATUS_STOPPED:
+                        outcome = "interrupted"
+                        # Written unthrottled: this is the state the next job
+                        # resumes from, and it is the last chance to save it.
+                        save_point_state(state_path, identity,
+                                         state_to_json(nm_state))
+                    elif res.status in (1, 2):
+                        outcome = "capped"
+                    if outcome != "interrupted":
+                        clear_point_state(state_path)
+            else:
+                # Some other method, or Nelder-Mead options the resumable
+                # implementation does not cover: one ordinary scipy call, stopped
+                # by raising out of the objective. It has no state to save, so
+                # an interrupted point of this kind resumes from its best vector.
+                if nfev_used >= max_fev or nit_used >= max_it:
+                    outcome = "capped"
+                else:
+                    def guarded(x_nuisance, fixed_val):
+                        v = nuisance_objective(x_nuisance, fixed_val)
+                        if time_is_up():
+                            raise _Stopped()
+                        return v
+                    try:
+                        res = _minimize_nuisance(
+                            guarded, x_start, (x_fixed,), method, bounds,
+                            job.get("optimizer_kwargs"))
+                        if not getattr(res, "success", True) and int(
+                                getattr(res, "nfev", 0) or 0) >= max_fev:
+                            outcome = "capped"
+                    except _Stopped:
+                        outcome = "interrupted"
 
             if res is not None:
                 out.update(nuisance_convergence(res))
 
             if outcome == "interrupted":
-                # Not a failure: the slice ended. Report where the search had
+                # Not a failure: the point stopped. Report where the search had
                 # reached and mark the point so a later launch continues it.
-                nll = best["f"] if np.isfinite(best["f"]) else (
-                    float(res.fun) if res is not None else FAILURE_VALUE)
+                x_state, f_state = (best_of(nm_state) if nm_state is not None
+                                    else (None, float("inf")))
+                if f_state < best["f"]:
+                    best["f"], best["x"] = f_state, x_state
+                nll = best["f"] if np.isfinite(best["f"]) else FAILURE_VALUE
                 x_opt = np.asarray(best["x"], dtype=float)
-                fsim = (getattr(res, "final_simplex", (None, None))[1]
-                        if res is not None else None)
-                simplex = _simplex_including(simplex, fsim, best["x"], best["f"])
                 out.update({
                     "interrupted": True,
                     "converged": False,
                     "opt_message": "stopped on the wall clock; resumable",
                 })
-            elif res is None:
-                # Capped before a single slice could run: the point has spent
-                # its whole allowance across earlier launches. It reports the
-                # value it had already reached, so the record stays usable and
-                # -- crucially -- checkpointable. A sentinel here would never be
+            elif res is None or not np.isfinite(getattr(res, "fun", np.inf)):
+                # Capped before anything could run: the point has spent its
+                # whole allowance across earlier launches. It reports the value
+                # it had already reached, so the record stays usable and --
+                # crucially -- checkpointable. A sentinel here would never be
                 # written, leaving the stored record marked interrupted and the
                 # point resumed on every future link for no work at all.
                 prior = job.get("nll_so_far")
@@ -625,9 +513,15 @@ def _profile_task(job):
                         "opt_message": "evaluation budget exhausted across launches",
                     })
 
-            if simplex is not None:
-                out["nm_simplex"] = np.asarray(simplex, dtype=float).tolist()
+            if nm_state is not None:
+                out["nm_simplex"] = np.asarray(nm_state["sim"],
+                                               dtype=float).tolist()
 
+        if nm_state is not None:
+            nfev_total, nit_total = nm_state["nfev"], nm_state["nit"]
+        else:
+            nfev_total = nfev_used + eval_count["n"]
+            nit_total = nit_used + max(0, int(out.get("nit") or 0))
         out.update({
             "nll": float(nll),
             "nuisance_x": np.asarray(x_opt, dtype=float).tolist(),
@@ -635,8 +529,8 @@ def _profile_task(job):
             # Totals across every launch this point has had, so the next one
             # knows how much of the allowance is left and the point terminates
             # instead of being resumed forever.
-            "nfev_total": nfev_used + eval_count["n"],
-            "nit_total": nit_used + max(0, int(out.get("nit") or 0)),
+            "nfev_total": nfev_total,
+            "nit_total": nit_total,
             "status": "ok" if np.isfinite(nll) and nll < FAILURE_VALUE else "sentinel",
         })
     except Exception as exc:
@@ -1011,8 +905,13 @@ class ParallelEvaluator:
 
     def profile_batch(self, jobs, on_result=None, label=None,
                       heartbeat_s=_HEARTBEAT_SECONDS, budget=None,
-                      frozen_sigmas=None):
+                      frozen_sigmas=None, state_dir=None):
         """Run profile-likelihood points in parallel, within a wall budget.
+
+        ``state_dir`` is where each running point keeps its own resumable
+        optimizer state (see ``Engine.Profile_checkpoint.point_state_path``).
+        Without it points still run, they just cannot be resumed mid-way after
+        a kill.
 
         ``frozen_sigmas``, stamped onto every job here rather than left to
         each caller's job-building code, is a ``{(block_key_or_exp_id,
@@ -1040,11 +939,13 @@ class ParallelEvaluator:
           for another three hours, which is precisely the case the check exists
           to catch.
 
-        When *budget* runs out the already-running points are waited for --
-        they were admitted in good faith and are usually the expensive ones --
-        and then :class:`~Engine.Deadline.DeadlineReached` is raised naming how
-        many never started. Everything that landed has already been through
-        *on_result*, so nothing computed is lost by the raise.
+        When *budget* runs out, running points are told to stop at their next
+        evaluation, save their state and return, and are waited for; then
+        :class:`~Engine.Deadline.DeadlineReached` is raised naming how many never
+        started. Everything that landed has already been through *on_result*, so
+        nothing computed is lost by the raise. With no budget a point runs until
+        it converges or spends its allowance, and a kill is survived by the
+        state file rather than by anything here.
 
         A heartbeat is printed every ``heartbeat_s`` while nothing is landing.
         Waiting on completions alone means that with as many workers as points
@@ -1060,12 +961,14 @@ class ParallelEvaluator:
             self.start()
         from concurrent.futures import wait, FIRST_COMPLETED
         from Engine.Deadline import DeadlineReached
+        from Engine.Profile_checkpoint import (
+            point_state_path, sweep_stale_temp_files,
+        )
 
         t0 = time.time()
         results = []
-        # Stamped once here, not per admitted job: unlike deadline/sec_per_eval
-        # this does not depend on the clock, so every job in the batch gets it
-        # up front.
+        # Stamped once here, not per admitted job: unlike the deadline this does
+        # not depend on the clock, so every job in the batch gets it up front.
         backlog = [dict(j, frozen_sigmas=frozen_sigmas) for j in jobs]
         futures = {}
         pending = set()
@@ -1074,26 +977,11 @@ class ParallelEvaluator:
         halted = False
         tag = f" [{label}]" if label else ""
 
-        sec_per_eval = budget.seconds_per_eval() if budget is not None else None
-
-        # What one slice has to be allowed, so that it ends with optimizer
-        # state worth resuming from rather than being cut off before any
-        # exists. Nelder-Mead needs n+1 evaluations before it has a simplex at
-        # all, and twice that before it has also made progress.
-        n_nuisance = max(1, len(jobs[0].get("x_start") or ()))
-        state_slice_s = (2 * (n_nuisance + 1) * sec_per_eval
-                         if sec_per_eval else None)
-        if (self.verbose and budget is not None and budget.is_limited
-                and state_slice_s):
-            room = budget.remaining() - budget.margin_s
-            if state_slice_s > room:
-                print(f"[pool]{tag} WARNING: at {sec_per_eval:.0f}s per "
-                      f"evaluation a {n_nuisance + 1}-vertex simplex needs "
-                      f"~{state_slice_s / 60.0:.0f} min, but only "
-                      f"{room / 60.0:.0f} min remain. Points will be stopped "
-                      f"before their optimizer state can be saved and will "
-                      f"resume cold — give the link more wall clock.",
-                      flush=True)
+        if state_dir:
+            # Litter from a process killed between writing a state file and
+            # renaming it into place; one per kill, so a preempted run collects
+            # them.
+            sweep_stale_temp_files(state_dir)
 
         def admit():
             """Start points until the pool is full or the clock says stop."""
@@ -1104,14 +992,17 @@ class ParallelEvaluator:
                     return
                 job = backlog.pop(0)
                 # Stamped here rather than where the job was built, because
-                # this is the only place that knows both the clock and the
-                # moment the point actually starts -- and the slice cap is
-                # measured from that moment, so it has to be resolved per job
-                # rather than once for the batch.
+                # this is the only place that knows the clock. The stop time is
+                # the run's own, the same for every point: nothing is
+                # predicted about how long a point will take, because a point
+                # stopped early is resumed from its saved state and loses
+                # nothing.
                 job = dict(job,
-                           deadline=(budget.job_deadline(state_slice_s)
+                           deadline=(budget.work_deadline()
                                      if budget is not None else None),
-                           sec_per_eval=sec_per_eval)
+                           state_path=point_state_path(
+                               state_dir, job.get("param_name"),
+                               job.get("x_fixed")))
                 fut = self._pool.submit(_profile_task, job)
                 futures[fut] = job
                 pending.add(fut)
@@ -1122,7 +1013,7 @@ class ParallelEvaluator:
                   f"{_fmt_dur(heartbeat_s)} until results start landing.",
                   flush=True)
             if budget is not None and budget.is_limited:
-                print(f"[pool]{tag} {budget.describe(state_slice_s)}",
+                print(f"[pool]{tag} {budget.describe()}",
                       flush=True)
 
         admit()
@@ -1154,6 +1045,11 @@ class ParallelEvaluator:
                 except Exception as exc:
                     job = futures[fut]
                     res = dict(job)
+                    # Same non-JSON-safe input as in _profile_task's success
+                    # path -- strip it here too, or a worker crash makes the
+                    # checkpoint write fail instead of just recording the error.
+                    res.pop("initial_simplex", None)
+                    res.pop("frozen_sigmas", None)
                     res.update({"nll": FAILURE_VALUE, "n_evals": 0, "wall_s": 0.0,
                                 "status": f"error: {type(exc).__name__}: {exc}"})
                 results.append(res)
@@ -1162,20 +1058,19 @@ class ParallelEvaluator:
                 self.total_worker_seconds += float(res.get("wall_s") or 0.0)
                 if res.get("status") != "ok":
                     self.n_failures += 1
-                # Only a real point teaches anything about what a point costs;
-                # a job that died on the way out returns wall_s 0 and would
-                # drag the estimate toward zero, which is the direction that
-                # admits work there is no time for.
-                if budget is not None and res.get("status") == "ok":
-                    budget.record(res.get("wall_s"), res.get("n_evals"))
                 if on_result is not None:
                     on_result(res)
                 if self.verbose:
                     elapsed = time.time() - t0
                     # An interrupted point is progress, not a problem, and the
                     # log has to say so or every link will read as a run of
-                    # failures.
-                    state = " CONTINUES" if res.get("interrupted") else ""
+                    # failures. RESUMED marks a point that picked up its saved
+                    # state after an earlier process was killed on it -- the
+                    # line to count when checking that a preemptible run is
+                    # really surviving evictions.
+                    state = (" CONTINUES" if res.get("interrupted")
+                             else " RESUMED" if res.get("resumed_from_state")
+                             else "")
                     print(f"  [profile {done}/{n_jobs}]{state} "
                           f"{res.get('param_name')} "
                           f"= {res.get('x_fixed_linear', res.get('x_fixed')):.4g}  "
@@ -1194,7 +1089,6 @@ class ParallelEvaluator:
         if backlog:
             if budget is not None:
                 budget.stopped_early = True
-                budget.save()
             raise DeadlineReached(len(backlog), label)
         return results
 
@@ -1213,10 +1107,11 @@ def build_eval_spec(
     model_text, paths, events, replicates, param_names, scales, groups,
     group_normalization, fixed_sigmas, events_dynamic=False, data_path=None,
     for_inference=True, concentrated=True, preequil_cache=False,
+    search_max_steps=None,
 ):
     """Convenience constructor mirroring the spec-route local variables."""
     from Engine.Event_times import without_event_times
-    from Modules.utils.noise_floor import export_cache
+    from Engine.Noise_floor import export_cache
 
     return EvalSpec(
         model_text=model_text,
@@ -1242,6 +1137,7 @@ def build_eval_spec(
         for_inference=bool(for_inference),
         concentrated=bool(concentrated),
         preequil_cache=bool(preequil_cache),
+        search_max_steps=None if search_max_steps is None else int(search_max_steps),
         # Captured HERE, at spec-build time -- called in the parent after its
         # own clear_cache()-and-recalibrate pass (see run_optimization_from_
         # groups), so this snapshot is the same calibration the parent's own
