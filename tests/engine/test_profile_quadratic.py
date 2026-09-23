@@ -1744,7 +1744,7 @@ def test_se_span_widens_the_grid():
 def test_a_spec_can_set_its_own_grid():
     """Grid density belongs to the spec, not to the run's diagnostics preset.
 
-    silk_appfull and the Aducanumab PK validation share ``_PROFILE_ONLY``, and
+    a 16-parameter SILK fit and an antibody PK validation share ``_PROFILE_ONLY``, and
     their evaluations differ by a factor of forty in cost. A thinner grid is
     right for one and pointless for the other, so the spec states its own and
     it wins over the preset.
