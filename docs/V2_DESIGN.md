@@ -15,16 +15,40 @@ Branch `v2`. Breaking release.
 | Pairing | Every occasion names its subject; contrasts pair within subject by default |
 | Forcing | Data forcings become knot *parameters* of a shared piecewise template, not per-subject Antimony text |
 
+## One Engine, installed
+
+1.x copied `Engine/` into every project at `pyantigen-create` time, so each
+project ran whatever copy it was born with, and copies drifted apart. In 2.0
+the Engine is `pyantigen.engine`, part of the installed package:
+
+* **Projects hold no Engine.** A project imports `pyantigen.engine`; nothing
+  in the Engine imports project code (`Modules`, `AntiGen_paths`). The
+  project runner passes `MODEL_NAME` and `REPO_ROOT` in `settings`.
+* **One environment per project repository.** Install PyAntiGen into the
+  project's own virtual environment, editable (`pip install -e
+  <PyAntiGen checkout>`) while PyAntiGen is being developed alongside it, or
+  pinned to a released version once it is not. Two projects that need
+  different Engines get different environments, never different copies.
+* **Guard against a second copy.** A project's `AntiGen_paths.py` should
+  refuse to run if `pyantigen.engine` is missing or a local `Engine/`
+  folder has reappeared.
+* **Every result records its Engine.** The run snapshot JSON carries
+  `metadata.pyantigen_version` (the git tag and commit), the only record of
+  which code produced a result now that projects carry none.
+
 ## The design model
 
 ```
 Factor   name -> {level: attributes}; the reserved attribute "params" holds
          model parameter values that level fixes
 Subject  an individual or a cohort; covariates; between-subject factor levels
-Protocol events / solver / observed functions, stored as "module:qualname"
+Protocol events / solver / observed functions, stored as "module:qualname";
+         optionally a data loader (inputs for the events, prepared tables)
+         and update hooks run after resolve()
 Occasion subject x protocol x remaining factor levels (x period): the unit
          that is simulated. An "arm" is only a selection of occasions.
-Assay    Measured observables: model Obs + DataSource + Noise (+ only-filter)
+Assay    Measured observables: model Obs + DataSource + Noise (+ only-filter);
+         Obs is an expression or a sum of columns as % of its own baseline
 Contrast numerator vs denominator occasions, ratio_pct | diff,
          pairing = "subject" (default) | "between"
 Param    global, or by=<factor> (one fitted value per level), or fixed values
@@ -62,7 +86,11 @@ code with the cohort as the subject, so moving from published composite
 means to per-animal data changes the subjects, not the contrast. Parallel-
 group designs use `pairing="between"` and must name the factors to match on.
 Each pair lowers to its own composite loss element, so per-subject random
-effects later need no change here. Inter-occasion variability (a random
+effects later need no change here. Both simulations of a pair are predicted
+at the numerator's data times: the pair's data table is stored on both
+sides under a key unique to the pair, because the Engine evaluates each
+simulation of a composite at its own table's times and drops one that has
+none. Inter-occasion variability (a random
 effect per subject x period) has a place to live: the occasion.
 
 ### Forcing: parameterized template, not time-course input
@@ -90,7 +118,7 @@ event text; it has to read them from the knot parameters instead (milestone 7).
 | --- | --- | --- |
 | 0 | `pyantigen.generate` + `pyantigen.engine` | done: `tests/engine` 191 passed, 1 failed (pre-existing, see below) |
 | 1 | Engine reads a `Plan` directly | not started; `pyantigen.study.lower` targets today's Engine inputs instead |
-| 2 | `pyantigen.study`: design, assays, contrasts, JSON, remarks, validate | done for the template Example |
+| 2 | `pyantigen.study`: design, assays, contrasts, JSON, remarks, validate | done: template Example, and a private four-arm crossover study with a shared vehicle arm, both exact at x0 |
 | 3 | `Param` + `resolve()`; arm de-duplication | `resolve()` and by-level Params done; `validate` warns on duplicate occasions; Engine-side de-duplication not started |
 | 4-8 | NfL port, stats, shared compilation, NLME | not started |
 

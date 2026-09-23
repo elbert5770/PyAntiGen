@@ -58,6 +58,34 @@ def _finite_or_none(x):
     return v if np.isfinite(v) else None
 
 
+def _pyantigen_version():
+    """The installed version, plus the live commit for a source checkout.
+
+    An editable install writes its version once, at install time, so on a
+    checkout that has moved on since, the version alone names the wrong
+    code. When the package sits in a git work tree, append the current
+    commit and whether the tree has uncommitted changes.
+    """
+    try:
+        from pyantigen import __version__ as version
+        version = str(version)
+    except Exception:
+        version = "unknown"
+    try:
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if os.path.exists(os.path.join(root, ".git")):
+            run = lambda *a: subprocess.run(["git", "-C", root, *a], capture_output=True,
+                                            text=True, timeout=10).stdout.strip()
+            commit = run("rev-parse", "--short", "HEAD")
+            dirty = bool(run("status", "--porcelain", "--untracked-files=no"))
+            if commit:
+                version += f" (git {commit}{'-dirty' if dirty else ''})"
+    except Exception:
+        pass
+    return version
+
+
 def _write_results_row(df_row, csv_path):
     """Append one results row, reconciling the header instead of assuming it.
 
@@ -312,6 +340,10 @@ def log_optimization_results(
     snapshot = {
         "metadata": {
             "timestamp":     row["timestamp"],
+            # Which Engine produced this. Projects no longer carry their own
+            # copy, so the installed package version (from its git tag and
+            # commit) is the only record of the code a result came from.
+            "pyantigen_version": _pyantigen_version(),
             "model_name":    model_name,
             "experiment_id": experiment_id,
             "method":        method,
