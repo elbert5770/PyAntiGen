@@ -8,13 +8,15 @@ Modules/Optimizer_settings.py define for 1.x:
   flipflop  one synthetic subject x two treatments, log10 [B] plus four
             noisy log10 [A] points on the Early treatment only.
 
+A study holds experiments and datasets only. Which datasets are scored and
+which parameters they fit is an Optimization: see optimizations/example.py,
+whose four optimizations reproduce the 1.x specs of the same names
+(tests/study/test_example_equivalence.py checks each objective).
+
 Build them in Python -- loops and functions are allowed here -- and write
-the design record with ``pyantigen.study.save(study, "example.json")``.
-The estimations below reproduce the 1.x specs of the same names; see
-tests/study/test_example_equivalence.py, which checks that each gives the
-same objective as its 1.x original.
+the design records with ``python -m studies.example``.
 """
-from pyantigen.study import (Estimation, Measured, Noise, Obs, DataSource, Study)
+from pyantigen.study import Measured, Noise, Obs, DataSource, Study
 
 from Modules.Events import Example_event
 from Modules.Observed_species import all_species
@@ -39,30 +41,12 @@ def build_example():
                solver=solver_settings_Example, observed=all_species)
     s.simulate_all(["ADneg", "ADpos"], "dose_at_delay", treatment="*")
 
-    # Scores every simulation (no on=); the estimations below pick a cohort.
+    # Data on every simulation (no on=); each optimization picks a cohort.
     s.assay("B", Measured(
         "B", Obs("predicted_B"),
         DataSource("{status}.csv", time="time", value=["B1", "B2", "B3"],
                    where={"Treatment": "{treatment}"})))
-
-    s.param("k_A_to_B", x0=0.5, bounds=(0.01, 10.0))
-    s.param("SF", x0=2.0, bounds=(0.01, 10.0))
-    s.param("V_Comp1", x0=0.5, bounds=(0.01, 10.0))
     return s
-
-
-EXAMPLE_ESTIMATIONS = {
-    # 1.x OPTIMIZATION_Example1_ADpos / _ADneg / Example3_joint
-    "Example1_ADpos": Estimation("Example1_ADpos", params=["k_A_to_B", "SF"],
-                                 on={"status": "ADpos"},
-                                 optimizer_kwargs={"options": {"maxiter": 500}}),
-    "Example1_ADneg": Estimation("Example1_ADneg", params=["V_Comp1"],
-                                 on={"status": "ADneg"},
-                                 optimizer_kwargs={"options": {"maxiter": 500}}),
-    "Example3_joint": Estimation("Example3_joint", params=["k_A_to_B", "SF", "V_Comp1"],
-                                 on={"status": "ADpos"},
-                                 optimizer_kwargs={"options": {"maxiter": 500}}),
-}
 
 
 def build_flipflop():
@@ -91,19 +75,7 @@ def build_flipflop():
                                 where={"Treatment": "{treatment}"}),
                      Noise(sigma=0.75),
                      only={"has_A_data": True}))
-
-    for name, x0, b in (("k_A_to_B", 0.3, (0.005, 5.0)),
-                        ("k_B_to_C", 0.08, (0.005, 5.0)),
-                        ("SF", 1.5, (0.05, 50.0))):
-        s.param(name, x0=x0, bounds=b, scale="log10")
     return s
-
-
-FLIPFLOP_ESTIMATIONS = {
-    "Example4_flipflop": Estimation(
-        "Example4_flipflop",
-        optimizer_kwargs={"options": {"maxiter": 2000, "xatol": 1e-8, "fatol": 1e-10}}),
-}
 
 
 if __name__ == "__main__":

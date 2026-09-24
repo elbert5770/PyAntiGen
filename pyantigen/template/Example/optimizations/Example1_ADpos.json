@@ -1,0 +1,12 @@
+{
+ "pyantigen_optimization": 1,
+ "name": "Example1_ADpos",
+ "studies": {"example": "ddbef053250010551c75dee30be3c15956852cbce9bba7ec7f1b8b092ee192c7"},
+ "uses": [{"study": "example", "assays": ["B"], "on": {"status": "ADpos"}}],
+ "params": {
+  "k_A_to_B": {"x0": 0.5, "bounds": [0.01, 10.0]},
+  "SF": {"x0": 2.0, "bounds": [0.01, 10.0]}
+ },
+ "method": "Nelder-Mead",
+ "optimizer_kwargs": {"options": {"maxiter": 500}}
+}

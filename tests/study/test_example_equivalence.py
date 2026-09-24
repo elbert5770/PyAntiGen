@@ -1,8 +1,10 @@
 """The template Example, written as Studies, scores exactly as its 1.x specs.
 
 Three objectives must agree exactly at x0 for every 1.x spec: the 1.x spec
-itself, the Study built in Python, and the Study loaded back from the
-committed design JSON (which must also equal what the Python builds).
+itself, the Optimization built in Python (optimizations/example.py, using
+studies/example.py), and the same Optimization loaded back from its
+committed record together with the studies' committed design JSON (which
+must also equal what the Python builds).
 
 Scaffolds a fresh project with pyantigen-create, then in a subprocess (so the
 project's ``Modules`` package cannot leak between tests) evaluates each 1.x
@@ -22,16 +24,19 @@ pytest.importorskip("tellurium")
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SCRIPT = textwrap.dedent('''
-    import contextlib, io, json
+    import contextlib, io, json, os
     import AntiGen_paths
     from AntiGen_paths import MODEL_NAME, REPO_ROOT
     from pyantigen.generate.AntimonyGen import AntimonyGen
     from pyantigen.engine.Optimize import run_optimization_from_groups
     from Modules.Experiment import get_EXPERIMENT
     from Modules.Optimizer_settings import get_OPTIMIZATION
-    from pyantigen.study import lower, validate, load, to_dict
-    from studies.example import (build_example, build_flipflop,
-                                 EXAMPLE_ESTIMATIONS, FLIPFLOP_ESTIMATIONS)
+    from pyantigen.study import (load, load_optimization, lower, to_dict,
+                                 validate_optimization)
+    from optimizations.example import BUILDERS, build, studies
+
+    V1_EXPERIMENT = {"Example1_ADpos": "EXPERIMENT_Example", "Example1_ADneg": "EXPERIMENT_Example",
+                     "Example3_joint": "EXPERIMENT_Example", "Example4_flipflop": "EXPERIMENT_Flipflop"}
 
     def nll(model_text, paths, exp, spec):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -44,21 +49,19 @@ SCRIPT = textwrap.dedent('''
         return out["fun"]
 
     model_text, paths = AntimonyGen(MODEL_NAME, repo_root=REPO_ROOT)
-    rows, problems = [], []
-    for build, ests, v1exp in ((build_example, EXAMPLE_ESTIMATIONS, "EXPERIMENT_Example"),
-                               (build_flipflop, FLIPFLOP_ESTIMATIONS, "EXPERIMENT_Flipflop")):
-        st = build()
-        problems += [str(p) for p in validate(st, data_path=paths["data_path"])]
-        from_json = load("studies/" + st.name + ".json")
-        if to_dict(from_json) != to_dict(st):
-            problems.append(st.name + ".json does not match what studies/example.py builds")
-        for name, est in ests.items():
-            v1 = nll(model_text, paths, get_EXPERIMENT(v1exp),
-                     get_OPTIMIZATION("OPTIMIZATION_" + name))
-            exp2, spec2 = lower(st, est)
-            exp3, spec3 = lower(from_json, est)
-            rows.append([name, v1, nll(model_text, paths, exp2, spec2),
-                         nll(model_text, paths, exp3, spec3)])
+    py = studies()
+    js = {n: load(os.path.join("studies", n + ".json")) for n in py}
+    problems = [n + ".json does not match what studies/example.py builds"
+                for n in py if to_dict(js[n]) != to_dict(py[n])]
+    rows = []
+    for name in BUILDERS:
+        opt = build(name, py)
+        problems += [str(p) for p in validate_optimization(opt, data_path=paths["data_path"])]
+        opt_js = load_optimization(os.path.join("optimizations", name + ".json"), js)
+        v1 = nll(model_text, paths, get_EXPERIMENT(V1_EXPERIMENT[name]),
+                 get_OPTIMIZATION("OPTIMIZATION_" + name))
+        rows.append([name, v1, nll(model_text, paths, *lower(opt)),
+                     nll(model_text, paths, *lower(opt_js))])
     print("@@" + json.dumps({"rows": rows, "problems": problems}))
 ''')
 
@@ -71,6 +74,7 @@ def test_example_studies_match_v1_objective(tmp_path):
                    cwd=tmp_path, env=env, check=True, capture_output=True)
     proj = tmp_path / "proj" / "Projects" / "Example"
     assert (proj / "studies" / "example.py").exists()
+    assert (proj / "optimizations" / "example.py").exists()
     run = subprocess.run([sys.executable, "-c", SCRIPT], cwd=proj, env=env,
                          capture_output=True, text=True, timeout=900)
     assert run.returncode == 0, run.stderr[-3000:]

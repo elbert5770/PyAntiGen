@@ -1,5 +1,5 @@
 {
- "pyantigen_design": 2,
+ "pyantigen_design": 3,
  "name": "flipflop",
  "factors": {
   "generator": {"truth": {"params": {"k_A_to_B": 0.35, "k_B_to_C": 0.07, "SF": 1.6}}},
@@ -51,10 +51,5 @@
     }
    }
   }
- },
- "params": {
-  "k_A_to_B": {"x0": 0.3, "bounds": [0.005, 5.0], "scale": "log10"},
-  "k_B_to_C": {"x0": 0.08, "bounds": [0.005, 5.0], "scale": "log10"},
-  "SF": {"x0": 1.5, "bounds": [0.05, 50.0], "scale": "log10"}
  }
 }

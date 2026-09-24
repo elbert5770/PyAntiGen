@@ -17,9 +17,14 @@ A Study is built from:
               Engine integrates. ``simulate`` adds one; ``simulate_all`` adds
               every combination of subjects x factor levels. An "arm" is only
               a selection of simulations, not a stored object.
-  Assay       observables measured together, and ``on=`` which simulations
-              they score (see pyantigen.study.assay).
-  Param/Rule  what is estimated and what is constrained (pyantigen.study.params).
+  Assay       a dataset: observables measured together, and ``on=`` the
+              simulations it exists for (see pyantigen.study.assay).
+  Rule        a constraint the design imposes (pyantigen.study.params).
+
+A Study is a paper -- its experiments and every dataset it reports. It makes
+no choice about fitting: which datasets are scored, and which parameters
+they fit, is an Optimization (pyantigen.study.optimization), which can pull
+datasets from several studies.
 
 Why this shape, and not a table with one row per condition: a condition
 table repeats every attribute of every factor on every row, so its size is the
@@ -157,8 +162,8 @@ class Simulation:
 
 
 class Study:
-    """A design: factors, subjects, protocols, the simulations built from them,
-    the assays that score them, and the parameters they share."""
+    """A paper: factors, subjects, protocols, the simulations built from them,
+    and the datasets (assays) it reports on them."""
 
     def __init__(self, name, remarks=None):
         self.name = name
@@ -169,7 +174,6 @@ class Study:
         self.simulations = {}          # id -> Simulation, in creation order
         self._simulation_records = []  # compact generator records, for JSON
         self.assays = {}
-        self.params = {}
         self.rules = []
 
     # --- building --------------------------------------------------------
@@ -233,25 +237,15 @@ class Study:
         return out
 
     def assay(self, name, *observables, on=None):
-        """Observables measured together (Measured objects), scoring the
+        """A dataset: observables measured together (Measured objects), on the
         simulations selected by *on*: None (all), a Study.select filter, or a
-        Contrast."""
+        Contrast. Whether it is scored is an Optimization's choice."""
         from .assay import Assay
         if name in self.assays:
             raise ValueError(f"assay {name!r} already defined")
         a = Assay(name, list(observables), on)
         self.assays[name] = a
         return a
-
-    def param(self, name, **kw):
-        from .params import Param
-        if name in self.params:
-            raise ValueError(f"param {name!r} already defined")
-        if kw.get("by") and kw["by"] not in self.factors:
-            raise KeyError(f"param {name!r}: by={kw['by']!r} is not a factor")
-        p = Param(name, **kw)
-        self.params[name] = p
-        return p
 
     def rule(self, target, value, **when):
         from .params import Rule

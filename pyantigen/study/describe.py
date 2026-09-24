@@ -9,8 +9,8 @@ it, the parameters it receives, and every assay that scores it with the data
 table, noise model and contrast partner. It is computed from the design, so
 it cannot drift from it.
 
-    print(describe(study))                  # the design
-    print(describe(study, estimation))      # ... and what one fit uses
+    print(describe(study))                  # the paper: datasets on each simulation
+    print(describe(study, optimization))    # ... and what one fit scores
 """
 from .assay import _eval_arith
 from .design import _matches
@@ -70,44 +70,43 @@ def _data(m, attrs):
     return f"file {_fill(src.file, attrs)} [{src.time} -> {value}]{where}"
 
 
-def describe(study, estimation=None):
-    """The per-simulation view of *study*, as text."""
+def describe(study, optimization=None):
+    """The per-simulation view of *study*, as text.
+
+    Alone, it lists the datasets on each simulation (the paper). Given an
+    Optimization, it shows what THAT fit scores, which simulations it only
+    simulates, and which it does not need.
+    """
     from .serialize import fingerprint
     lines = []
-    scoring = study.scoring()
+    opt = optimization
+    if opt is not None:
+        entries_by_sim = opt.scoring(study)
+        needed = opt.simulated(study)
+        params = list(opt.params)
+    else:
+        entries_by_sim = {sid: [(a, partner, None) for a, partner in e]
+                          for sid, e in study.scoring().items()}
+        needed = None
+        params = []
     serves = {}
-    for sid, entries in scoring.items():
-        for assay, partner in entries:
+    for sid, entries in entries_by_sim.items():
+        for assay, partner, _only in entries:
             if partner is not None:
                 serves.setdefault(partner.id, []).append(f"{sid} ({assay.name})")
 
-    fitted = None
-    scored_ids = None
-    head = (f"{study.name}: {len(study.simulations)} simulation(s), "
-            f"{len(study.assays)} assay(s), fingerprint {fingerprint(study)[:12]}")
-    lines.append(head)
+    lines.append(f"{study.name}: {len(study.simulations)} simulation(s), "
+                 f"{len(study.assays)} dataset(s), fingerprint {fingerprint(study)[:12]}")
     if study.remarks:
         lines.append(f"remarks: {', '.join(study.remarks)}")
-    names = [n for n, p in study.params.items() if p.estimate]
-    if estimation is not None:
-        if estimation.params is not None:
-            names = list(estimation.params)
-        fitted = set()
-        for n in names:
-            p = study.params[n]
-            fitted |= set([n] if p.by is None else
-                          [by_name(n, p.by, lev) for lev in p._used_levels(study)])
-        lines.append(f"estimation {estimation.name}: fits {len(names)} parameter(s)")
-        if estimation.on:
-            scored_ids = {s.id for s in study.select(**estimation.on)}
-            lines.append(f"  scores only simulations matching {estimation.on}")
-    elif names:
-        lines.append(f"estimable parameters ({len(names)}):")
-    for n in names:
-        p = study.params[n]
-        lines.append(f"  {n:<24} x0 {p.x0!r:<22} bounds {p.bounds}  scale {p.scale}"
-                     + (f"  one per {p.by}" if p.by else ""))
-    n_global = sum(1 for n in names if study.params[n].by is None)
+    if opt is not None:
+        others = [st.name for st in opt.studies if st is not study]
+        lines.append(f"optimization {opt.name}: fits {len(params)} parameter(s)"
+                     + (f"; also uses {', '.join(others)}" if others else ""))
+        for p in params:
+            lines.append(f"  {p.name:<24} x0 {p.x0!r:<22} bounds {p.bounds}  scale {p.scale}"
+                         + (f"  one per {p.by}" if p.by else ""))
+    n_global = sum(1 for p in params if p.by is None)
     lines.append("")
 
     width = max((len(s) for s in study.simulations), default=10) + 2
@@ -117,6 +116,10 @@ def describe(study, estimation=None):
         attrs = study.attributes(sim)
         lines.append(f"{sim.id:<{width}}subject {sim.subject} ({subj.kind})   protocol {sim.protocol}"
                      + (f"   period {sim.period}" if sim.period is not None else ""))
+        if needed is not None and sim.id not in needed:
+            lines.append("  (not simulated by this optimization)")
+            lines.append("")
+            continue
         for fac, lev in sim.levels:
             implied = {k: v for k, v in study.factors[fac].levels[lev].items() if k != "params"}
             src = " (subject)" if fac in subj.levels else ""
@@ -135,9 +138,8 @@ def describe(study, estimation=None):
         fixed = resolve(study, sim, None)
         rules = [r for r in study.rules if r.applies(attrs)]
         rule_targets = {r.target for r in rules}
-        fit_names = {p.name for p in study.params.values() if p.estimate and (
-            fitted is None or (p.name if p.by is None else
-                               by_name(p.name, p.by, sim.level_dict.get(p.by))) in fitted)}
+        lv = sim.level_dict
+        fit_names = {p.name for p in params if p.by is None or p.by in lv}
         fixed_only = [f"{k}={v}" + (" (the fit overrides)" if k in fit_names else "")
                       for k, v in fixed.items() if k not in rule_targets]
         if fixed_only:
@@ -145,29 +147,21 @@ def describe(study, estimation=None):
         if rules:
             lines.append("  rules       " + ", ".join(f"{r.target}={r.value} (when {_fmt(r.when)})"
                                                      for r in rules))
-        lv = sim.level_dict
-        # Global parameters are the same for every simulation: counted here,
-        # listed once in the header. Only per-level ones are spelled out.
-        per_level = []
-        for n in names:
-            p = study.params[n]
-            if p.by is not None:
-                opt = by_name(p.name, p.by, lv.get(p.by))
-                if fitted is None or opt in fitted:
-                    per_level.append(f"{p.name} <- {opt}")
-        label = "fitted" if fitted is not None else "estimable"
+        per_level = [f"{p.name} <- {by_name(p.name, p.by, lv[p.by])}"
+                     for p in params if p.by is not None and p.by in lv]
         if n_global or per_level:
             parts = ([f"{n_global} global (above)"] if n_global else []) + per_level
-            lines.append(f"  {label:<11} {', '.join(parts)}")
+            lines.append(f"  {'fitted':<11} {', '.join(parts)}")
 
-        entries = scoring[sim.id]
-        excluded = scored_ids is not None and sim.id not in scored_ids
+        label = "scored by" if opt is not None else "datasets"
         shown = False
-        for assay, partner in entries:
+        for assay, partner, only_obs in entries_by_sim[sim.id]:
             for m in assay.observables:
+                if only_obs is not None and m.name not in only_obs:
+                    continue
                 if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
                     continue
-                tag = "scored by" if not shown else ""
+                tag = label if not shown else ""
                 shown = True
                 vs = ""
                 if partner is not None:
@@ -178,10 +172,9 @@ def describe(study, estimation=None):
                 lines.append(f"  {'':<13}data   {_data(m, attrs)}")
                 lines.append(f"  {'':<13}noise  {_noise(m)}")
         if not shown:
-            lines.append("  scored by   nothing")
+            plots = opt is not None and sim.id not in serves
+            lines.append(f"  {label:<11} nothing" + (" (simulated for plots)" if plots else ""))
         if sim.id in serves:
             lines.append(f"  control for {', '.join(serves[sim.id])}")
-        if excluded:
-            lines.append("  (not scored by this estimation: outside its on= filter)")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

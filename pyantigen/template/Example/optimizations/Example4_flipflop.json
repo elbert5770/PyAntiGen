@@ -1,0 +1,13 @@
+{
+ "pyantigen_optimization": 1,
+ "name": "Example4_flipflop",
+ "studies": {"flipflop": "b4a8d077cd018dc17d48ceead0031febac980b4e359ad66b3f01dc02db07a874"},
+ "uses": [{"study": "flipflop"}],
+ "params": {
+  "k_A_to_B": {"x0": 0.3, "bounds": [0.005, 5.0], "scale": "log10"},
+  "k_B_to_C": {"x0": 0.08, "bounds": [0.005, 5.0], "scale": "log10"},
+  "SF": {"x0": 1.5, "bounds": [0.05, 50.0], "scale": "log10"}
+ },
+ "method": "Nelder-Mead",
+ "optimizer_kwargs": {"options": {"maxiter": 2000, "xatol": 1e-08, "fatol": 1e-10}}
+}

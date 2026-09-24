@@ -2,8 +2,8 @@
 
 What is written is what was declared -- factor tables, subjects, protocol
 references and settings, the simulation GENERATORS (a ``simulate_all`` is one
-record, not its product), assays with the simulations they score, parameters
-and rules. Nothing is repeated per simulation, so the file grows with the sum
+record, not its product), assays with the simulations they exist for, and
+rules. Fitted parameters are an Optimization's, recorded separately. Nothing is repeated per simulation, so the file grows with the sum
 of the factor tables, not their product.
 
 No dates or hashes are written into the design. A run records the study's
@@ -16,10 +16,11 @@ import json
 
 from .assay import Assay
 from .design import Factor, Protocol, Study, Subject
-from .params import Param, Rule
+from .params import Rule
 
 # 2: occasions -> simulations, measurements/contrasts folded into assays' on=.
-FORMAT = 2
+# 3: fitted parameters moved out to Optimizations.
+FORMAT = 3
 
 
 # A factor whose levels all carry the same attribute and parameter names is
@@ -87,8 +88,6 @@ def to_dict(study):
     d["simulations"] = study._simulation_records
     if study.assays:
         d["assays"] = {n: a.to_json() for n, a in study.assays.items()}
-    if study.params:
-        d["params"] = {n: p.to_json() for n, p in study.params.items()}
     if study.rules:
         d["rules"] = [r.to_json() for r in study.rules]
     return d
@@ -117,8 +116,6 @@ def from_dict(d):
                        id=extra.get("id"), **levels)
     for n, a in d.get("assays", {}).items():
         s.assays[n] = Assay.from_json(n, a)
-    for n, p in d.get("params", {}).items():
-        s.params[n] = Param.from_json(n, p)
     s.rules = [Rule.from_json(r) for r in d.get("rules", [])]
     return s
 

@@ -1,5 +1,5 @@
 {
- "pyantigen_design": 2,
+ "pyantigen_design": 3,
  "name": "example",
  "factors": {
   "status": {
@@ -42,10 +42,5 @@
     }
    }
   }
- },
- "params": {
-  "k_A_to_B": {"x0": 0.5, "bounds": [0.01, 10.0]},
-  "SF": {"x0": 2.0, "bounds": [0.01, 10.0]},
-  "V_Comp1": {"x0": 0.5, "bounds": [0.01, 10.0]}
  }
 }

@@ -1,4 +1,4 @@
-"""Lower a Study + Estimation to the Engine's current inputs.
+"""Lower an Optimization (and the Studies it uses) to the Engine's current inputs.
 
 The Engine still consumes the 1.x shapes: an object with ``.replicates``
 (one dict per simulation, carrying Events / Data / Solver_settings /
@@ -31,27 +31,6 @@ from .assay import CONTRAST_OPS, peak_normalize
 from .design import _matches
 from .params import by_name, resolve
 from .refs import from_ref
-
-
-@dataclass
-class Estimation:
-    """What to fit, against which simulations, and how.
-
-    params  names of Study.params to estimate (default: every estimated one)
-    on      Study.select filter restricting which measured simulations are
-            scored (default: all). A contrast is kept when its numerator is.
-    passive simulation ids simulated but not scored, e.g. for plots; default is
-            none, as in 1.x.
-    """
-    name: str
-    params: list = None
-    on: dict = None
-    method: str = "Nelder-Mead"
-    optimizer_kwargs: dict = field(default_factory=dict)
-    n_starts: int = 1
-    start_seed: int = None
-    search_decades: float = None
-    passive: list = field(default_factory=list)
 
 
 @dataclass
@@ -196,27 +175,33 @@ def _sigma_block(study, assay_name, m, sim):
     return f"{assay_name}.{m.name}|" + "|".join(f"{k}={v}" for k, v in keep)
 
 
-def lower(study, est):
-    """Return (LoweredExperiment, LoweredSpec) for *est* on *study*.
+def lower(opt):
+    """Return (LoweredExperiment, LoweredSpec) for Optimization *opt*.
 
-    Loss elements are emitted simulation by simulation, in the order the
-    simulations were created, and within each in the order its assays were
-    declared -- the per-simulation reading ``describe`` prints, and the order
-    the Engine sums blocks in. A contrast's element belongs to its numerator.
+    Simulations from every study it uses become replicates; their ids must be
+    unique across those studies (they are the Engine's labels, and some 1.x
+    event builders still key off them). Loss elements are emitted use by use,
+    then simulation by simulation, then assay by assay -- the order the
+    Engine sums blocks in. A contrast's element belongs to its numerator.
     """
+    studies = opt.studies
+    owner = {}
+    for st in studies:
+        for sid in st.simulations:
+            if sid in owner and owner[sid] is not st:
+                raise ValueError(f"optimization {opt.name!r}: simulation id {sid!r} is in "
+                                 f"both {owner[sid].name!r} and {st.name!r}")
+            owner[sid] = st
+
     # parameters
-    names = est.params if est.params is not None else [
-        n for n, p in study.params.items() if p.estimate]
     param_names, x0, bounds, scale = [], {}, {}, {}
-    for n in names:
-        p = study.params[n]
-        if not p.estimate:
-            raise ValueError(f"estimation {est.name!r}: param {n!r} is fixed (estimate=False)")
-        if p.by is None:
-            items = [(n, None)]
-        else:
-            items = [(by_name(n, p.by, lev), lev) for lev in p._used_levels(study)]
-        for opt_name, lev in items:
+    for p in opt.params:
+        levels = [None] if p.by is None else p.levels(studies)
+        if p.by is not None and not levels:
+            raise ValueError(f"optimization {opt.name!r}: Param {p.name!r} by={p.by!r} "
+                             "matches no factor level in the studies it uses")
+        for lev in levels:
+            opt_name = p.name if lev is None else by_name(p.name, p.by, lev)
             param_names.append(opt_name)
             x0[opt_name] = p.x0_for(lev)
             b = p.bounds_for(lev)
@@ -224,96 +209,100 @@ def lower(study, est):
             scale[opt_name] = p.scale
     if any(b is None for b in bounds.values()):
         if not all(b is None for b in bounds.values()):
-            raise ValueError(f"estimation {est.name!r}: give bounds for every parameter or none")
+            raise ValueError(f"optimization {opt.name!r}: give bounds for every parameter or none")
         bounds = None
-
-    scored = None
-    if est.on:
-        scored = {s.id for s in study.select(**est.on)}
 
     # loss elements and the data each simulation needs
     elems = []
-    data_needs = {sid: [] for sid in study.simulations}
-    scoring = study.scoring()
-    for sim in study.simulations.values():
-        if scored is not None and sim.id not in scored:
+    data_needs = {sid: [] for sid in owner}
+    full = {id(st): st.scoring() for st in studies}
+    passive = []
+    for u in opt.uses:
+        st = u.study
+        if not u.score:
+            passive += [s.id for s in u.simulations() if s.id not in passive]
             continue
-        attrs = study.attributes(sim)
-        for assay, partner in scoring[sim.id]:
-            for m in assay.observables:
-                if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
-                    continue
-                cfg_attrs = attrs
-                if partner is not None:
-                    if m.normalize:
-                        raise ValueError(
-                            f"assay {assay.name!r}/{m.name}: normalize={m.normalize!r} is not "
-                            "supported on a contrast; normalize the contrast's result instead")
-                    pair = f"{sim.id}/{partner.id}"
-                    key = _measured_key(assay.name, m, pair)
-                    loader = study.protocols[sim.protocol].hooks()[0]
-                    data_needs[sim.id].append((key, attrs, m.data, m.name, loader))
-                    data_needs[partner.id].append((key, attrs, m.data, m.name, loader))
-                    e = {"type": "composite", "simulations": [sim.id, partner.id],
-                         "data_simulation": sim.id,
-                         "aggregation": CONTRAST_OPS[assay.contrast.op],
-                         "loss_config": {"observables": [_obs_cfg(assay.name, m, cfg_attrs, pair)]}}
-                else:
-                    key = _measured_key(assay.name, m)
-                    data_needs[sim.id].append((key, attrs, m.data, m.name, None))
-                    if m.normalize == "peak":
-                        # The Engine's one hook that sees predictions already
-                        # at the data times is a composite's aggregation.
-                        e = {"type": "composite", "simulations": [sim.id],
-                             "data_simulation": sim.id, "aggregation": peak_normalize,
-                             "loss_config": {"observables": [_obs_cfg(assay.name, m, cfg_attrs)]}}
+        scoring = u.scoring(full[id(st)])
+        for sim in st.simulations.values():
+            attrs = st.attributes(sim)
+            for assay, partner, only_obs in scoring[sim.id]:
+                for m in assay.observables:
+                    if only_obs is not None and m.name not in only_obs:
+                        continue
+                    if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
+                        continue
+                    if partner is not None:
+                        if m.normalize:
+                            raise ValueError(
+                                f"assay {assay.name!r}/{m.name}: normalize={m.normalize!r} is "
+                                "not supported on a contrast; normalize the result instead")
+                        pair = f"{sim.id}/{partner.id}"
+                        key = _measured_key(assay.name, m, pair)
+                        loader = st.protocols[sim.protocol].hooks()[0]
+                        data_needs[sim.id].append((key, attrs, m.data, m.name, loader))
+                        data_needs[partner.id].append((key, attrs, m.data, m.name, loader))
+                        e = {"type": "composite", "simulations": [sim.id, partner.id],
+                             "data_simulation": sim.id,
+                             "aggregation": CONTRAST_OPS[assay.contrast.op],
+                             "loss_config": {"observables": [_obs_cfg(assay.name, m, attrs, pair)]}}
                     else:
-                        e = {"simulation": sim.id,
-                             "loss_config": {"observables": [_obs_cfg(assay.name, m, cfg_attrs)]}}
-                blk = _sigma_block(study, assay.name, m, sim)
-                if blk:
-                    e["sigma_block"] = blk
-                elems.append(e)
+                        key = _measured_key(assay.name, m)
+                        data_needs[sim.id].append((key, attrs, m.data, m.name, None))
+                        if m.normalize == "peak":
+                            # The Engine's one hook that sees predictions
+                            # already at the data times is a composite's
+                            # aggregation.
+                            e = {"type": "composite", "simulations": [sim.id],
+                                 "data_simulation": sim.id, "aggregation": peak_normalize,
+                                 "loss_config": {"observables": [_obs_cfg(assay.name, m, attrs)]}}
+                        else:
+                            e = {"simulation": sim.id,
+                                 "loss_config": {"observables": [_obs_cfg(assay.name, m, attrs)]}}
+                    blk = _sigma_block(st, assay.name, m, sim)
+                    if blk:
+                        e["sigma_block"] = f"{st.name}:{blk}"
+                    elems.append(e)
     if not elems:
-        raise ValueError(f"estimation {est.name!r} scores nothing")
-    groups = {study.name: {"loss_elements": elems}}
+        raise ValueError(f"optimization {opt.name!r} scores nothing")
+    groups = {opt.name: {"loss_elements": elems}}
 
-    # replicates
+    # replicates, for every simulation of every study used
     fitted_set = set(param_names)
     replicates = {}
-    for sim in study.simulations.values():
-        proto = study.protocols[sim.protocol]
-        events, solver, observed = proto.resolved()
-        p_data, p_update, p_update_opt = proto.hooks()
-        attrs = study.attributes(sim)
-        fixed = resolve(study, sim, None)
-        lv = sim.level_dict
-        fitted = {}
-        for p in study.params.values():
-            if not p.estimate:
-                continue
-            opt_name = p.name if p.by is None else by_name(p.name, p.by, lv.get(p.by))
-            if opt_name in fitted_set:
-                fitted[opt_name] = p.name
-        rules = [(r.target, r.value) for r in study.rules if r.applies(attrs)]
-        rep = dict(attrs)
-        rep.update({
-            "Label": sim.id,
-            "Events": events,
-            "Data": LoadData(_dedupe(data_needs[sim.id]), p_data),
-            "Observed_species": observed,
-            "Solver_settings": solver,
-            "Update_parameters": ApplyFixed(fixed, p_update),
-            "Update_opt_parameters": ApplyResolved(fixed, fitted, rules, p_update_opt),
-        })
-        replicates[sim.id] = rep
+    for st in studies:
+        for sim in st.simulations.values():
+            proto = st.protocols[sim.protocol]
+            events, solver, observed = proto.resolved()
+            p_data, p_update, p_update_opt = proto.hooks()
+            attrs = st.attributes(sim)
+            fixed = resolve(st, sim, None)
+            lv = sim.level_dict
+            fitted = {}
+            for p in opt.params:
+                if p.by is not None and p.by not in lv:
+                    continue
+                opt_name = p.name if p.by is None else by_name(p.name, p.by, lv[p.by])
+                if opt_name in fitted_set:
+                    fitted[opt_name] = p.name
+            rules = [(r.target, r.value) for r in st.rules if r.applies(attrs)]
+            rep = dict(attrs)
+            rep.update({
+                "Label": sim.id,
+                "Events": events,
+                "Data": LoadData(_dedupe(data_needs[sim.id]), p_data),
+                "Observed_species": observed,
+                "Solver_settings": solver,
+                "Update_parameters": ApplyFixed(fixed, p_update),
+                "Update_opt_parameters": ApplyResolved(fixed, fitted, rules, p_update_opt),
+            })
+            replicates[sim.id] = rep
 
     spec = LoweredSpec(
-        param_names=param_names, x0=x0, bounds=bounds, method=est.method,
-        optimizer_kwargs=dict(est.optimizer_kwargs), groups=groups,
-        passive_simulations=list(est.passive),
-        parameter_scale=scale, search_decades=est.search_decades,
-        n_starts=est.n_starts, start_seed=est.start_seed)
+        param_names=param_names, x0=x0, bounds=bounds, method=opt.method,
+        optimizer_kwargs=dict(opt.optimizer_kwargs), groups=groups,
+        passive_simulations=passive,
+        parameter_scale=scale, search_decades=opt.search_decades,
+        n_starts=opt.n_starts, start_seed=opt.start_seed)
     return LoweredExperiment(replicates), spec
 
 

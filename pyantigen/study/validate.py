@@ -81,7 +81,7 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
                     err(f"{where}/{m.name}: pool names unknown factor(s) {sorted(badp)}")
         sims = scored_by_assay[aname]
         if not sims:
-            err(f"{where}: scores no simulations")
+            err(f"{where}: has data on no simulations")
             continue
         scored_any = False
         for sim in sims:
@@ -110,25 +110,6 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
         if not scored_any:
             err(f"{where}: every simulation is excluded by the observables' 'only' filters")
 
-    # parameters
-    fitted = []
-    for name, p in study.params.items():
-        if p.by and p.by not in study.factors:
-            err(f"param {name!r}: by={p.by!r} is not a factor")
-            continue
-        try:
-            fitted += p.fitted_names(study)
-        except KeyError as exc:
-            err(f"param {name!r}: {exc}")
-        if p.estimate and p.bounds is not None and not isinstance(p.bounds, dict) \
-                and not isinstance(p.x0, dict):
-            lo, hi = p.bounds
-            if not (lo <= p.x0 <= hi):
-                err(f"param {name!r}: x0={p.x0} outside bounds {p.bounds}")
-    dup = {n for n in fitted if fitted.count(n) > 1}
-    if dup:
-        err(f"fitted parameter names collide: {sorted(dup)}")
-
     for r in study.rules:
         bad = set(r.when) - known
         if bad:
@@ -155,6 +136,60 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
         else:
             seen[sig] = sim.id
 
+    if raise_on_error:
+        errors = [p for p in probs if p.level == "error"]
+        if errors:
+            raise DesignError("\n".join(str(p) for p in errors))
+    return probs
+
+
+def validate_optimization(opt, data_path=None, remarks=None, raise_on_error=False):
+    """Check an Optimization and every Study it uses.
+
+    Beyond each study's own checks: every use scores something, simulation
+    ids do not collide across studies, parameters have sane bounds, and a
+    by-factor exists in at least one study used.
+    """
+    probs = []
+    for st in opt.studies:
+        probs += [Problem(p.level, f"{st.name}: {p.message}")
+                  for p in validate(st, data_path=data_path, remarks=remarks)]
+    owner = {}
+    for st in opt.studies:
+        for sid in st.simulations:
+            if sid in owner and owner[sid] is not st:
+                probs.append(Problem("error", f"simulation id {sid!r} is in both "
+                                              f"{owner[sid].name!r} and {st.name!r}"))
+            owner[sid] = st
+    for i, u in enumerate(opt.uses):
+        where = f"use {i} ({u.study.name})"
+        try:
+            sims = u.simulations()
+        except KeyError as exc:
+            probs.append(Problem("error", f"{where}: {exc}"))
+            continue
+        if not sims:
+            probs.append(Problem("error", f"{where}: on={u.on} selects no simulations"))
+        if u.score and not any(u.scoring().values()):
+            probs.append(Problem("error", f"{where}: scores nothing (no selected assay "
+                                          "has data on the selected simulations)"))
+    for p in opt.params:
+        if p.by and not any(p.by in st.factors for st in opt.studies):
+            probs.append(Problem("error", f"param {p.name!r}: by={p.by!r} is not a factor "
+                                          "of any study used"))
+        if p.bounds is not None and not isinstance(p.bounds, dict) and not isinstance(p.x0, dict):
+            lo, hi = p.bounds
+            if not (lo <= p.x0 <= hi):
+                probs.append(Problem("error", f"param {p.name!r}: x0={p.x0} outside {p.bounds}"))
+    if opt.remarks:
+        if remarks is None:
+            probs.append(Problem("warning", f"optimization cites remarks {opt.remarks} "
+                                            "but no remarks file was given to check them"))
+        else:
+            missing = [r for r in opt.remarks if r not in remarks.ids]
+            if missing:
+                probs.append(Problem("error", f"optimization cites remark(s) not in "
+                                              f"{remarks.path}: {missing}"))
     if raise_on_error:
         errors = [p for p in probs if p.level == "error"]
         if errors:

@@ -7,9 +7,10 @@ import os
 
 import pytest
 
-from pyantigen.study import (Contrast, DataSource, Estimation, Measured, Noise, Obs, Remarks,
-                             Study, by_name, describe, fingerprint, from_dict, lower,
-                             resolve, to_dict, validate)
+from pyantigen.study import (Contrast, DataSource, Measured, Noise, Obs, Optimization, Param,
+                             Remarks, Study, by_name, describe, fingerprint, from_dict,
+                             load_optimization, lower, resolve, save_optimization, to_dict,
+                             validate, validate_optimization)
 from pyantigen.study.assay import ratio_pct
 
 
@@ -34,6 +35,13 @@ def crossover():
     s.protocol("p", _events, _solver, _observed)
     s.simulate_all(["M1", "M2", "M3"], "p", dose="*")
     return s
+
+
+def _fit(study, params=None, name="e", **use):
+    """A one-study optimization using every dataset of *study*."""
+    opt = Optimization(name, params=list(params or []))
+    opt.use(study, **use)
+    return opt
 
 
 # --- design ------------------------------------------------------------------
@@ -115,16 +123,16 @@ def test_resolve_order_is_levels_then_fixed_then_fitted_then_rules():
     s.subject("S", status="neg")
     s.protocol("p", _events, _solver, _observed)
     s.simulate_all(["S"], "p", drug="*")
-    s.param("kf", x0=0.5, by="drug")
-    s.param("SF", x0=1.0)
+    params = [Param("kf", x0=0.5, by="drug"), Param("SF", x0=1.0)]
     s.rule("k_oligo", 0.0, amyloid_positive=False)
     theta = {by_name("kf", "drug", "Lec"): 0.7, by_name("kf", "drug", "Adu"): 0.9,
              "SF": 2.5, "V": 99.0}
-    assert resolve(s, "S_Lec", None) == {"k": 1.0, "V": 3.0, "k_oligo": 0.0}
-    assert resolve(s, "S_Lec", theta) == {"k": 1.0, "V": 3.0, "kf": 0.7, "SF": 2.5, "k_oligo": 0.0}
-    assert resolve(s, "S_Adu", theta)["kf"] == 0.9
+    assert resolve(s, "S_Lec", None, params) == {"k": 1.0, "V": 3.0, "k_oligo": 0.0}
+    assert resolve(s, "S_Lec", theta, params) == {"k": 1.0, "V": 3.0, "kf": 0.7, "SF": 2.5,
+                                                  "k_oligo": 0.0}
+    assert resolve(s, "S_Adu", theta, params)["kf"] == 0.9
     # "V" in theta is not a declared Param, so it is not applied.
-    assert "V" not in resolve(s, "S_Adu", theta)
+    assert "V" not in resolve(s, "S_Adu", theta, params)
 
 
 def test_rule_beats_a_fitted_value():
@@ -133,15 +141,14 @@ def test_rule_beats_a_fitted_value():
     s.subject("S", status="neg")
     s.protocol("p", _events, _solver, _observed)
     s.simulate("S", "p")
-    s.param("k_oligo", x0=1e-3)
     s.rule("k_oligo", 0.0, amyloid_positive=False)
-    assert resolve(s, "S", {"k_oligo": 5e-3})["k_oligo"] == 0.0
+    assert resolve(s, "S", {"k_oligo": 5e-3}, [Param("k_oligo", x0=1e-3)])["k_oligo"] == 0.0
 
 
 def test_by_level_params_only_for_levels_that_occur():
     s = crossover()
-    s.param("KI", x0=1.0, by="dose")
-    assert s.params["KI"].fitted_names(s) == ["KI[dose=0]", "KI[dose=30]", "KI[dose=125]"]
+    assert Param("KI", x0=1.0, by="dose").fitted_names([s]) == [
+        "KI[dose=0]", "KI[dose=30]", "KI[dose=125]"]
 
 
 # --- JSON ----------------------------------------------------------------------
@@ -151,9 +158,11 @@ def with_assay(s):
                             DataSource("d.csv", "t", "v", where={"animal": "{subject}"}),
                             Noise(pool=["dose"])),
             on=Contrast.ratio_pct({"dose": ["30", "125"]}, {"dose": "0"}))
-    s.param("KI", x0=0.3, bounds=(1e-5, 1e3), scale="log10")
     s.rule("k_oligo", 0.0, weight_kg=8.0)
     return s
+
+
+KI = Param("KI", x0=0.3, bounds=(1e-5, 1e3), scale="log10")
 
 
 def test_json_round_trip_is_exact():
@@ -206,12 +215,13 @@ def test_froehlich_sized_design_stays_small():
 
 def test_lowering_builds_one_composite_per_subject_pair_and_pools_sigma():
     s = with_assay(crossover())
-    exp, spec = lower(s, Estimation("e"))
-    elems = spec.groups["crossover"]["loss_elements"]
+    exp, spec = lower(_fit(s, [KI]))
+    elems = spec.groups["e"]["loss_elements"]
     assert [e["simulations"] for e in elems][:2] == [["M1_30", "M1_0"], ["M1_125", "M1_0"]]
     # pooled across dose: one block per animal
-    assert {e["sigma_block"] for e in elems} == {"csf.AB40|subject=M1", "csf.AB40|subject=M2",
-                                                 "csf.AB40|subject=M3"}
+    assert {e["sigma_block"] for e in elems} == {"crossover:csf.AB40|subject=M1",
+                                                 "crossover:csf.AB40|subject=M2",
+                                                 "crossover:csf.AB40|subject=M3"}
     assert spec.param_names == ["KI"] and spec.parameter_scale == {"KI": "log10"}
     assert set(exp.replicates) == set(s.simulations)
     assert exp.replicates["M1_30"]["mgkg"] == 30
@@ -219,7 +229,7 @@ def test_lowering_builds_one_composite_per_subject_pair_and_pools_sigma():
 
 def test_lowered_hooks_apply_resolve_in_full():
     s = with_assay(crossover())
-    exp, _ = lower(s, Estimation("e"))
+    exp, _ = lower(_fit(s, [KI]))
     hook = exp.replicates["M1_30"]["Update_opt_parameters"]
     assert hook.values({"KI": 0.02}) == {"KI": 0.02, "k_oligo": 0.0}
 
@@ -227,7 +237,7 @@ def test_lowered_hooks_apply_resolve_in_full():
 def test_lowered_replicates_pickle():
     import pickle
     s = with_assay(crossover())
-    exp, spec = lower(s, Estimation("e"))
+    exp, spec = lower(_fit(s, [KI]))
     pickle.loads(pickle.dumps((exp.replicates, spec)))
 
 
@@ -321,7 +331,7 @@ def test_protocol_inputs_reach_events_and_scored_tables():
     s = crossover()
     s.protocols["p"].data = _loader
     s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")))
-    exp, _ = lower(s, Estimation("e", params=[]))
+    exp, _ = lower(_fit(s))
     rep = exp.replicates["M1_30"]
     d = rep["Data"](rep, "unused")
     assert list(d["pk"]["t"]) == [0.0, 1.0]           # passed through for the events
@@ -333,8 +343,7 @@ def test_protocol_hooks_run_after_resolved_values_and_round_trip():
     s.protocols["p"].update_parameters = _hook
     s.protocols["p"].update_opt_parameters = _opt_hook
     s.assay("a", Measured("v", Obs("v"), DataSource("d.csv", "t", "v")))
-    s.param("KI", x0=0.3)
-    exp, _ = lower(s, Estimation("e"))
+    exp, _ = lower(_fit(s, [Param("KI", x0=0.3)]))
     r = {}
     exp.replicates["M1_30"]["Update_parameters"](r, {})
     exp.replicates["M1_30"]["Update_opt_parameters"](r, {}, {"KI": 0.02})
@@ -352,9 +361,9 @@ def test_both_sides_of_a_contrast_pair_hold_the_numerators_rows():
     s.protocols["p"].data = _loader
     s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")),
             on=Contrast.ratio_pct({"dose": ["30", "125"]}, {"dose": "0"}))
-    exp, spec = lower(s, Estimation("e", params=[]))
+    exp, spec = lower(_fit(s))
     keys = [e["loss_config"]["observables"][0]["data_dict_key"]
-            for e in spec.groups["crossover"]["loss_elements"]]
+            for e in spec.groups["e"]["loss_elements"]]
     assert keys[:2] == ["a.v|M1_30/M1_0", "a.v|M1_125/M1_0"]
     veh = exp.replicates["M1_0"]
     d = veh["Data"](veh, "unused")
@@ -376,7 +385,7 @@ def test_templated_input_names_pick_each_simulations_table():
     for sid in ("M1", "M2", "M3"):
         s.subjects[sid].covariates["table"] = "prepared"
     s.assay("a", Measured("v", Obs("v"), DataSource(input="{table}", time="t", value="v")))
-    exp, _ = lower(s, Estimation("e", params=[]))
+    exp, _ = lower(_fit(s))
     rep = exp.replicates["M2_30"]
     assert list(rep["Data"](rep, "unused")["a.v"]["v"]) == [5.0, 7.0]
 
@@ -386,8 +395,8 @@ def test_peak_normalized_measurement_lowers_to_a_one_simulation_composite():
     s = crossover()
     s.assay("gad", Measured("CM", Obs("[G_CM]"), DataSource("d.csv", "t", "v"), normalize="peak"),
             on={"subject": "M1", "dose": "0"})
-    _, spec = lower(s, Estimation("e", params=[]))
-    (e,) = spec.groups["crossover"]["loss_elements"]
+    _, spec = lower(_fit(s))
+    (e,) = spec.groups["e"]["loss_elements"]
     assert e["simulations"] == ["M1_0"] and e["aggregation"] is peak_normalize
     assert list(peak_normalize([[1.0, 4.0, 2.0]])) == [0.25, 1.0, 0.5]
     assert list(peak_normalize([[0.0, 0.0]])) == [0.0, 0.0]
@@ -428,21 +437,22 @@ def test_loss_elements_are_in_simulation_order_then_assay_order():
     s = crossover()
     s.assay("b", Measured("y", Obs("y"), DataSource("d.csv", "t", "v")), on={"dose": "30"})
     s.assay("a", Measured("x", Obs("x"), DataSource("d.csv", "t", "v")))
-    _, spec = lower(s, Estimation("e", params=[]))
+    _, spec = lower(_fit(s, assays=["b", "a"]))
     order = [(e["simulation"], e["loss_config"]["observables"][0]["data_column"])
-             for e in spec.groups["crossover"]["loss_elements"]][:4]
+             for e in spec.groups["e"]["loss_elements"]][:4]
+    # simulation by simulation, then assays in the order the use names them
     assert order == [("M1_0", "x"), ("M1_30", "y"), ("M1_30", "x"), ("M1_125", "x")]
 
 
-def test_an_assay_that_scores_nothing_is_an_error():
+def test_an_assay_with_data_nowhere_is_an_error():
     s = crossover()
     s.assay("a", Measured("x", Obs("x"), DataSource("d.csv", "t", "v")), on={"dose": "999"})
-    assert any("assay 'a': scores no simulations" in str(p) for p in validate(s))
+    assert any("assay 'a': has data on no simulations" in str(p) for p in validate(s))
 
 
 def test_describe_shows_each_simulation_whole():
     s = with_assay(crossover())
-    text = describe(s, Estimation("e"))
+    text = describe(s, _fit(s, [KI]))
     block = text.split("\nM1_30 ")[1].split("\n\n")[0]
     assert "level       dose=30  ->  mgkg=30" in block
     assert "covariates  weight_kg=8.0" in block
@@ -453,3 +463,101 @@ def test_describe_shows_each_simulation_whole():
     assert "pooled over dose" in block
     vehicle = text.split("\nM1_0 ")[1].split("\n\n")[0]
     assert "scored by   nothing" in vehicle and "control for M1_30 (csf), M1_125 (csf)" in vehicle
+
+
+# --- optimizations: datasets from several studies --------------------------------
+
+def _second_study():
+    """A parallel-group study with its own simulation ids and a shared assay name."""
+    s = Study("parallel")
+    s.factor("arm", {"drug": {"mgkg": 10}, "placebo": {"mgkg": 0}})
+    s.subject("G1", kind="cohort", arm="drug", covariates={"weight_kg": 70.0})
+    s.subject("G2", kind="cohort", arm="placebo", covariates={"weight_kg": 70.0})
+    s.protocol("p", _events, _solver, _observed)
+    s.simulate("G1", "p")
+    s.simulate("G2", "p")
+    s.assay("csf", Measured("AB40", Obs("AB40_CM"), DataSource("e.csv", "t", "v")))
+    return s
+
+
+def test_an_optimization_pulls_datasets_from_several_studies():
+    a, b = with_assay(crossover()), _second_study()
+    opt = Optimization("joint", params=[KI, Param("SF", x0=1.0, bounds=(0.1, 10.0))])
+    opt.use(a, assays=["csf"], on={"subject": "M1"})
+    opt.use(b, assays=["csf"])
+    opt.simulate_only(a, on={"subject": "M2", "dose": "0"})
+    exp, spec = lower(opt)
+    elems = spec.groups["joint"]["loss_elements"]
+    assert [e.get("simulations") or e["simulation"] for e in elems] == [
+        ["M1_30", "M1_0"], ["M1_125", "M1_0"], "G1", "G2"]
+    # same assay name in two studies: blocks stay apart
+    assert elems[2].get("sigma_block") is None and elems[0]["sigma_block"].startswith("crossover:")
+    assert spec.passive_simulations == ["M2_0"]
+    assert set(exp.replicates) == set(a.simulations) | set(b.simulations)
+    assert spec.param_names == ["KI", "SF"]
+
+
+def test_simulation_ids_must_be_unique_across_studies():
+    a, b = crossover(), crossover()
+    b.name = "other"
+    opt = Optimization("clash")
+    opt.use(a)
+    opt.simulate_only(b)
+    with pytest.raises(ValueError, match="is in both"):
+        lower(opt)
+
+
+def test_a_use_can_take_single_observables():
+    s = crossover()
+    s.assay("csf", Measured("AB40", Obs("AB40_CM"), DataSource("d.csv", "t", "v")),
+            Measured("AB42", Obs("AB42_CM"), DataSource("d.csv", "t", "w")))
+    _, spec = lower(_fit(s, assays=["csf.AB42"]))
+    cols = {e["loss_config"]["observables"][0]["data_column"]
+            for e in spec.groups["e"]["loss_elements"]}
+    assert cols == {"AB42"}
+    with pytest.raises(KeyError, match="no observable 'AB43'"):
+        _fit(s, assays=["csf.AB43"])
+
+
+def test_by_level_params_span_the_studies_used():
+    a, b = crossover(), _second_study()
+    b.factors["dose"] = a.factors["dose"]            # b has the factor, no simulation uses it
+    opt = Optimization("e", params=[Param("KI", x0=1.0, by="dose")])
+    opt.use(a)
+    assert opt.params[0].fitted_names(opt.studies) == ["KI[dose=0]", "KI[dose=30]", "KI[dose=125]"]
+
+
+def test_optimization_record_round_trips_and_pins_its_studies(tmp_path):
+    a, b = with_assay(crossover()), _second_study()
+    opt = Optimization("joint", params=[KI], optimizer_kwargs={"options": {"maxiter": 9}},
+                       n_starts=3, start_seed=7)
+    opt.use(a, assays=["csf"], on={"subject": "M1"})
+    opt.use(b)
+    path = save_optimization(opt, str(tmp_path / "joint.json"))
+    again = load_optimization(path, {"crossover": a, "parallel": b})
+    assert again.to_dict() == opt.to_dict() and again.fingerprint() == opt.fingerprint()
+    b.simulate("G1", "p", id="G1_again")             # the paper's design changed
+    with pytest.raises(ValueError, match="has changed"):
+        load_optimization(path, {"crossover": a, "parallel": b})
+
+
+def test_validate_optimization():
+    a = with_assay(crossover())
+    opt = Optimization("e", params=[Param("KI", x0=5.0, bounds=(0.1, 1.0)),
+                                    Param("X", x0=1.0, by="nope")])
+    opt.use(a, on={"subject": "M1", "dose": "0"})     # the vehicle alone: no contrast numerator
+    msgs = [str(p) for p in validate_optimization(opt)]
+    assert any("scores nothing" in m for m in msgs)
+    assert any("x0=5.0 outside" in m for m in msgs)
+    assert any("by='nope' is not a factor" in m for m in msgs)
+
+
+def test_describe_marks_what_an_optimization_does_not_need():
+    a = with_assay(crossover())
+    opt = Optimization("e", params=[KI])
+    opt.use(a, on={"subject": "M1"})
+    text = describe(a, opt)
+    assert "M2_30" in text and text.split("\nM2_30 ")[1].split("\n\n")[0].endswith(
+        "(not simulated by this optimization)")
+    paper = describe(a)
+    assert "datasets    csf.AB40" in paper and "optimization" not in paper
