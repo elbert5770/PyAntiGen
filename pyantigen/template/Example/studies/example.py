@@ -37,13 +37,13 @@ def build_example():
         s.subject(status, kind="cohort", status=status)
     s.protocol("dose_at_delay", events=Example_event,
                solver=solver_settings_Example, observed=all_species)
-    s.cross(["ADneg", "ADpos"], "dose_at_delay", treatment="*")
+    s.simulate_all(["ADneg", "ADpos"], "dose_at_delay", treatment="*")
 
+    # Scores every simulation (no on=); the estimations below pick a cohort.
     s.assay("B", Measured(
         "B", Obs("predicted_B"),
         DataSource("{status}.csv", time="time", value=["B1", "B2", "B3"],
                    where={"Treatment": "{treatment}"})))
-    s.measure("B")
 
     s.param("k_A_to_B", x0=0.5, bounds=(0.01, 10.0))
     s.param("SF", x0=2.0, bounds=(0.01, 10.0))
@@ -78,7 +78,7 @@ def build_flipflop():
     s.subject("Flipflop", kind="cohort", generator="truth")
     s.protocol("dose_at_delay", events=Example_event,
                solver=solver_settings_Example, observed=all_species)
-    s.cross(["Flipflop"], "dose_at_delay", treatment="*")
+    s.simulate_all(["Flipflop"], "dose_at_delay", treatment="*")
 
     s.assay("flipflop",
             Measured("logB", Obs.log10("predicted_B"),
@@ -91,7 +91,6 @@ def build_flipflop():
                                 where={"Treatment": "{treatment}"}),
                      Noise(sigma=0.75),
                      only={"has_A_data": True}))
-    s.measure("flipflop")
 
     for name, x0, b in (("k_A_to_B", 0.3, (0.005, 5.0)),
                         ("k_B_to_C", 0.08, (0.005, 5.0)),

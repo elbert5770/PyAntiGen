@@ -1,4 +1,4 @@
-"""Parameters, and the one function that decides an occasion's values.
+"""Parameters, and the one function that decides a simulation's values.
 
   Param   a model parameter the estimation cares about. Global by default;
           ``by="<factor>"`` makes one value per level of that factor (drug-
@@ -8,8 +8,8 @@
           0 when amyloid_positive is False". 1.x needed a hook re-run after
           set_parameters for exactly this; here the order is structural.
 
-``resolve(study, occasion, theta)`` returns the absolute value of every
-parameter the design sets for that occasion, from
+``resolve(study, simulation, theta)`` returns the absolute value of every
+parameter the design sets for that simulation, from
 
     factor-level params -> fixed Param values -> theta (fitted) -> rules
 
@@ -50,7 +50,7 @@ class Param:
         return [by_name(self.name, self.by, lev) for lev in self._used_levels(study)]
 
     def _used_levels(self, study):
-        used = {o.level_dict.get(self.by) for o in study.occasions.values()}
+        used = {o.level_dict.get(self.by) for o in study.simulations.values()}
         return [lev for lev in study.factors[self.by].levels if lev in used]
 
     def x0_for(self, level=None):
@@ -105,17 +105,17 @@ class Rule:
         return cls(d["target"], d["value"], d.get("when", {}))
 
 
-def resolve(study, occasion, theta=None):
-    """Absolute parameter values for *occasion*, given fitted values *theta*.
+def resolve(study, simulation, theta=None):
+    """Absolute parameter values for *simulation*, given fitted values *theta*.
 
     theta maps optimizer-facing names (see Param.fitted_names) to values; it
     may be None or partial, in which case only the fixed parts apply -- which
     is what is set before the pre-dose block, when nothing fitted is known.
     """
-    if isinstance(occasion, str):
-        occasion = study.occasions[occasion]
-    lv = occasion.level_dict
-    attrs = study.attributes(occasion)
+    if isinstance(simulation, str):
+        simulation = study.simulations[simulation]
+    lv = simulation.level_dict
+    attrs = study.attributes(simulation)
     out = {}
     # 1. what the factor levels fix
     for fname, f in study.factors.items():

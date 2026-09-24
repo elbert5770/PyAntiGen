@@ -39,24 +39,37 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
 
     known = study._attribute_names()
 
-    # protocols resolve to real functions
+    # protocols resolve to real functions; settings do not shadow covariates
+    covariate_names = set()
+    for s in study.subjects.values():
+        covariate_names |= set(s.covariates)
     for name, p in study.protocols.items():
         for part in ("events", "solver", "observed") + tuple(
-                k for k in p._OPTIONAL if getattr(p, k) is not None):
+                k for k in p._HOOKS if getattr(p, k) is not None):
             try:
                 fn = from_ref(getattr(p, part))
                 if not callable(fn):
                     err(f"protocol {name!r}: {part} is not callable")
             except Exception as exc:
                 err(f"protocol {name!r}: {part} cannot be imported ({exc})")
+        clash = set(p.settings) & covariate_names
+        if clash:
+            err(f"protocol {name!r}: settings {sorted(clash)} are also subject covariates; "
+                "keep each attribute in one place")
 
-    # measurements select something, and their data exist
-    for i, meas in enumerate(study.measurements):
-        where = f"measurement {i} ({meas.assay})"
-        if meas.assay not in study.assays:
-            err(f"{where}: unknown assay")
-            continue
-        assay = study.assays[meas.assay]
+    # assays select something, and their data exist
+    try:
+        scoring = study.scoring()
+    except (ValueError, KeyError) as exc:
+        err(str(exc))
+        scoring = {sid: [] for sid in study.simulations}
+    scored_by_assay = {a: [] for a in study.assays}
+    for sid, entries in scoring.items():
+        for assay, partner in entries:
+            scored_by_assay[assay.name].append(study.simulations[sid])
+
+    for aname, assay in study.assays.items():
+        where = f"assay {aname!r}"
         for m in assay.observables:
             bad = set(m.only) - known
             if bad:
@@ -66,26 +79,13 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
                 badp = set(pool) - set(study.factors) - {"subject"}
                 if badp:
                     err(f"{where}/{m.name}: pool names unknown factor(s) {sorted(badp)}")
-        if meas.contrast:
-            if meas.contrast not in study.contrasts:
-                err(f"{where}: unknown contrast {meas.contrast!r}")
-                continue
-            try:
-                occs = [n for n, _ in study.contrasts[meas.contrast].pairs(study)]
-            except (ValueError, KeyError) as exc:
-                err(f"{where}: {exc}")
-                continue
-        else:
-            try:
-                occs = study.select(**meas.on) if meas.on else list(study.occasions.values())
-            except KeyError as exc:
-                err(f"{where}: {exc}")
-                continue
-            if not occs:
-                err(f"{where}: selects no occasions")
+        sims = scored_by_assay[aname]
+        if not sims:
+            err(f"{where}: scores no simulations")
+            continue
         scored_any = False
-        for occ in occs:
-            attrs = study.attributes(occ)
+        for sim in sims:
+            attrs = study.attributes(sim)
             inputs = None
             for m in assay.observables:
                 if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
@@ -94,21 +94,21 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
                 if data_path is None:
                     continue
                 if m.data.input is not None and inputs is None:
-                    loader = study.protocols[occ.protocol].hooks()[0]
+                    loader = study.protocols[sim.protocol].hooks()[0]
                     if loader is None:
                         err(f"{where}/{m.name}: input={m.data.input!r} but protocol "
-                            f"{occ.protocol!r} has no data loader")
+                            f"{sim.protocol!r} has no data loader")
                         continue
-                    inputs = loader(dict(attrs, Label=occ.id), data_path)
+                    inputs = loader(dict(attrs, Label=sim.id), data_path)
                 try:
                     n = len(m.data.rows_for(attrs, data_path, inputs=inputs))
                 except (KeyError, FileNotFoundError, OSError) as exc:
-                    err(f"{where}/{m.name} on {occ.id!r}: {exc}")
+                    err(f"{where}/{m.name} on {sim.id!r}: {exc}")
                     continue
                 if n == 0:
-                    err(f"{where}/{m.name} on {occ.id!r}: no data rows")
-        if occs and not scored_any:
-            err(f"{where}: every occasion is excluded by the observables' 'only' filters")
+                    err(f"{where}/{m.name} on {sim.id!r}: no data rows")
+        if not scored_any:
+            err(f"{where}: every simulation is excluded by the observables' 'only' filters")
 
     # parameters
     fitted = []
@@ -143,18 +143,17 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
             if missing:
                 err(f"study cites remark(s) not in {remarks.path}: {missing}")
 
-    # identical occasions: the same simulation run twice
+    # identical simulations: the same thing integrated twice
     seen = {}
-    for occ in study.occasions.values():
-        a = study.attributes(occ)
-        sig = (occ.protocol, tuple(sorted((k, repr(v)) for k, v in a.items()
-                                          if k not in ("subject", "occasion"))),
-               tuple(sorted(study.subjects[occ.subject].covariates.items())))
+    for sim in study.simulations.values():
+        a = study.attributes(sim)
+        sig = (sim.protocol, tuple(sorted((k, repr(v)) for k, v in a.items()
+                                          if k not in ("subject", "simulation"))))
         if sig in seen:
-            warn(f"occasions {seen[sig]!r} and {occ.id!r} are the same simulation "
-                 "(same protocol, levels and covariates); score both from one occasion")
+            warn(f"simulations {seen[sig]!r} and {sim.id!r} are the same simulation "
+                 "(same protocol, levels, covariates and settings); score both from one")
         else:
-            seen[sig] = occ.id
+            seen[sig] = sim.id
 
     if raise_on_error:
         errors = [p for p in probs if p.level == "error"]

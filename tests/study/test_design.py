@@ -7,9 +7,9 @@ import os
 
 import pytest
 
-from pyantigen.study import (DataSource, Estimation, Measured, Noise, Obs, Remarks,
-                             Study, by_name, fingerprint, from_dict, lower, resolve,
-                             to_dict, validate)
+from pyantigen.study import (Contrast, DataSource, Estimation, Measured, Noise, Obs, Remarks,
+                             Study, by_name, describe, fingerprint, from_dict, lower,
+                             resolve, to_dict, validate)
 from pyantigen.study.assay import ratio_pct
 
 
@@ -32,22 +32,22 @@ def crossover():
     for a in ("M1", "M2", "M3"):
         s.subject(a, covariates={"weight_kg": 8.0})
     s.protocol("p", _events, _solver, _observed)
-    s.cross(["M1", "M2", "M3"], "p", dose="*")
+    s.simulate_all(["M1", "M2", "M3"], "p", dose="*")
     return s
 
 
 # --- design ------------------------------------------------------------------
 
-def test_cross_names_occasions_by_subject_then_levels():
+def test_simulate_all_names_simulations_by_subject_then_levels():
     s = crossover()
-    assert list(s.occasions)[:3] == ["M1_0", "M1_30", "M1_125"]
-    assert len(s.occasions) == 9
+    assert list(s.simulations)[:3] == ["M1_0", "M1_30", "M1_125"]
+    assert len(s.simulations) == 9
 
 
 def test_attributes_merge_covariates_levels_and_reserved_keys():
     a = crossover().attributes("M2_30")
     assert a["weight_kg"] == 8.0 and a["mgkg"] == 30 and a["dose"] == "30"
-    assert a["subject"] == "M2" and a["occasion"] == "M2_30"
+    assert a["subject"] == "M2" and a["simulation"] == "M2_30"
 
 
 def test_select_unknown_attribute_raises_instead_of_matching_nothing():
@@ -55,21 +55,20 @@ def test_select_unknown_attribute_raises_instead_of_matching_nothing():
         crossover().select(dsoe="30")
 
 
-def test_between_subject_level_cannot_be_overridden_per_occasion():
+def test_between_subject_level_cannot_be_overridden_per_simulation():
     s = Study("x")
     s.factor("status", {"neg": {}, "pos": {}})
     s.subject("A", status="neg")
     s.protocol("p", _events, _solver, _observed)
     with pytest.raises(ValueError, match="fixed"):
-        s.occasion("A", "p", status="pos")
+        s.simulate("A", "p", status="pos")
 
 
 # --- contrasts: pairing is within subject by default --------------------------
 
 def test_contrast_pairs_each_dose_with_the_same_animals_vehicle():
     s = crossover()
-    c = s.contrast("over_vehicle", "ratio_pct",
-                   numerator={"dose": ["30", "125"]}, denominator={"dose": "0"})
+    c = Contrast.ratio_pct(numerator={"dose": ["30", "125"]}, denominator={"dose": "0"})
     pairs = [(n.id, d.id) for n, d in c.pairs(s)]
     assert pairs == [("M1_30", "M1_0"), ("M1_125", "M1_0"), ("M2_30", "M2_0"),
                      ("M2_125", "M2_0"), ("M3_30", "M3_0"), ("M3_125", "M3_0")]
@@ -81,10 +80,10 @@ def test_contrast_with_a_missing_control_raises():
     s.subject("M1")
     s.subject("M2")
     s.protocol("p", _events, _solver, _observed)
-    s.occasion("M1", "p", dose="0")
-    s.occasion("M1", "p", dose="30")
-    s.occasion("M2", "p", dose="30")          # M2 never had vehicle
-    c = s.contrast("c", "ratio_pct", {"dose": "30"}, {"dose": "0"})
+    s.simulate("M1", "p", dose="0")
+    s.simulate("M1", "p", dose="30")
+    s.simulate("M2", "p", dose="30")          # M2 never had vehicle
+    c = Contrast.ratio_pct({"dose": "30"}, {"dose": "0"})
     with pytest.raises(ValueError, match="M2_30.*no matching"):
         c.pairs(s)
 
@@ -95,12 +94,12 @@ def test_between_pairing_for_parallel_groups():
     s.subject("drug_cohort", kind="cohort", arm="drug")
     s.subject("placebo_cohort", kind="cohort", arm="placebo")
     s.protocol("p", _events, _solver, _observed)
-    s.occasion("drug_cohort", "p")
-    s.occasion("placebo_cohort", "p")
-    c = s.contrast("c", "diff", {"arm": "drug"}, {"arm": "placebo"}, pairing="between")
+    s.simulate("drug_cohort", "p")
+    s.simulate("placebo_cohort", "p")
+    c = Contrast.diff({"arm": "drug"}, {"arm": "placebo"}, pairing="between")
     assert [(n.id, d.id) for n, d in c.pairs(s)] == [("drug_cohort", "placebo_cohort")]
     with pytest.raises(ValueError, match="no matching"):
-        s.contrast("c2", "diff", {"arm": "drug"}, {"arm": "placebo"}).pairs(s)
+        Contrast.diff({"arm": "drug"}, {"arm": "placebo"}).pairs(s)
 
 
 def test_ratio_pct():
@@ -115,7 +114,7 @@ def test_resolve_order_is_levels_then_fixed_then_fitted_then_rules():
     s.factor("status", {"neg": {"amyloid_positive": False}, "pos": {"amyloid_positive": True}})
     s.subject("S", status="neg")
     s.protocol("p", _events, _solver, _observed)
-    s.cross(["S"], "p", drug="*")
+    s.simulate_all(["S"], "p", drug="*")
     s.param("kf", x0=0.5, by="drug")
     s.param("SF", x0=1.0)
     s.rule("k_oligo", 0.0, amyloid_positive=False)
@@ -133,7 +132,7 @@ def test_rule_beats_a_fitted_value():
     s.factor("status", {"neg": {"amyloid_positive": False}})
     s.subject("S", status="neg")
     s.protocol("p", _events, _solver, _observed)
-    s.occasion("S", "p")
+    s.simulate("S", "p")
     s.param("k_oligo", x0=1e-3)
     s.rule("k_oligo", 0.0, amyloid_positive=False)
     assert resolve(s, "S", {"k_oligo": 5e-3})["k_oligo"] == 0.0
@@ -150,9 +149,8 @@ def test_by_level_params_only_for_levels_that_occur():
 def with_assay(s):
     s.assay("csf", Measured("AB40", Obs("AB40_CM"),
                             DataSource("d.csv", "t", "v", where={"animal": "{subject}"}),
-                            Noise(pool=["dose"])))
-    s.contrast("over_vehicle", "ratio_pct", {"dose": ["30", "125"]}, {"dose": "0"})
-    s.measure("csf", contrast="over_vehicle")
+                            Noise(pool=["dose"])),
+            on=Contrast.ratio_pct({"dose": ["30", "125"]}, {"dose": "0"}))
     s.param("KI", x0=0.3, bounds=(1e-5, 1e3), scale="log10")
     s.rule("k_oligo", 0.0, weight_kg=8.0)
     return s
@@ -164,12 +162,12 @@ def test_json_round_trip_is_exact():
     s2 = from_dict(json.loads(json.dumps(d)))
     assert to_dict(s2) == d
     assert fingerprint(s2) == fingerprint(s)
-    assert list(s2.occasions) == list(s.occasions)
+    assert list(s2.simulations) == list(s.simulations)
 
 
-def test_json_stores_the_cross_not_its_expansion():
+def test_json_stores_simulate_all_not_its_expansion():
     d = to_dict(crossover())
-    assert d["occasions"] == [{"cross": {"subjects": ["M1", "M2", "M3"], "protocol": "p",
+    assert d["simulations"] == [{"all": {"subjects": ["M1", "M2", "M3"], "protocol": "p",
                                          "factors": {"dose": "*"}}}]
 
 
@@ -192,8 +190,8 @@ def test_froehlich_sized_design_stays_small():
                            for i in range(33)})
     s.subject("line", kind="cohort")
     s.protocol("p", _events, _solver, _observed)
-    s.cross(["line"], "p", cell_line="*", treatment="*")
-    assert len(s.occasions) == 9570
+    s.simulate_all(["line"], "p", cell_line="*", treatment="*")
+    assert len(s.simulations) == 9570
     from pyantigen.study.serialize import dumps
     text = dumps(to_dict(s))
     # The real PEtab file is 18,060,637 bytes; this design is ~0.54 MB.
@@ -209,13 +207,13 @@ def test_froehlich_sized_design_stays_small():
 def test_lowering_builds_one_composite_per_subject_pair_and_pools_sigma():
     s = with_assay(crossover())
     exp, spec = lower(s, Estimation("e"))
-    elems = spec.groups["csf:over_vehicle"]["loss_elements"]
+    elems = spec.groups["crossover"]["loss_elements"]
     assert [e["simulations"] for e in elems][:2] == [["M1_30", "M1_0"], ["M1_125", "M1_0"]]
     # pooled across dose: one block per animal
     assert {e["sigma_block"] for e in elems} == {"csf.AB40|subject=M1", "csf.AB40|subject=M2",
                                                  "csf.AB40|subject=M3"}
     assert spec.param_names == ["KI"] and spec.parameter_scale == {"KI": "log10"}
-    assert set(exp.replicates) == set(s.occasions)
+    assert set(exp.replicates) == set(s.simulations)
     assert exp.replicates["M1_30"]["mgkg"] == 30
 
 
@@ -239,8 +237,7 @@ def test_validate_reports_design_mistakes():
     s = crossover()
     s.assay("a", Measured("x", Obs("x"), DataSource("d.csv", "t", "v"),
                           only={"has_dataa": True}))
-    s.measure("a")
-    s.occasion("M1", "p", dose="30", id="M1_30_again")
+    s.simulate("M1", "p", dose="30", id="M1_30_again")
     msgs = [str(p) for p in validate(s)]
     assert any("unknown attribute(s) ['has_dataa']" in m for m in msgs)
     assert any("'M1_30' and 'M1_30_again' are the same simulation" in m for m in msgs)
@@ -324,7 +321,6 @@ def test_protocol_inputs_reach_events_and_scored_tables():
     s = crossover()
     s.protocols["p"].data = _loader
     s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")))
-    s.measure("a")
     exp, _ = lower(s, Estimation("e", params=[]))
     rep = exp.replicates["M1_30"]
     d = rep["Data"](rep, "unused")
@@ -337,7 +333,6 @@ def test_protocol_hooks_run_after_resolved_values_and_round_trip():
     s.protocols["p"].update_parameters = _hook
     s.protocols["p"].update_opt_parameters = _opt_hook
     s.assay("a", Measured("v", Obs("v"), DataSource("d.csv", "t", "v")))
-    s.measure("a")
     s.param("KI", x0=0.3)
     exp, _ = lower(s, Estimation("e"))
     r = {}
@@ -355,12 +350,11 @@ def test_both_sides_of_a_contrast_pair_hold_the_numerators_rows():
     carry the numerator's rows, under a key unique to the pair."""
     s = crossover()
     s.protocols["p"].data = _loader
-    s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")))
-    s.contrast("c", "ratio_pct", {"dose": ["30", "125"]}, {"dose": "0"})
-    s.measure("a", contrast="c")
+    s.assay("a", Measured("v", Obs("v"), DataSource(input="prepared", time="t", value="v")),
+            on=Contrast.ratio_pct({"dose": ["30", "125"]}, {"dose": "0"}))
     exp, spec = lower(s, Estimation("e", params=[]))
     keys = [e["loss_config"]["observables"][0]["data_dict_key"]
-            for e in spec.groups["a:c"]["loss_elements"]]
+            for e in spec.groups["crossover"]["loss_elements"]]
     assert keys[:2] == ["a.v|M1_30/M1_0", "a.v|M1_125/M1_0"]
     veh = exp.replicates["M1_0"]
     d = veh["Data"](veh, "unused")
@@ -376,13 +370,12 @@ def test_remark_ids_never_end_in_a_hyphen(tmp_path):
     assert not rid.endswith("-") and len(rid) <= 11 + 48
 
 
-def test_templated_input_names_pick_each_occasions_table():
+def test_templated_input_names_pick_each_simulations_table():
     s = crossover()
     s.protocols["p"].data = _loader
     for sid in ("M1", "M2", "M3"):
         s.subjects[sid].covariates["table"] = "prepared"
     s.assay("a", Measured("v", Obs("v"), DataSource(input="{table}", time="t", value="v")))
-    s.measure("a")
     exp, _ = lower(s, Estimation("e", params=[]))
     rep = exp.replicates["M2_30"]
     assert list(rep["Data"](rep, "unused")["a.v"]["v"]) == [5.0, 7.0]
@@ -391,10 +384,10 @@ def test_templated_input_names_pick_each_occasions_table():
 def test_peak_normalized_measurement_lowers_to_a_one_simulation_composite():
     from pyantigen.study.assay import peak_normalize
     s = crossover()
-    s.assay("gad", Measured("CM", Obs("[G_CM]"), DataSource("d.csv", "t", "v"), normalize="peak"))
-    s.measure("gad", on={"subject": "M1", "dose": "0"})
+    s.assay("gad", Measured("CM", Obs("[G_CM]"), DataSource("d.csv", "t", "v"), normalize="peak"),
+            on={"subject": "M1", "dose": "0"})
     _, spec = lower(s, Estimation("e", params=[]))
-    (e,) = spec.groups["gad"]["loss_elements"]
+    (e,) = spec.groups["crossover"]["loss_elements"]
     assert e["simulations"] == ["M1_0"] and e["aggregation"] is peak_normalize
     assert list(peak_normalize([[1.0, 4.0, 2.0]])) == [0.25, 1.0, 0.5]
     assert list(peak_normalize([[0.0, 0.0]])) == [0.0, 0.0]
@@ -411,3 +404,51 @@ def test_baseline_tolerance_is_part_of_the_observable():
     loose = Obs.of_baseline(["[A]"], "t0", "A1")
     assert list(loose.engine_form({"t0": 2.0})(res)) == [50.0, 100.0]   # within 1e-6
     assert Obs.from_json(o.to_json()).tol == 0.0
+
+
+# --- protocol settings, element order, describe ----------------------------------
+
+def test_protocol_settings_are_simulation_attributes():
+    s = crossover()
+    s.protocols["p"].settings["drain_on"] = True
+    assert s.attributes("M1_30")["drain_on"] is True
+    assert [x.id for x in s.select(drain_on=True)][:1] == ["M1_0"]
+    d = to_dict(s)
+    assert d["protocols"]["p"]["settings"] == {"drain_on": True}
+    assert to_dict(from_dict(json.loads(json.dumps(d)))) == d
+
+
+def test_a_setting_that_is_also_a_covariate_is_an_error():
+    s = crossover()
+    s.protocols["p"].settings["weight_kg"] = 9.0
+    assert any("also subject covariates" in str(p) for p in validate(s))
+
+
+def test_loss_elements_are_in_simulation_order_then_assay_order():
+    s = crossover()
+    s.assay("b", Measured("y", Obs("y"), DataSource("d.csv", "t", "v")), on={"dose": "30"})
+    s.assay("a", Measured("x", Obs("x"), DataSource("d.csv", "t", "v")))
+    _, spec = lower(s, Estimation("e", params=[]))
+    order = [(e["simulation"], e["loss_config"]["observables"][0]["data_column"])
+             for e in spec.groups["crossover"]["loss_elements"]][:4]
+    assert order == [("M1_0", "x"), ("M1_30", "y"), ("M1_30", "x"), ("M1_125", "x")]
+
+
+def test_an_assay_that_scores_nothing_is_an_error():
+    s = crossover()
+    s.assay("a", Measured("x", Obs("x"), DataSource("d.csv", "t", "v")), on={"dose": "999"})
+    assert any("assay 'a': scores no simulations" in str(p) for p in validate(s))
+
+
+def test_describe_shows_each_simulation_whole():
+    s = with_assay(crossover())
+    text = describe(s, Estimation("e"))
+    block = text.split("\nM1_30 ")[1].split("\n\n")[0]
+    assert "level       dose=30  ->  mgkg=30" in block
+    assert "covariates  weight_kg=8.0" in block
+    assert "rules       k_oligo=0.0 (when weight_kg=8.0)" in block
+    assert "fitted      KI" in block
+    assert "csf.AB40  vs M1_0 (ratio_pct, pairing=subject)" in block
+    assert "pooled over dose" in block
+    vehicle = text.split("\nM1_0 ")[1].split("\n\n")[0]
+    assert "scored by   nothing" in vehicle and "control for M1_30 (csf), M1_125 (csf)" in vehicle

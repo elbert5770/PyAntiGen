@@ -1,10 +1,10 @@
 """The design JSON: one file per study, factored, never expanded.
 
 What is written is what was declared -- factor tables, subjects, protocol
-references, the occasion GENERATORS (a ``cross`` is one record, not its
-product), assays, contrasts, parameters and rules. Nothing is repeated per
-occasion, so the file grows with the sum of the factor tables, not their
-product.
+references and settings, the simulation GENERATORS (a ``simulate_all`` is one
+record, not its product), assays with the simulations they score, parameters
+and rules. Nothing is repeated per simulation, so the file grows with the sum
+of the factor tables, not their product.
 
 No dates or hashes are written into the design. A run records the study's
 ``fingerprint`` (SHA-256 of the canonical JSON) alongside its results, which
@@ -14,11 +14,12 @@ design changes the fingerprint and nothing else has to be renamed.
 import hashlib
 import json
 
-from .assay import Assay, Contrast, Measurement
+from .assay import Assay
 from .design import Factor, Protocol, Study, Subject
 from .params import Param, Rule
 
-FORMAT = 1
+# 2: occasions -> simulations, measurements/contrasts folded into assays' on=.
+FORMAT = 2
 
 
 # A factor whose levels all carry the same attribute and parameter names is
@@ -83,13 +84,9 @@ def to_dict(study):
         subs[sid] = e
     d["subjects"] = subs
     d["protocols"] = {n: p.to_json() for n, p in study.protocols.items()}
-    d["occasions"] = study._occasion_records
+    d["simulations"] = study._simulation_records
     if study.assays:
         d["assays"] = {n: a.to_json() for n, a in study.assays.items()}
-    if study.contrasts:
-        d["contrasts"] = {n: c.to_json() for n, c in study.contrasts.items()}
-    if study.measurements:
-        d["measurements"] = [m.to_json() for m in study.measurements]
     if study.params:
         d["params"] = {n: p.to_json() for n, p in study.params.items()}
     if study.rules:
@@ -109,20 +106,17 @@ def from_dict(d):
                                   e.get("covariates", {}), e.get("levels", {}))
     for n, p in d.get("protocols", {}).items():
         s.protocols[n] = Protocol.from_json(n, p)
-    for rec in d.get("occasions", []):
-        if isinstance(rec, dict) and "cross" in rec:
-            c = rec["cross"]
-            s.cross(c["subjects"], c["protocol"], **c["factors"])
+    for rec in d.get("simulations", []):
+        if isinstance(rec, dict) and "all" in rec:
+            c = rec["all"]
+            s.simulate_all(c["subjects"], c["protocol"], **c["factors"])
         else:
             subject, protocol, levels = rec[0], rec[1], rec[2]
             extra = rec[3] if len(rec) > 3 else {}
-            s.occasion(subject, protocol, period=extra.get("period"),
+            s.simulate(subject, protocol, period=extra.get("period"),
                        id=extra.get("id"), **levels)
     for n, a in d.get("assays", {}).items():
         s.assays[n] = Assay.from_json(n, a)
-    for n, c in d.get("contrasts", {}).items():
-        s.contrasts[n] = Contrast.from_json(n, c)
-    s.measurements = [Measurement.from_json(m) for m in d.get("measurements", [])]
     for n, p in d.get("params", {}).items():
         s.params[n] = Param.from_json(n, p)
     s.rules = [Rule.from_json(r) for r in d.get("rules", [])]

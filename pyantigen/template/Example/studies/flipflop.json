@@ -1,5 +1,5 @@
 {
- "pyantigen_design": 1,
+ "pyantigen_design": 2,
  "name": "flipflop",
  "factors": {
   "generator": {"truth": {"params": {"k_A_to_B": 0.35, "k_B_to_C": 0.07, "SF": 1.6}}},
@@ -16,9 +16,9 @@
    "observed": "Modules.Observed_species:all_species"
   }
  },
- "occasions": [
+ "simulations": [
   {
-   "cross": {
+   "all": {
     "subjects": ["Flipflop"],
     "protocol": "dose_at_delay",
     "factors": {"treatment": "*"}
@@ -27,30 +27,31 @@
  ],
  "assays": {
   "flipflop": {
-   "logB": {
-    "model": {"expr": "predicted_B", "name": "log10(predicted_B)", "transform": "log10"},
-    "data": {
-     "file": "Flipflop.csv",
-     "time": "time",
-     "value": ["logB1", "logB2", "logB3"],
-     "where": {"Treatment": "{treatment}"}
+   "observables": {
+    "logB": {
+     "model": {"expr": "predicted_B", "name": "log10(predicted_B)", "transform": "log10"},
+     "data": {
+      "file": "Flipflop.csv",
+      "time": "time",
+      "value": ["logB1", "logB2", "logB3"],
+      "where": {"Treatment": "{treatment}"}
+     },
+     "noise": {"sigma": 0.05}
     },
-    "noise": {"sigma": 0.05}
-   },
-   "logA": {
-    "model": {"expr": "predicted_A", "name": "log10(predicted_A)", "transform": "log10"},
-    "data": {
-     "file": "Flipflop.csv",
-     "time": "time",
-     "value": "logA",
-     "where": {"Treatment": "{treatment}"}
-    },
-    "noise": {"sigma": 0.75},
-    "only": {"has_A_data": true}
+    "logA": {
+     "model": {"expr": "predicted_A", "name": "log10(predicted_A)", "transform": "log10"},
+     "data": {
+      "file": "Flipflop.csv",
+      "time": "time",
+      "value": "logA",
+      "where": {"Treatment": "{treatment}"}
+     },
+     "noise": {"sigma": 0.75},
+     "only": {"has_A_data": true}
+    }
    }
   }
  },
- "measurements": [{"assay": "flipflop"}],
  "params": {
   "k_A_to_B": {"x0": 0.3, "bounds": [0.005, 5.0], "scale": "log10"},
   "k_B_to_C": {"x0": 0.08, "bounds": [0.005, 5.0], "scale": "log10"},

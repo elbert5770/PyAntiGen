@@ -9,15 +9,15 @@ no Engine change, and its objective can be checked against the 1.x spec it
 replaces, value for value.
 
 Every hook is an instance of a module-level class carrying only its own
-occasion's payload, so replicates pickle to pool workers without dragging
+simulation's payload, so replicates pickle to pool workers without dragging
 the whole study along.
 
 Lowering rules
 --------------
-* one replicate per occasion, labelled with the occasion id; every attribute
-  of the occasion is also a key of the replicate, so 1.x event and solver
+* one replicate per simulation, labelled with the simulation id; every attribute
+  of the simulation is also a key of the replicate, so 1.x event and solver
   functions that read ``replicate["dose"]`` keep working;
-* one loss element per (occasion, measured observable) -- or per
+* one loss element per (simulation, measured observable) -- or per
   (numerator, denominator) pair for a contrast, as a composite element;
 * ``Noise.pool`` becomes the element's ``sigma_block``;
 * ``resolve()`` is applied twice: its fixed part in Update_parameters (before
@@ -35,12 +35,12 @@ from .refs import from_ref
 
 @dataclass
 class Estimation:
-    """What to fit, against which measurements, and how.
+    """What to fit, against which simulations, and how.
 
     params  names of Study.params to estimate (default: every estimated one)
-    on      Study.select filter restricting which measured occasions are
+    on      Study.select filter restricting which measured simulations are
             scored (default: all). A contrast is kept when its numerator is.
-    passive occasion ids simulated but not scored, e.g. for plots; default is
+    passive simulation ids simulated but not scored, e.g. for plots; default is
             none, as in 1.x.
     """
     name: str
@@ -97,9 +97,9 @@ class ApplyResolved:
     """Update_opt_parameters: resolve() in full, after the fitted values land.
 
     fixed    what factor levels and fixed Params set
-    fitted   {optimizer name: model parameter} for this occasion's by-level
+    fitted   {optimizer name: model parameter} for this simulation's by-level
              Params (global Params map to themselves)
-    rules    [(target, value)] that apply to this occasion, in order
+    rules    [(target, value)] that apply to this simulation, in order
     """
 
     def __init__(self, fixed, fitted, rules, project_hook=None):
@@ -126,17 +126,17 @@ class ApplyResolved:
 
 class LoadData:
     """Data: the protocol's inputs, plus the rows of every DataSource scored
-    on this occasion.
+    on this simulation.
 
     protocol_data, if given, is called first with the replicate; its tables
     are passed through unchanged (the event builder reads them) and are what
     DataSource(input=...) selects from.
 
     sources is [(key, attrs, DataSource, column_name, loader)]. Each is read
-    with ``attrs`` -- this occasion's, or, for either side of a contrast
+    with ``attrs`` -- this simulation's, or, for either side of a contrast
     pair, the NUMERATOR's -- and stored under ``key`` with its value column
-    renamed. ``loader`` is the protocol loader of the occasion ``attrs``
-    describe, needed when that is not this occasion (a contrast's
+    renamed. ``loader`` is the protocol loader of the simulation ``attrs``
+    describe, needed when that is not this simulation (a contrast's
     denominator reading its numerator's table).
     """
 
@@ -147,15 +147,15 @@ class LoadData:
     def __call__(self, replicate, data_path):
         inputs = (self.protocol_data(replicate, data_path)
                   if self.protocol_data is not None else {})
-        own = replicate.get("occasion")
+        own = replicate.get("simulation")
         cache, out, other_inputs = {}, dict(inputs), {}
         for key, attrs, src, col, loader in self.sources:
             src_inputs = inputs
-            if src.input is not None and attrs.get("occasion") != own:
-                occ = attrs.get("occasion")
-                if occ not in other_inputs:
-                    other_inputs[occ] = loader(dict(attrs, Label=occ), data_path)
-                src_inputs = other_inputs[occ]
+            if src.input is not None and attrs.get("simulation") != own:
+                sid = attrs.get("simulation")
+                if sid not in other_inputs:
+                    other_inputs[sid] = loader(dict(attrs, Label=sid), data_path)
+                src_inputs = other_inputs[sid]
             df = src.rows_for(attrs, data_path, _cache=cache, inputs=src_inputs)
             out[key] = df.rename(columns={"value": col})
         return out
@@ -181,7 +181,7 @@ def _obs_cfg(assay_name, m, attrs, pair=None):
     return cfg
 
 
-def _sigma_block(study, assay_name, m, occ):
+def _sigma_block(study, assay_name, m, sim):
     pool = m.noise.pool
     if pool is None:
         return None
@@ -191,13 +191,19 @@ def _sigma_block(study, assay_name, m, occ):
     unknown = pooled - set(study.factors) - {"subject"}
     if unknown:
         raise KeyError(f"assay {assay_name!r}/{m.name}: pool names unknown factor(s) {sorted(unknown)}")
-    keep = [("subject", occ.subject)] if "subject" not in pooled else []
-    keep += [(f, lev) for f, lev in occ.levels if f not in pooled]
+    keep = [("subject", sim.subject)] if "subject" not in pooled else []
+    keep += [(f, lev) for f, lev in sim.levels if f not in pooled]
     return f"{assay_name}.{m.name}|" + "|".join(f"{k}={v}" for k, v in keep)
 
 
 def lower(study, est):
-    """Return (LoweredExperiment, LoweredSpec) for *est* on *study*."""
+    """Return (LoweredExperiment, LoweredSpec) for *est* on *study*.
+
+    Loss elements are emitted simulation by simulation, in the order the
+    simulations were created, and within each in the order its assays were
+    declared -- the per-simulation reading ``describe`` prints, and the order
+    the Engine sums blocks in. A contrast's element belongs to its numerator.
+    """
     # parameters
     names = est.params if est.params is not None else [
         n for n, p in study.params.items() if p.estimate]
@@ -223,79 +229,65 @@ def lower(study, est):
 
     scored = None
     if est.on:
-        scored = {o.id for o in study.select(**est.on)}
+        scored = {s.id for s in study.select(**est.on)}
 
-    # loss elements and the data each occasion needs
-    groups = {}
-    data_needs = {oid: [] for oid in study.occasions}
-    for meas in study.measurements:
-        assay = study.assays[meas.assay]
-        elems = groups.setdefault(meas.assay if not meas.contrast else f"{meas.assay}:{meas.contrast}",
-                                  {"loss_elements": []})["loss_elements"]
-        if meas.contrast:
-            c = study.contrasts[meas.contrast]
-            op = CONTRAST_OPS[c.op]
-            for num, den in c.pairs(study):
-                if scored is not None and num.id not in scored:
+    # loss elements and the data each simulation needs
+    elems = []
+    data_needs = {sid: [] for sid in study.simulations}
+    scoring = study.scoring()
+    for sim in study.simulations.values():
+        if scored is not None and sim.id not in scored:
+            continue
+        attrs = study.attributes(sim)
+        for assay, partner in scoring[sim.id]:
+            for m in assay.observables:
+                if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
                     continue
-                attrs = study.attributes(num)
-                for m in assay.observables:
-                    if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
-                        continue
+                cfg_attrs = attrs
+                if partner is not None:
                     if m.normalize:
                         raise ValueError(
-                            f"assay {meas.assay!r}/{m.name}: normalize={m.normalize!r} is not "
+                            f"assay {assay.name!r}/{m.name}: normalize={m.normalize!r} is not "
                             "supported on a contrast; normalize the contrast's result instead")
-                    pair = f"{num.id}/{den.id}"
-                    key = _measured_key(meas.assay, m, pair)
-                    loader = study.protocols[num.protocol].hooks()[0]
-                    data_needs[num.id].append((key, attrs, m.data, m.name, loader))
-                    data_needs[den.id].append((key, attrs, m.data, m.name, loader))
-                    e = {"type": "composite", "simulations": [num.id, den.id],
-                         "data_simulation": num.id, "aggregation": op,
-                         "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs, pair)]}}
-                    blk = _sigma_block(study, meas.assay, m, num)
-                    if blk:
-                        e["sigma_block"] = blk
-                    elems.append(e)
-        else:
-            occs = study.select(**meas.on) if meas.on else list(study.occasions.values())
-            for occ in occs:
-                if scored is not None and occ.id not in scored:
-                    continue
-                attrs = study.attributes(occ)
-                for m in assay.observables:
-                    if not all(_matches(attrs.get(k), v) for k, v in m.only.items()):
-                        continue
-                    key = _measured_key(meas.assay, m)
-                    data_needs[occ.id].append((key, attrs, m.data, m.name, None))
+                    pair = f"{sim.id}/{partner.id}"
+                    key = _measured_key(assay.name, m, pair)
+                    loader = study.protocols[sim.protocol].hooks()[0]
+                    data_needs[sim.id].append((key, attrs, m.data, m.name, loader))
+                    data_needs[partner.id].append((key, attrs, m.data, m.name, loader))
+                    e = {"type": "composite", "simulations": [sim.id, partner.id],
+                         "data_simulation": sim.id,
+                         "aggregation": CONTRAST_OPS[assay.contrast.op],
+                         "loss_config": {"observables": [_obs_cfg(assay.name, m, cfg_attrs, pair)]}}
+                else:
+                    key = _measured_key(assay.name, m)
+                    data_needs[sim.id].append((key, attrs, m.data, m.name, None))
                     if m.normalize == "peak":
                         # The Engine's one hook that sees predictions already
                         # at the data times is a composite's aggregation.
-                        e = {"type": "composite", "simulations": [occ.id],
-                             "data_simulation": occ.id, "aggregation": peak_normalize,
-                             "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
+                        e = {"type": "composite", "simulations": [sim.id],
+                             "data_simulation": sim.id, "aggregation": peak_normalize,
+                             "loss_config": {"observables": [_obs_cfg(assay.name, m, cfg_attrs)]}}
                     else:
-                        e = {"simulation": occ.id,
-                             "loss_config": {"observables": [_obs_cfg(meas.assay, m, attrs)]}}
-                    blk = _sigma_block(study, meas.assay, m, occ)
-                    if blk:
-                        e["sigma_block"] = blk
-                    elems.append(e)
-    groups = {g: v for g, v in groups.items() if v["loss_elements"]}
-    if not groups:
+                        e = {"simulation": sim.id,
+                             "loss_config": {"observables": [_obs_cfg(assay.name, m, cfg_attrs)]}}
+                blk = _sigma_block(study, assay.name, m, sim)
+                if blk:
+                    e["sigma_block"] = blk
+                elems.append(e)
+    if not elems:
         raise ValueError(f"estimation {est.name!r} scores nothing")
+    groups = {study.name: {"loss_elements": elems}}
 
     # replicates
     fitted_set = set(param_names)
     replicates = {}
-    for occ in study.occasions.values():
-        proto = study.protocols[occ.protocol]
+    for sim in study.simulations.values():
+        proto = study.protocols[sim.protocol]
         events, solver, observed = proto.resolved()
         p_data, p_update, p_update_opt = proto.hooks()
-        attrs = study.attributes(occ)
-        fixed = resolve(study, occ, None)
-        lv = occ.level_dict
+        attrs = study.attributes(sim)
+        fixed = resolve(study, sim, None)
+        lv = sim.level_dict
         fitted = {}
         for p in study.params.values():
             if not p.estimate:
@@ -306,15 +298,15 @@ def lower(study, est):
         rules = [(r.target, r.value) for r in study.rules if r.applies(attrs)]
         rep = dict(attrs)
         rep.update({
-            "Label": occ.id,
+            "Label": sim.id,
             "Events": events,
-            "Data": LoadData(_dedupe(data_needs[occ.id]), p_data),
+            "Data": LoadData(_dedupe(data_needs[sim.id]), p_data),
             "Observed_species": observed,
             "Solver_settings": solver,
             "Update_parameters": ApplyFixed(fixed, p_update),
             "Update_opt_parameters": ApplyResolved(fixed, fitted, rules, p_update_opt),
         })
-        replicates[occ.id] = rep
+        replicates[sim.id] = rep
 
     spec = LoweredSpec(
         param_names=param_names, x0=x0, bounds=bounds, method=est.method,
