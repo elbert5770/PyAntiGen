@@ -88,22 +88,26 @@ def describe(study, estimation=None):
     lines.append(head)
     if study.remarks:
         lines.append(f"remarks: {', '.join(study.remarks)}")
+    names = [n for n, p in study.params.items() if p.estimate]
     if estimation is not None:
-        names = estimation.params if estimation.params is not None else [
-            n for n, p in study.params.items() if p.estimate]
+        if estimation.params is not None:
+            names = list(estimation.params)
         fitted = set()
-        desc = []
         for n in names:
             p = study.params[n]
-            opt = ([n] if p.by is None else
-                   [by_name(n, p.by, lev) for lev in p._used_levels(study)])
-            fitted |= set(opt)
-            desc.append(f"{n} ({p.scale}, x0 {p.x0}, bounds {p.bounds})"
-                        + (f" by {p.by}" if p.by else ""))
-        lines.append(f"estimation {estimation.name}: fits " + "; ".join(desc))
+            fitted |= set([n] if p.by is None else
+                          [by_name(n, p.by, lev) for lev in p._used_levels(study)])
+        lines.append(f"estimation {estimation.name}: fits {len(names)} parameter(s)")
         if estimation.on:
             scored_ids = {s.id for s in study.select(**estimation.on)}
             lines.append(f"  scores only simulations matching {estimation.on}")
+    elif names:
+        lines.append(f"estimable parameters ({len(names)}):")
+    for n in names:
+        p = study.params[n]
+        lines.append(f"  {n:<24} x0 {p.x0!r:<22} bounds {p.bounds}  scale {p.scale}"
+                     + (f"  one per {p.by}" if p.by else ""))
+    n_global = sum(1 for n in names if study.params[n].by is None)
     lines.append("")
 
     width = max((len(s) for s in study.simulations), default=10) + 2
@@ -142,16 +146,19 @@ def describe(study, estimation=None):
             lines.append("  rules       " + ", ".join(f"{r.target}={r.value} (when {_fmt(r.when)})"
                                                      for r in rules))
         lv = sim.level_dict
-        fit_here = []
-        for p in study.params.values():
-            if not p.estimate:
-                continue
-            opt = p.name if p.by is None else by_name(p.name, p.by, lv.get(p.by))
-            if fitted is None or opt in fitted:
-                fit_here.append(opt if opt == p.name else f"{p.name} <- {opt}")
-        if fit_here:
-            label = "fitted" if fitted is not None else "estimable"
-            lines.append(f"  {label:<11} {', '.join(fit_here)}")
+        # Global parameters are the same for every simulation: counted here,
+        # listed once in the header. Only per-level ones are spelled out.
+        per_level = []
+        for n in names:
+            p = study.params[n]
+            if p.by is not None:
+                opt = by_name(p.name, p.by, lv.get(p.by))
+                if fitted is None or opt in fitted:
+                    per_level.append(f"{p.name} <- {opt}")
+        label = "fitted" if fitted is not None else "estimable"
+        if n_global or per_level:
+            parts = ([f"{n_global} global (above)"] if n_global else []) + per_level
+            lines.append(f"  {label:<11} {', '.join(parts)}")
 
         entries = scoring[sim.id]
         excluded = scored_ids is not None and sim.id not in scored_ids

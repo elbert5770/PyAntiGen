@@ -447,7 +447,8 @@ def test_describe_shows_each_simulation_whole():
     assert "level       dose=30  ->  mgkg=30" in block
     assert "covariates  weight_kg=8.0" in block
     assert "rules       k_oligo=0.0 (when weight_kg=8.0)" in block
-    assert "fitted      KI" in block
+    assert "fitted      1 global (above)" in block
+    assert "KI" in text.split("\n\n")[0]            # listed once, in the header
     assert "csf.AB40  vs M1_0 (ratio_pct, pairing=subject)" in block
     assert "pooled over dose" in block
     vehicle = text.split("\nM1_0 ")[1].split("\n\n")[0]
