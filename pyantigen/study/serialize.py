@@ -20,7 +20,8 @@ from .params import Rule
 
 # 2: occasions -> simulations, measurements/contrasts folded into assays' on=.
 # 3: fitted parameters moved out to Optimizations.
-FORMAT = 3
+# 4: a study carries its doi; an assay its source (figure or table).
+FORMAT = 4
 
 
 # A factor whose levels all carry the same attribute and parameter names is
@@ -70,6 +71,8 @@ def _factor_in(levels):
 
 def to_dict(study):
     d = {"pyantigen_design": FORMAT, "name": study.name}
+    if study.doi:
+        d["doi"] = study.doi
     if study.remarks:
         d["remarks"] = list(study.remarks)
     d["factors"] = {n: _factor_out(f.levels) for n, f in study.factors.items()}
@@ -97,7 +100,7 @@ def from_dict(d):
     if d.get("pyantigen_design") != FORMAT:
         raise ValueError(f"not a pyantigen design (format {FORMAT}): "
                          f"pyantigen_design={d.get('pyantigen_design')!r}")
-    s = Study(d["name"], remarks=d.get("remarks"))
+    s = Study(d["name"], doi=d.get("doi"), remarks=d.get("remarks"))
     for n, levels in d.get("factors", {}).items():
         s.factors[n] = Factor(n, _factor_in(levels))
     for sid, e in d.get("subjects", {}).items():

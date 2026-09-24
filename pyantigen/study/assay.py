@@ -9,8 +9,9 @@
               value columns (several = replicate draws, stacked).
   Noise       declared sigma, per-point SD column, data-derived floor, and
               which factors a sigma is POOLED across.
-  Assay       observables measured together, and on= which simulations
-              they score: a selection, or a Contrast.
+  Assay       a dataset: observables measured together, on= which
+              simulations it exists for (a selection, or a Contrast), and
+              source= where in the paper it comes from.
   Contrast    numerator simulations against paired denominators, drug over
               vehicle or drug minus placebo. Pairs are formed within each
               subject by default, which is the correct operation for a
@@ -377,6 +378,7 @@ class Assay:
     name: str
     observables: list               # [Measured]
     on: object = None
+    source: str = None              # where in the paper: a figure or table
 
     def __post_init__(self):
         if isinstance(self.on, dict) and "contrast" in self.on:
@@ -392,7 +394,10 @@ class Assay:
         return self.on if isinstance(self.on, Contrast) else None
 
     def to_json(self):
-        d = {"observables": {m.name: m.to_json() for m in self.observables}}
+        d = {}
+        if self.source:
+            d["source"] = self.source
+        d["observables"] = {m.name: m.to_json() for m in self.observables}
         if isinstance(self.on, Contrast):
             d["on"] = {"contrast": self.on.to_json()}
         elif self.on:
@@ -404,7 +409,8 @@ class Assay:
         on = d.get("on")
         if isinstance(on, dict) and "contrast" in on:
             on = Contrast.from_json(on["contrast"])
-        return cls(name, [Measured.from_json(k, v) for k, v in d["observables"].items()], on)
+        return cls(name, [Measured.from_json(k, v) for k, v in d["observables"].items()],
+                   on, d.get("source"))
 
 
 # --- contrasts -------------------------------------------------------------

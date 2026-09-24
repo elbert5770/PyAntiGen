@@ -97,6 +97,8 @@ def describe(study, optimization=None):
 
     lines.append(f"{study.name}: {len(study.simulations)} simulation(s), "
                  f"{len(study.assays)} dataset(s), fingerprint {fingerprint(study)[:12]}")
+    if study.doi:
+        lines.append(f"doi: {study.doi}")
     if study.remarks:
         lines.append(f"remarks: {', '.join(study.remarks)}")
     if opt is not None:
@@ -170,6 +172,8 @@ def describe(study, optimization=None):
                 lines.append(f"  {tag:<11} {assay.name}.{m.name}{vs}{norm}")
                 lines.append(f"  {'':<13}model  {_obs(m, attrs)}")
                 lines.append(f"  {'':<13}data   {_data(m, attrs)}")
+                if assay.source:
+                    lines.append(f"  {'':<13}source {assay.source}")
                 lines.append(f"  {'':<13}noise  {_noise(m)}")
         if not shown:
             plots = opt is not None and sim.id not in serves

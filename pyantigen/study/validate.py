@@ -38,6 +38,8 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
         probs.append(Problem("warning", msg))
 
     known = study._attribute_names()
+    if not study.doi:
+        warn("study has no doi: a study is one paper, so record which one")
 
     # protocols resolve to real functions; settings do not shadow covariates
     covariate_names = set()

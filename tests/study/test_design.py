@@ -561,3 +561,29 @@ def test_describe_marks_what_an_optimization_does_not_need():
         "(not simulated by this optimization)")
     paper = describe(a)
     assert "datasets    csf.AB40" in paper and "optimization" not in paper
+
+
+# --- provenance: doi and per-dataset source --------------------------------------
+
+def test_doi_and_source_are_recorded_and_shown():
+    s = Study("paper_2015", doi="10.1000/example.1")
+    s.factor("dose", {"0": {}})
+    s.subject("cohort", kind="cohort")
+    s.protocol("p", _events, _solver, _observed)
+    s.simulate("cohort", "p", dose="0")
+    s.assay("csf", Measured("AB38", Obs("AB38_CM"), DataSource("d.csv", "t", "v")),
+            source="Figure 1A (left), AB38; digitized")
+    d = to_dict(s)
+    assert d["doi"] == "10.1000/example.1"
+    assert d["assays"]["csf"]["source"].startswith("Figure 1A")
+    assert to_dict(from_dict(json.loads(json.dumps(d)))) == d
+    text = describe(s)
+    assert "doi: 10.1000/example.1" in text
+    assert "source Figure 1A (left), AB38; digitized" in text
+
+
+def test_a_study_without_a_doi_is_warned_about():
+    msgs = [str(p) for p in validate(crossover())]
+    assert any("has no doi" in m for m in msgs)
+    ok = [str(p) for p in validate(Study("x", doi="10.1000/y"))]
+    assert not any("has no doi" in m for m in ok)

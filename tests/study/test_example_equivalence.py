@@ -56,7 +56,10 @@ SCRIPT = textwrap.dedent('''
     rows = []
     for name in BUILDERS:
         opt = build(name, py)
-        problems += [str(p) for p in validate_optimization(opt, data_path=paths["data_path"])]
+        # Errors only: the Example studies are synthetic, so the missing-doi
+        # warning is expected.
+        problems += [str(p) for p in validate_optimization(opt, data_path=paths["data_path"])
+                     if p.level == "error"]
         opt_js = load_optimization(os.path.join("optimizations", name + ".json"), js)
         v1 = nll(model_text, paths, get_EXPERIMENT(V1_EXPERIMENT[name]),
                  get_OPTIMIZATION("OPTIMIZATION_" + name))

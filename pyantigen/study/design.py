@@ -162,11 +162,15 @@ class Simulation:
 
 
 class Study:
-    """A paper: factors, subjects, protocols, the simulations built from them,
-    and the datasets (assays) it reports on them."""
+    """A paper: its DOI, factors, subjects, protocols, the simulations built
+    from them, and the datasets (assays) it reports on them."""
 
-    def __init__(self, name, remarks=None):
+    def __init__(self, name, doi=None, remarks=None):
         self.name = name
+        # The paper this study is. One study, one publication: a dataset from
+        # somewhere else belongs to a study of its own, so that every fit
+        # records which papers it drew on.
+        self.doi = doi
         self.remarks = list(remarks or [])
         self.factors = {}
         self.subjects = {}
@@ -236,14 +240,17 @@ class Study:
             "factors": {k: ("*" if factor_levels[k] == "*" else spec[k]) for k in names}}})
         return out
 
-    def assay(self, name, *observables, on=None):
+    def assay(self, name, *observables, on=None, source=None):
         """A dataset: observables measured together (Measured objects), on the
         simulations selected by *on*: None (all), a Study.select filter, or a
-        Contrast. Whether it is scored is an Optimization's choice."""
+        Contrast. Whether it is scored is an Optimization's choice.
+
+        *source* says where in the paper the data are (a figure or table), and
+        how they were extracted when that is not obvious."""
         from .assay import Assay
         if name in self.assays:
             raise ValueError(f"assay {name!r} already defined")
-        a = Assay(name, list(observables), on)
+        a = Assay(name, list(observables), on, source)
         self.assays[name] = a
         return a
 

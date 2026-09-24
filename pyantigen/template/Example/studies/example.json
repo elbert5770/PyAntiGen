@@ -1,5 +1,5 @@
 {
- "pyantigen_design": 3,
+ "pyantigen_design": 4,
  "name": "example",
  "factors": {
   "status": {
