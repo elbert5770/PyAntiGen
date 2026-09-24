@@ -366,7 +366,7 @@ def test_both_sides_of_a_contrast_pair_hold_the_numerators_rows():
 
 def test_remark_ids_never_end_in_a_hyphen(tmp_path):
     rm = Remarks(str(tmp_path / "remarks.json"))
-    rid = rm.add("BACEI_KI_MBI5 refits to 0.181 uM on the current setup", "<p>x</p>")
+    rid = rm.add("A fitted constant moves once the data are corrected", "<p>x</p>")
     assert not rid.endswith("-") and len(rid) <= 11 + 48
 
 
