@@ -1727,7 +1727,8 @@ def _finite_difference_steps(params, epsilon=1e-4, abs_floor=None, scales=None,
     return steps
 
 
-def compute_hessian_batched(nll_batch, params, epsilon=1e-4, scales=None):
+def compute_hessian_batched(nll_batch, params, epsilon=1e-4, scales=None,
+                            failure_value=1e10):
     """Central-difference Hessian evaluated as one batch.
 
     The stencil is fixed in advance -- 1 centre, 2k diagonal points and 4 points
@@ -1759,6 +1760,15 @@ def compute_hessian_batched(nll_batch, params, epsilon=1e-4, scales=None):
             points += [pp, pm, mp, mm]
 
     vals = np.asarray(nll_batch(points, label="hessian"), dtype=float)
+    # The failure sentinel is finite, so a stencil point that failed to
+    # integrate would otherwise pass straight through as a curvature of order
+    # 1e10/h^2 and come out the other side as a plausible-looking SE.
+    bad = ~np.isfinite(vals) | (vals >= failure_value)
+    if np.any(bad):
+        raise ValueError(
+            f"{int(bad.sum())}/{vals.size} Hessian stencil point(s) failed to "
+            f"evaluate (failure sentinel or non-finite NLL); the Hessian would "
+            f"be meaningless.")
     f0 = vals[0]
 
     hessian = np.zeros((n, n))
@@ -1875,11 +1885,20 @@ def compute_wald_uncertainty(nll_func, x, bounds=None, loss_scale=1.0, alpha=0.0
     print(f"\n[Wald] Computing Hessian for {k} parameter(s) "
           f"(~{n_evals} silent NLL evaluations)...")
 
+    if nll_batch is None:
+        # Serial runs (no worker pool) go through the same stencil as pooled
+        # ones, evaluated one point at a time. The numdifftools route used to
+        # be taken here, with a fixed absolute step of 1e-5 and no knowledge of
+        # parameter scales: far below the ODE objective's numerical noise for a
+        # log10 coordinate, and larger than the parameter itself for a small
+        # linear rate constant -- the two failures _finite_difference_steps
+        # exists to prevent. It also bypassed the failure-sentinel check, and
+        # made a serial run's SEs incomparable with a pooled run's.
+        def nll_batch(xs, label=None):
+            return [nll_func(np.asarray(xi, dtype=float)) for xi in xs]
+
     try:
-        if nll_batch is not None:
-            hessian_raw = compute_hessian_batched(nll_batch, x, scales=scales)
-        else:
-            hessian_raw = compute_hessian_numdifftools(nll_func, x)
+        hessian_raw = compute_hessian_batched(nll_batch, x, scales=scales)
     except Exception as exc:
         print(f"[Wald] Hessian computation failed: {exc}")
         return None, None, nan_ci
