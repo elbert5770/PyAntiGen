@@ -77,7 +77,11 @@ def _make_batch(nll, k, optimizer_kwargs=None, spend=None):
     *spend* is an optional dict accumulating total evaluations, since the point
     of carrying state forward is to need fewer of them.
     """
-    def batch(jobs, on_result=None, label=None, budget=None):
+    def batch(jobs, on_result=None, label=None, budget=None,
+              frozen_sigmas=None, state_dir=None):
+        # frozen_sigmas and state_dir mirror ParallelEvaluator.profile_batch's
+        # signature and are ignored: these objectives have no sigma blocks,
+        # and in-process points have no mid-point state to resume.
         for job in jobs:
             obj = _make_nuisance_objective(nll, job["param_idx"], k)
             extra = {}
@@ -741,7 +745,9 @@ def test_checkpoint_wrapper_wiring():
         """
         def __init__(self):
             self.profile_batch = _make_batch(nll, k)
-            self.evaluate_batch = lambda xs, label=None: [
+            # frozen_sigmas is accepted and ignored: the frozen-anchor call
+            # passes it, and this objective has no sigma blocks to freeze.
+            self.evaluate_batch = lambda xs, label=None, frozen_sigmas=None: [
                 float(nll(np.asarray(x, dtype=float))) for x in xs]
 
     def run(model_text):

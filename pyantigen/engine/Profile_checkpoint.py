@@ -338,11 +338,18 @@ def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
             #      sigma profiled out analytically. It is the same function the
             #      fit minimizes, so its dNLL is on a different scale again and
             #      v1/v2 points must not be resumed into a v3 run.
-            "likelihood_convention": "v3-concentrated-gaussian",
-            # Under v3 sigma is profiled out per evaluation rather than frozen,
-            # so these no longer enter dNLL. They are still hashed because they
-            # are a compact fingerprint of the residuals at the optimum, which
-            # does change whenever the fit lands somewhere else.
+            #   v4 keeps v3 for the fit, Wald and slices, but evaluates every
+            #      profile point with each sigma-floored block pinned at its
+            #      own sigma_used from the fit (Optimize._freeze_floor), and
+            #      measures dNLL from an anchor computed the same way. v3
+            #      points re-concentrated those sigmas at every point, so they
+            #      sit on a different curve and must not be resumed into v4.
+            "likelihood_convention": "v4-concentrated-gaussian-frozen-floor",
+            # The fit's per-block sigmas. Unfloored blocks are still profiled
+            # out per evaluation, but floored blocks are frozen at these values
+            # for every profile point, so they now enter dNLL directly -- a
+            # different sigma is a different profile. Also a compact
+            # fingerprint of the residuals at the optimum.
             "sigmas": sorted(
                 (str(k), round(float(v), 12))
                 for k, v in (fixed_sigmas or {}).items()

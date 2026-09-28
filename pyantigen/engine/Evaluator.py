@@ -646,7 +646,9 @@ class ParallelEvaluator:
             losses = ev.evaluate_batch(xs)
 
     ``evaluate_batch`` preserves input order. Failures come back as
-    ``FAILURE_VALUE`` and are counted in ``ev.n_failures`` rather than raised.
+    ``FAILURE_VALUE`` and are counted in ``ev.n_failures`` rather than raised
+    -- except a broken pool, which raises ``BrokenProcessPool`` so the caller
+    can redo the batch rather than consume a half-sentinel result.
     """
 
     def __init__(self, spec, n_workers=None, chunk_size=None, verbose=True,
@@ -818,6 +820,7 @@ class ParallelEvaluator:
             self.start()
 
         from concurrent.futures import wait, FIRST_COMPLETED
+        from concurrent.futures.process import BrokenProcessPool
 
         t0 = time.time()
         tag = f" [{label}]" if label else ""
@@ -877,6 +880,16 @@ class ParallelEvaluator:
                 i = futures[fut]
                 try:
                     val, status, secs = fut.result()
+                except BrokenProcessPool as exc:
+                    # A dead worker (segfault, OOM kill) fails every future
+                    # still in flight, not just its own. Scoring those as
+                    # sentinels would hand the caller a batch that is part
+                    # real values and part 1e10 -- a Hessian stencil built
+                    # from that is finite and silently meaningless. Raise so
+                    # the caller redoes the whole batch serially instead.
+                    raise BrokenProcessPool(
+                        f"worker pool broke during batch{tag} after "
+                        f"{done}/{n} evaluation(s): {exc}") from exc
                 except Exception as exc:
                     val = FAILURE_VALUE
                     status = f"error: {type(exc).__name__}: {exc}"
