@@ -41,6 +41,24 @@ def validate(study, data_path=None, remarks=None, raise_on_error=False):
     if not study.doi:
         warn("study has no doi: a study is one paper, so record which one")
 
+    # reagents: an identifier is optional, but its absence is said out loud.
+    # Requiring one would make the layer unusable for the unpublished
+    # datasets, which are the ones that most need the discipline.
+    for name, r in study.reagents.items():
+        if not r.id:
+            warn(f"reagent {name!r} has no id: record a ChEBI, DrugBank, "
+                 "InChIKey or RRID so another study can say it is the same "
+                 "substance")
+        veh = r.vehicle
+        if isinstance(veh, str) and veh not in study.reagents:
+            err(f"reagent {name!r}: vehicle {veh!r} is not a declared reagent "
+                "of this study; declare it, or nest the Reagent inline")
+        for p in r.potencies:
+            if not p.system:
+                warn(f"reagent {name!r}: {p.kind} has no system; a potency is "
+                     "about a (substance, system) pair, and without the "
+                     "system it cannot be compared with a fitted value")
+
     # protocols resolve to real functions; settings do not shadow covariates
     covariate_names = set()
     for s in study.subjects.values():

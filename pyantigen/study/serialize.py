@@ -17,11 +17,35 @@ import json
 from .assay import Assay
 from .design import Factor, Protocol, Study, Subject
 from .params import Rule
+from .reagent import Reagent
 
 # 2: occasions -> simulations, measurements/contrasts folded into assays' on=.
 # 3: fitted parameters moved out to Optimizations.
 # 4: a study carries its doi; an assay its source (figure or table).
-FORMAT = 4
+# 5: a study may declare reagents (pyantigen.study.reagent).
+FORMAT = 5
+
+# Formats this version can READ.
+READABLE = (4, 5)
+
+
+def _format_for(study):
+    """The MINIMUM format that can represent this design.
+
+    Not simply FORMAT, and the difference matters. A design's JSON is hashed
+    into its ``fingerprint``, and an Optimization records the fingerprint of
+    every study it was fitted against, so stamping a new version number on
+    designs that have not changed would invalidate every recorded fit --
+    turning "the library grew a feature nobody used yet" into "every
+    optimization must be re-recorded".
+
+    So the number says what the FILE needs, not what the library is. A study
+    with no reagents is still a 4 and hashes exactly as it did. A study that
+    declares one is a 5, and an older library refuses it outright instead of
+    reading it and dropping the declaration -- which is the protection a
+    version number is for.
+    """
+    return 5 if study.reagents else 4
 
 
 # A factor whose levels all carry the same attribute and parameter names is
@@ -70,7 +94,7 @@ def _factor_in(levels):
 
 
 def to_dict(study):
-    d = {"pyantigen_design": FORMAT, "name": study.name}
+    d = {"pyantigen_design": _format_for(study), "name": study.name}
     if study.doi:
         d["doi"] = study.doi
     if study.remarks:
@@ -87,6 +111,8 @@ def to_dict(study):
             e["levels"] = s.levels
         subs[sid] = e
     d["subjects"] = subs
+    if study.reagents:
+        d["reagents"] = {n: r.to_json() for n, r in study.reagents.items()}
     d["protocols"] = {n: p.to_json() for n, p in study.protocols.items()}
     d["simulations"] = study._simulation_records
     if study.assays:
@@ -97,10 +123,13 @@ def to_dict(study):
 
 
 def from_dict(d):
-    if d.get("pyantigen_design") != FORMAT:
-        raise ValueError(f"not a pyantigen design (format {FORMAT}): "
+    if d.get("pyantigen_design") not in READABLE:
+        raise ValueError(f"not a pyantigen design (format {FORMAT}, reads "
+                         f"{', '.join(map(str, READABLE))}): "
                          f"pyantigen_design={d.get('pyantigen_design')!r}")
     s = Study(d["name"], doi=d.get("doi"), remarks=d.get("remarks"))
+    for n, r in d.get("reagents", {}).items():
+        s.reagents[n] = Reagent.from_json(n, r)
     for n, levels in d.get("factors", {}).items():
         s.factors[n] = Factor(n, _factor_in(levels))
     for sid, e in d.get("subjects", {}).items():

@@ -179,6 +179,11 @@ class Study:
         self._simulation_records = []  # compact generator records, for JSON
         self.assays = {}
         self.rules = []
+        # Substances the paper names: drugs, tracers, vehicles, media. A
+        # registry, and deliberately NOT part of a simulation's attributes --
+        # a reagent is a fact about the procedure, not a value the Engine is
+        # handed. See pyantigen.study.reagent.
+        self.reagents = {}
 
     # --- building --------------------------------------------------------
     def factor(self, name, levels):
@@ -253,6 +258,21 @@ class Study:
         a = Assay(name, list(observables), on, source)
         self.assays[name] = a
         return a
+
+    def reagent(self, name, **kw):
+        """Declare a substance this study used, and return it.
+
+        ``vehicle=`` may be a Reagent or the name of one already declared
+        here; validate() checks that a named one exists. Reagents are
+        recorded in the design JSON and printed by describe, and are read by
+        nothing else -- declaring one cannot change a simulation.
+        """
+        from .reagent import Reagent
+        if name in self.reagents:
+            raise ValueError(f"reagent {name!r} already defined")
+        r = kw.pop("reagent", None) or Reagent(name, **kw)
+        self.reagents[name] = r
+        return r
 
     def rule(self, target, value, **when):
         from .params import Rule

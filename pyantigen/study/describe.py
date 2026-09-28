@@ -101,6 +101,13 @@ def describe(study, optimization=None):
         lines.append(f"doi: {study.doi}")
     if study.remarks:
         lines.append(f"remarks: {', '.join(study.remarks)}")
+    # Substances, once, at the top: a reagent belongs to the paper, not to
+    # any one simulation, and nothing in the per-simulation view below reads
+    # one.
+    for name, r in study.reagents.items():
+        lines.append(f"reagent {name}: {r}")
+        for p in r.potencies:
+            lines.append(f"    {p}")
     if opt is not None:
         others = [st.name for st in opt.studies if st is not study]
         lines.append(f"optimization {opt.name}: fits {len(params)} parameter(s)"
