@@ -1674,7 +1674,9 @@ def compute_hessian_numdifftools(func, params):
 # _finite_difference_steps: 0.02 keeps the noise term 4*sigma/h^2 near 0.1 for
 # objective noise anywhere from 1e-7 to 1e-4 nats, while the truncation term
 # H*h^2/12 stays near 0.003 for curvatures of order 100. Two decades of margin
-# either side, which is what a numerically noisy objective needs.
+# either side, which is what a numerically noisy objective needs. It is the
+# starting and largest step: compute_hessian_batched shrinks it per parameter
+# where the curvature is too high for it (see _FD_TARGET_RISE).
 _LOG_FD_STEP = 0.02
 
 
@@ -1706,6 +1708,10 @@ def _finite_difference_steps(params, epsilon=1e-4, abs_floor=None, scales=None,
     1e-5 nats, not 1e-16. At h=3e-4 that is an error near 450 against curvatures
     of order 100: the Hessian becomes noise, the matrix stops being positive
     definite, and sqrt(diag(inv(H))) returns NaN.
+
+    For log10 coordinates this is only the starting step. A parameter whose
+    SE is comparable to it is probed outside its quadratic region, and
+    compute_hessian_batched shrinks the step for it (_calibrate_log_steps).
     """
     params = np.atleast_1d(np.asarray(params, dtype=float))
     if abs_floor is None:
@@ -1727,7 +1733,101 @@ def _finite_difference_steps(params, epsilon=1e-4, abs_floor=None, scales=None,
     return steps
 
 
-def compute_hessian_batched(nll_batch, params, epsilon=1e-4, scales=None):
+# A log10 step is sized so that one diagonal probe raises the NLL by about this
+# many nats. _LOG_FD_STEP alone is a single compromise for every parameter, and
+# it fails in the tight direction: on the Example spec two parameters with SEs
+# near 0.01 decades sat 2 SEs from the centre at a 0.02-decade step, outside
+# the quadratic region, and came back with SEs 12% and 18% off and a
+# correlation of -0.25 instead of -0.55. Sizing by the rise instead balances
+# both errors for every parameter at once: truncation is set by how far past
+# quadratic the probe reaches, which a rise of a tenth of a nat keeps small,
+# and the noise term 4*sigma/h^2 relative to the curvature is about
+# 2*sigma/rise, ~2e-4 at sigma = 1e-5 nats. At 0.1 the Example's log10 SEs
+# land within 0.3% of the exact values; at 0.2, within 0.5%.
+_FD_TARGET_RISE = 0.1
+# Smallest log10 step the calibration may choose, in decades. Below this the
+# noise term takes over again on an ODE objective.
+_LOG_FD_STEP_MIN = 1e-4
+
+
+def _check_stencil_values(vals, failure_value, what):
+    """Raise if any stencil value is non-finite or the failure sentinel."""
+    # The failure sentinel is finite, so a stencil point that failed to
+    # integrate would otherwise pass straight through as a curvature of order
+    # 1e10/h^2 and come out the other side as a plausible-looking SE.
+    bad = ~np.isfinite(vals) | (vals >= failure_value)
+    if np.any(bad):
+        raise ValueError(
+            f"{int(bad.sum())}/{vals.size} {what} point(s) failed to evaluate "
+            f"(failure sentinel or non-finite NLL); the Hessian would be "
+            f"meaningless.")
+
+
+def _calibrate_log_steps(nll_batch, params, steps, scales, failure_value,
+                         target=_FD_TARGET_RISE, min_step=_LOG_FD_STEP_MIN,
+                         max_passes=4):
+    """Shrink each log10 step until one probe raises the NLL by ~*target* nats.
+
+    A pilot pass evaluates the centre and +/- the default step for every
+    log10 parameter. Its mean rise r approximates H_ii h^2 / 2, so the step
+    that gives a rise of *target* is h * sqrt(target / r). A step is accepted
+    once its rise is at most twice *target*.
+
+    That estimate is taken from a probe that is, by construction, too far out,
+    and on a likelihood shaped like (n/2) log(SSE) -- which flattens away from
+    the optimum -- it underestimates the curvature, so a single rescaling can
+    still land a probe at a rise of a nat or more. Parameters whose new step
+    still rises too far are therefore probed again, up to *max_passes* passes
+    in all; each extra pass costs 2 evaluations per such parameter only.
+
+    Steps only shrink: a parameter whose default probe rises less than the
+    limit is inside its quadratic region, and there the larger step is the
+    better defence against integration noise. A rise that is not positive -- a
+    flat or noisy direction -- also keeps the default, as does a step that has
+    reached *min_step*.
+
+    Returns ``(steps, known)``: the calibrated steps, and the pilot values
+    ``{point_key: value}`` evaluated at them, so the stencil does not evaluate
+    the same point twice.
+    """
+    pending = [i for i, s in enumerate(scales or [])
+               if s == "log10" and i < params.size]
+    if not pending:
+        return steps, {}
+
+    steps = np.array(steps, dtype=float, copy=True)
+    known = {}
+    for _ in range(max_passes):
+        points = [] if known else [params.copy()]
+        for i in pending:
+            p_plus = params.copy(); p_plus[i] += steps[i]
+            p_minus = params.copy(); p_minus[i] -= steps[i]
+            points += [p_plus, p_minus]
+        vals = np.asarray(nll_batch(points, label="hessian-step"), dtype=float)
+        _check_stencil_values(vals, failure_value, "Hessian step-calibration")
+        if not known:
+            known[("c",)] = float(vals[0])
+            vals = vals[1:]
+        f0 = known[("c",)]
+
+        still = []
+        for k, i in enumerate(pending):
+            f_plus, f_minus = float(vals[2 * k]), float(vals[2 * k + 1])
+            rise = 0.5 * (f_plus + f_minus) - f0
+            if rise > 2.0 * target and steps[i] > min_step:
+                steps[i] = max(min_step, steps[i] * np.sqrt(target / rise))
+                still.append(i)
+            else:
+                known[("d", i, +1)] = f_plus
+                known[("d", i, -1)] = f_minus
+        pending = still
+        if not pending:
+            break
+    return steps, known
+
+
+def compute_hessian_batched(nll_batch, params, epsilon=1e-4, scales=None,
+                            failure_value=1e10):
     """Central-difference Hessian evaluated as one batch.
 
     The stencil is fixed in advance -- 1 centre, 2k diagonal points and 4 points
@@ -1735,41 +1835,49 @@ def compute_hessian_batched(nll_batch, params, epsilon=1e-4, scales=None):
     instead of trickling through numdifftools one call at a time. That is
     2k^2 + 1 evaluations with no dependencies, which is exactly what the pool
     is for.
+
+    Log10 steps are calibrated first (see :func:`_calibrate_log_steps`). Its
+    pilot values are reused for the final steps, so a parameter whose default
+    step already fits costs nothing extra, and one that had to shrink costs 2
+    evaluations per calibration pass.
     """
     params = np.atleast_1d(np.asarray(params, dtype=float))
     n = params.size
     steps = _finite_difference_steps(params, epsilon, scales=scales)
+    steps, known = _calibrate_log_steps(nll_batch, params, steps, scales,
+                                        failure_value)
 
-    points = [params.copy()]           # index 0: centre
-    index = {}
-
+    # Every stencil point by key; the ones the calibration already evaluated
+    # are filled in from it, the rest go to the pool in one batch.
+    keys, points = [("c",)], [params.copy()]
     for i in range(n):
-        p_plus = params.copy(); p_plus[i] += steps[i]
-        p_minus = params.copy(); p_minus[i] -= steps[i]
-        index[("d", i)] = (len(points), len(points) + 1)
-        points += [p_plus, p_minus]
-
+        for sign in (+1, -1):
+            p = params.copy(); p[i] += sign * steps[i]
+            keys.append(("d", i, sign)); points.append(p)
     for i in range(n):
         for j in range(i + 1, n):
-            pp = params.copy(); pp[i] += steps[i]; pp[j] += steps[j]
-            pm = params.copy(); pm[i] += steps[i]; pm[j] -= steps[j]
-            mp = params.copy(); mp[i] -= steps[i]; mp[j] += steps[j]
-            mm = params.copy(); mm[i] -= steps[i]; mm[j] -= steps[j]
-            index[("o", i, j)] = tuple(range(len(points), len(points) + 4))
-            points += [pp, pm, mp, mm]
+            for si, sj in ((+1, +1), (+1, -1), (-1, +1), (-1, -1)):
+                p = params.copy(); p[i] += si * steps[i]; p[j] += sj * steps[j]
+                keys.append(("o", i, j, si, sj)); points.append(p)
 
-    vals = np.asarray(nll_batch(points, label="hessian"), dtype=float)
-    f0 = vals[0]
+    todo = [k for k, key in enumerate(keys) if key not in known]
+    fresh = np.asarray(nll_batch([points[k] for k in todo], label="hessian"),
+                       dtype=float)
+    _check_stencil_values(fresh, failure_value, "Hessian stencil")
+    val = dict(known)
+    val.update({keys[k]: float(v) for k, v in zip(todo, fresh)})
+    f0 = val[("c",)]
 
     hessian = np.zeros((n, n))
     for i in range(n):
-        a, b = index[("d", i)]
-        hessian[i, i] = (vals[a] - 2.0 * f0 + vals[b]) / (steps[i] ** 2)
+        hessian[i, i] = (val[("d", i, +1)] - 2.0 * f0
+                         + val[("d", i, -1)]) / (steps[i] ** 2)
     for i in range(n):
         for j in range(i + 1, n):
-            a, b, c, d = index[("o", i, j)]
-            val = (vals[a] - vals[b] - vals[c] + vals[d]) / (4.0 * steps[i] * steps[j])
-            hessian[i, j] = hessian[j, i] = val
+            h_ij = (val[("o", i, j, +1, +1)] - val[("o", i, j, +1, -1)]
+                    - val[("o", i, j, -1, +1)] + val[("o", i, j, -1, -1)]
+                    ) / (4.0 * steps[i] * steps[j])
+            hessian[i, j] = hessian[j, i] = h_ij
     return hessian
 
 
@@ -1875,11 +1983,20 @@ def compute_wald_uncertainty(nll_func, x, bounds=None, loss_scale=1.0, alpha=0.0
     print(f"\n[Wald] Computing Hessian for {k} parameter(s) "
           f"(~{n_evals} silent NLL evaluations)...")
 
+    if nll_batch is None:
+        # Serial runs (no worker pool) go through the same stencil as pooled
+        # ones, evaluated one point at a time. The numdifftools route used to
+        # be taken here, with a fixed absolute step of 1e-5 and no knowledge of
+        # parameter scales: far below the ODE objective's numerical noise for a
+        # log10 coordinate, and larger than the parameter itself for a small
+        # linear rate constant -- the two failures _finite_difference_steps
+        # exists to prevent. It also bypassed the failure-sentinel check, and
+        # made a serial run's SEs incomparable with a pooled run's.
+        def nll_batch(xs, label=None):
+            return [nll_func(np.asarray(xi, dtype=float)) for xi in xs]
+
     try:
-        if nll_batch is not None:
-            hessian_raw = compute_hessian_batched(nll_batch, x, scales=scales)
-        else:
-            hessian_raw = compute_hessian_numdifftools(nll_func, x)
+        hessian_raw = compute_hessian_batched(nll_batch, x, scales=scales)
     except Exception as exc:
         print(f"[Wald] Hessian computation failed: {exc}")
         return None, None, nan_ci

@@ -116,7 +116,7 @@ def point_state_path(state_dir, param_name, x_fixed):
     return os.path.join(state_dir, _safe_name(f"{param_name}__{key!r}") + ".json")
 
 
-def point_identity(param_idx, x_fixed, n_nuisance, method):
+def point_identity(param_idx, x_fixed, n_nuisance, method, param_name, bounds):
     """What a saved state must match to be resumed by a job.
 
     Deliberately not the job's starting point or its simplex: those differ
@@ -124,10 +124,42 @@ def point_identity(param_idx, x_fixed, n_nuisance, method):
     stopped on the clock is resumed from a record, not from the job that began
     it), and a state is the more exact of the two resume sources whenever it
     exists. What it must never be is another *problem*.
+
+    THAT GUARANTEE WAS MISSING until 2026-09-25. ``param_idx`` is a POSITION,
+    not an identity: a reparametrization that keeps the same total and
+    nuisance parameter counts but changes what occupies each slot leaves
+    ``param_idx``, ``n`` and ``method`` all unchanged while the meaning of
+    every nuisance coordinate changes underneath them. This happened for
+    real the same day -- four independent k_gammasec_*_base constants
+    (silk_appfull, slots 5-8) were replaced by Vm_C99_Abeta_base and the
+    softmax logits y_gammaAB38/40/42, same 18 total, same 17 nuisance, same
+    slots -- and a state resumed from before the change into a run after it
+    would have been accepted, with the incumbent vertex it carried never
+    revalidated against the new bounds (``Engine.Nelder_mead.state_from_json``
+    checks shape, not bounds; only a *fresh* ``new_state`` clips). ``bounds``
+    closes the same gap for a bounds-only change: :func:`spec_fingerprint`
+    does not hash bounds at all, so tightening or correcting one does not
+    start a new checkpoint directory on its own, and nothing else stood
+    between an old, wider-bounded simplex and a run enforcing a new bound.
+
+    ``param_name`` and ``bounds`` are therefore folded into the identity
+    below as a hash, not compared field by field: their exact representation
+    (a numpy dtype, a tuple vs a list) can differ harmlessly between the run
+    that wrote a state and the one resuming it, and a hash of their JSON form
+    is stable across that while still changing the moment either actually
+    means something different.
     """
-    return {"param_idx": int(param_idx),
-            "x_fixed": round(float(x_fixed), 12),
-            "n": int(n_nuisance), "method": str(method).lower()}
+    payload = {"param_idx": int(param_idx),
+               "x_fixed": round(float(x_fixed), 12),
+               "n": int(n_nuisance), "method": str(method).lower()}
+    blob = json.dumps({
+        "param_name": str(param_name),
+        "bounds": [None if b is None else
+                   [None if v is None else round(float(v), 12) for v in b]
+                   for b in bounds] if bounds is not None else None,
+    }, sort_keys=True)
+    payload["fingerprint"] = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    return payload
 
 
 def save_point_state(path, identity, nm_state):
@@ -338,11 +370,18 @@ def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
             #      sigma profiled out analytically. It is the same function the
             #      fit minimizes, so its dNLL is on a different scale again and
             #      v1/v2 points must not be resumed into a v3 run.
-            "likelihood_convention": "v3-concentrated-gaussian",
-            # Under v3 sigma is profiled out per evaluation rather than frozen,
-            # so these no longer enter dNLL. They are still hashed because they
-            # are a compact fingerprint of the residuals at the optimum, which
-            # does change whenever the fit lands somewhere else.
+            #   v4 keeps v3 for the fit, Wald and slices, but evaluates every
+            #      profile point with each sigma-floored block pinned at its
+            #      own sigma_used from the fit (Optimize._freeze_floor), and
+            #      measures dNLL from an anchor computed the same way. v3
+            #      points re-concentrated those sigmas at every point, so they
+            #      sit on a different curve and must not be resumed into v4.
+            "likelihood_convention": "v4-concentrated-gaussian-frozen-floor",
+            # The fit's per-block sigmas. Unfloored blocks are still profiled
+            # out per evaluation, but floored blocks are frozen at these values
+            # for every profile point, so they now enter dNLL directly -- a
+            # different sigma is a different profile. Also a compact
+            # fingerprint of the residuals at the optimum.
             "sigmas": sorted(
                 (str(k), round(float(v), 12))
                 for k, v in (fixed_sigmas or {}).items()
