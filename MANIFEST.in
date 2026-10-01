@@ -4,5 +4,4 @@
 include README.md
 prune tests
 prune .git
-recursive-exclude __pycache__ *
-recursive-exclude *.pyc *
+global-exclude __pycache__ *.py[cod]

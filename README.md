@@ -2,6 +2,12 @@
 
 PyAntiGen is a declarative, object-oriented framework for generating compartmental biological models in Antimony format. It is designed to abstract away the repetitive boilerplate of defining reactions and compartments manually, allowing researchers to build complex, scalable models using clean Python syntax.
 
+> **PyAntiGen 2 is a breaking release.** The package is now `pyantigen`
+> (was `framework`): model generation is `pyantigen.generate`, and the Engine
+> is `pyantigen.engine`, imported from the installed package instead of being
+> copied into every project. See [Migrating from 1.x](#migrating-from-1x) and
+> `docs/V2_DESIGN.md`.
+
 ## Features
 
 - **Object-Oriented Modules:** Encapsulate tissues, flows, synthesis, and excretion into reusable Python classes.
@@ -10,22 +16,91 @@ PyAntiGen is a declarative, object-oriented framework for generating compartment
 - **Isotope Tracking:** Natively supports tracking labeled isotopes and generating corresponding parallel reactions.
 
 ## Installation
-You can install PyAntiGen into your Python environment with:
+
+PyAntiGen needs **Python 3.11 or newer**. Install it into a virtual environment
+that belongs to your project, not into your system Python: the dependencies
+(Tellurium/RoadRunner, SciPy, pyPESTO, ...) are large and version-sensitive,
+and every result records the PyAntiGen version that produced it.
+
+### Recommended: a project-local environment with uv
+
+[uv](https://docs.astral.sh/uv/) creates environments in well under a second and
+installs from a shared download cache, so each additional environment costs
+little disk space beyond the first. From your project folder:
+
 ```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python pyantigen        # Windows: .venv\Scripts\python
+```
+
+Activate it (`source .venv/bin/activate`, or `.venv\Scripts\activate` on
+Windows), or call `.venv/bin/python` directly. For a reproducible environment,
+pin exact versions in a `requirements.txt` and install with
+`uv pip install -r requirements.txt`.
+
+### Standard library `venv` + pip
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install pyantigen                  # Windows: .venv\Scripts\python
+```
+
+A fully populated environment is roughly 0.9 GB with plain pip, so keep one per
+project repository (and add `.venv/` to `.gitignore`) rather than one per model.
+
+### conda / mamba
+
+```bash
+conda create -n pyantigen python=3.12
+conda activate pyantigen
 pip install pyantigen
 ```
 
-You can also install PyAntiGen globally into your preferred Python environment by cloning this repository and running pip:
+### Check the installation
+
+```bash
+python -c "import pyantigen, pyantigen.engine; print(pyantigen.__version__)"
+```
+
+If a project's `AntiGen_paths.py` raises "PyAntiGen 2 ... is not installed",
+the wrong environment is active: activate the one you installed into.
+
+### Developing PyAntiGen itself
+
+Clone this repository and install it editable, with the test dependencies, into
+its own environment:
 
 ```bash
 git clone https://github.com/elbert5770/PyAntiGen.git
 cd PyAntiGen
-pip install -e .
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e ".[test]"
+.venv/bin/python -m pytest tests
 ```
+
+An editable install means edits take effect immediately, in every project that
+uses that environment. There is still only one copy of the Engine.
+
+### Migrating from 1.x
+
+1.x copied an `Engine/` folder into every project, so projects drifted apart.
+In 2.x the Engine is `pyantigen.engine` and projects hold none. To move a
+project:
+
+* `from framework.<module> import ...` becomes `from pyantigen.generate.<module> import ...`.
+* `from Engine.<module> import ...` becomes `from pyantigen.engine.<module> import ...`;
+  delete the project's `Engine/` folder.
+* Pass `MODEL_NAME` and `REPO_ROOT` in the settings given to `setup_simulation` /
+  `setup_optimization_from_groups` (see `Projects/Example/Model_run.py`).
+* Replace `AntiGen_paths.py` with the 2.x version from `pyantigen-create`; it
+  also refuses to run if the Engine is missing or a local `Engine/` reappears.
+* Regenerated Antimony may differ textually (for example constant compartment
+  volumes are written `compartment X := V_X`); compare simulated time courses,
+  not file contents.
 
 ## Quick Start: Creating a New Model
 
-Because PyAntiGen is installed as a system-level Python package, you don't need a copy of the framework files in your working directory. 
+Because PyAntiGen is an installed package, you don't need a copy of its code in your working directory. 
 
 To start a brand new modeling workspace, just open a terminal and navigate to a folder where you want your project to live (be careful not to build within the PyAntiGen folder itself) and run:
 
@@ -39,14 +114,14 @@ MyNewModel/
 ├── .agents/
 │   └── skills/          (agent skills, e.g. module generation, ODE conversion)
 ├── Projects/
-│   ├── Example/         (full example: generate, run + Modules/, Engine/)
+│   ├── Example/         (full example: generate, run + Modules/)
 │   │   ├── Model_generate.py
 │   │   ├── Model_run.py
-│   │   └── Modules/     (Data, AntimonyGen, Plots, Simulate, Optimize, Experiment, Events)
+│   │   └── Modules/     (Data, Events, Experiment, Loss_config, Optimizer_settings, Plots, ...)
 │   └── MyNewModel/      (same structure, Modules/ pre-populated from Example)
 │       ├── Model_generate.py
 │       ├── Model_run.py
-│       └── Modules/     (Data, AntimonyGen, Plots, Simulate, Optimize, Experiment, Events)
+│       └── Modules/     (Data, Events, Experiment, Loss_config, Optimizer_settings, Plots, ...)
 ├── antimony_modules/
 │   └── __init__.py      (plus Basic/ for the example)
 ├── data/                (Example experiment CSVs copied for the example)
@@ -99,5 +174,5 @@ Your own model lives under `Projects/MyNewModel/`. Modify the code for your mode
 
 The **Play** button uses whichever Python interpreter is currently selected. If your environment (conda/venv) isn’t loaded, the run may fail with import or path errors.
 
-1. **Select the correct interpreter**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) → **Python: Select Interpreter** → choose the environment where you ran `pip install -e .` (e.g. your conda or venv).
+1. **Select the correct interpreter**: `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) → **Python: Select Interpreter** → choose the environment you installed PyAntiGen into (e.g. your project's `.venv` or conda environment).
 2. **Run from project root**: Open the *project* folder (e.g. `MyNewModel`) as the workspace. Use **Run and Debug** (or Play on `Projects/Example/Model_run.py`); the project root is resolved from the script location so `antimony_models/Example/`, `generated/Example/`, and `results/Example/` resolve correctly.

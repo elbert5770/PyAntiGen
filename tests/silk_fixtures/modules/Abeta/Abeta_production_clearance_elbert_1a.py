@@ -11,7 +11,7 @@ SILK Support:
 - Uses linker list ['_', '_L_'] to generate appropriate species names
 """
 
-from framework.module_base import PyAntiGenModule
+from pyantigen.generate.module_base import PyAntiGenModule
 
 class AbetaProductionModule(PyAntiGenModule):
     """

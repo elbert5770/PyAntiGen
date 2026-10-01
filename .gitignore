@@ -25,4 +25,4 @@ venv/
 ENV/
 
 # Written at build time by setuptools-scm (see [tool.setuptools_scm])
-framework/_version.py
+pyantigen/_version.py

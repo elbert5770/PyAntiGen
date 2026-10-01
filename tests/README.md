@@ -18,7 +18,7 @@ the script, which need not match the script's filename.
 - **Fallback**: If `silk_fixtures` is missing, the Elbert_2022_SILK project must be available:
   - Either as a sibling directory of PyAntiGen: `.../Elbert_2022_SILK`
   - Or set `SILK_PROJECT_PATH` to its root
-- PyAntiGen’s `framework` must be on `PYTHONPATH` when the scripts run (tests set this automatically).
+- PyAntiGen’s `pyantigen` package must be on `PYTHONPATH` when the scripts run (tests set this automatically).
 
 ### Running
 

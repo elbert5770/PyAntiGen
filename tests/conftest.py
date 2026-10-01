@@ -2,6 +2,8 @@
 Pytest configuration and fixtures for PyAntiGen tests.
 """
 import os
+import shutil
+
 import pytest
 
 
@@ -24,9 +26,18 @@ def _find_silk_project_path():
 
 
 @pytest.fixture(scope="session")
-def silk_project_path():
-    """Path to the SILK project (scripts, modules, generated). Prefers tests/silk_fixtures when present."""
+def silk_project_path(tmp_path_factory):
+    """Path to the SILK project (scripts, modules, generated). Prefers tests/silk_fixtures when present.
+
+    The scripts write ``generated/`` beside themselves, so the in-repo fixtures are
+    copied to a temporary directory first: running the tests must not rewrite
+    tracked files.
+    """
     path = _find_silk_project_path()
+    if path is not None and os.path.dirname(path) == os.path.dirname(os.path.abspath(__file__)):
+        copy = str(tmp_path_factory.mktemp("silk_project") / "silk_fixtures")
+        shutil.copytree(path, copy, ignore=shutil.ignore_patterns("__pycache__"))
+        path = copy
     if path is None:
         pytest.skip(
             "SILK project not found. Use tests/silk_fixtures (in-repo copy), set SILK_PROJECT_PATH, or place Elbert_2022_SILK next to PyAntiGen."

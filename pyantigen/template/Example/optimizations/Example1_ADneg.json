@@ -1,0 +1,9 @@
+{
+ "pyantigen_optimization": 1,
+ "name": "Example1_ADneg",
+ "studies": {"example": "8de7f313a2c4def9b2bd019748382b6bf0a08c5c541fb84fb633c009226da61d"},
+ "uses": [{"study": "example", "assays": ["B"], "on": {"status": "ADneg"}}],
+ "params": {"V_Comp1": {"x0": 0.5, "bounds": [0.01, 10.0]}},
+ "method": "Nelder-Mead",
+ "optimizer_kwargs": {"options": {"maxiter": 500}}
+}
