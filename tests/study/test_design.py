@@ -587,3 +587,43 @@ def test_a_study_without_a_doi_is_warned_about():
     assert any("has no doi" in m for m in msgs)
     ok = [str(p) for p in validate(Study("x", doi="10.1000/y"))]
     assert not any("has no doi" in m for m in ok)
+
+
+def test_validate_optimization_reports_a_contrast_with_no_control_instead_of_raising():
+    s = crossover()
+    s.subject("M4", covariates={"weight_kg": 8.0})
+    s.simulate("M4", "p", dose="30")             # a numerator, and no vehicle for M4
+    a = with_assay(s)
+    msgs = [str(p) for p in validate_optimization(_fit(a))]      # must not raise
+    assert any("denominator" in m for m in msgs), msgs
+
+
+def test_validate_optimization_accepts_one_sided_bounds():
+    a = with_assay(crossover())
+    opt = _fit(a, params=[Param("KI", x0=1.0, bounds=(0.0, None)),
+                          Param("KJ", x0=-1.0, bounds=(None, 0.0)),
+                          Param("KK", x0=-1.0, bounds=(0.0, None))])
+    msgs = [str(p) for p in validate_optimization(opt)]
+    assert not any("'KI'" in m or "'KJ'" in m for m in msgs)
+    assert any("'KK'" in m and "outside" in m for m in msgs)
+
+
+def test_simulate_all_takes_a_single_level_as_a_string():
+    s = Study("one")
+    s.factor("dose", {"10": {"mgkg": 10}, "0": {"mgkg": 0}})
+    s.subject("M1")
+    s.protocol("p", _events, _solver, _observed)
+    s.simulate_all(["M1"], "p", dose="10")
+    assert list(s.simulations) == ["M1_10"]
+
+
+def test_simulate_all_is_all_or_nothing():
+    s = crossover()
+    before = list(s.simulations)
+    records = len(s._simulation_records)
+    s.subject("M4")
+    with pytest.raises(ValueError):
+        # M4_0 is fine, then M1_30 already exists
+        s.simulate_all(["M4", "M1"], "p", dose=["0", "30"])
+    assert list(s.simulations) == before
+    assert len(s._simulation_records) == records

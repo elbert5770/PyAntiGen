@@ -162,7 +162,17 @@ def _combine(a, b, op):
         return left
     if left == "1" and op == ".":
         return right
-    return f"{left}{op}({right})" if re.search(r"[./*]", right) else f"{left}{op}{right}"
+    # parse_unit reads strictly left to right and has no parentheses, so a
+    # compound right operand is flattened into its terms instead: dividing by
+    # "kg/h" flips each term's operator ("mg/kg.h"), multiplying keeps them.
+    toks = re.split(r"([./*])", right)
+    if toks[0] == "":                      # leading "/h" means "1/h"
+        toks[0] = "1"
+    out = f"{left}{op}{toks[0]}"
+    for sep, term in zip(toks[1::2], toks[2::2]):
+        divides = (sep == "/") != (op == "/")
+        out += f"{'/' if divides else '.'}{term}"
+    return out
 
 
 @dataclass(frozen=True)

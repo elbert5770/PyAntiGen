@@ -406,7 +406,9 @@ def _profile_task(job):
             res = None
             outcome = "done"
             if resumable:
-                identity = point_identity(param_idx, x_fixed, x_start.size, method)
+                identity = point_identity(
+                    param_idx, x_fixed, x_start.size, method,
+                    param_name=spec.param_names[param_idx], bounds=bounds)
                 nm_state = state_from_json(
                     load_point_state(state_path, identity), x_start.size)
                 if nm_state is not None:

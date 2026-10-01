@@ -2038,7 +2038,8 @@ def compute_wald_uncertainty(nll_func, x, bounds=None, loss_scale=1.0, alpha=0.0
 
     n_evals = 2 * k * k + 2 * k + 1
     print(f"\n[Wald] Computing Hessian for {k} parameter(s) "
-          f"(~{n_evals} silent NLL evaluations)...")
+          f"(~{n_evals} silent NLL evaluations, plus a short step-calibration "
+          f"pass for log10 parameters)...")
 
     if nll_batch is None:
         # Serial runs (no worker pool) go through the same stencil as pooled

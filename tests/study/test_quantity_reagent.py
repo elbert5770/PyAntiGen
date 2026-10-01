@@ -212,3 +212,15 @@ def test_a_format_4_design_still_loads_and_gains_no_reagents():
 def test_a_reagent_needs_a_name():
     with pytest.raises(ValueError):
         Reagent("")
+
+
+def test_compound_units_multiply_and_divide_through_the_parser():
+    """A product or quotient with a compound unit must stay parseable."""
+    assert (Q(5, "mg") * Q(2, "1/h")).in_("mg/h") == pytest.approx(10.0)
+    assert (Q(1, "mg") / Q(2, "kg/h")).in_("mg.h/kg") == pytest.approx(0.5)
+    assert (Q(1, "h") / Q(2, "1/h")).in_("h2") == pytest.approx(0.5)
+    assert (5 / Q(2, "mg/h")).in_("h/mg") == pytest.approx(2.5)
+    assert (Q(3, "mg") * Q(2, "L/h")).in_("mg.L/h") == pytest.approx(6.0)
+    # the round trip through the text form still works
+    q = Q(1, "mg") / Q(2, "kg/h")
+    assert Q(q.value, q.unit) == q

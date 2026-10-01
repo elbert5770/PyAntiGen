@@ -190,16 +190,22 @@ def validate_optimization(opt, data_path=None, remarks=None, raise_on_error=Fals
             continue
         if not sims:
             probs.append(Problem("error", f"{where}: on={u.on} selects no simulations"))
-        if u.score and not any(u.scoring().values()):
-            probs.append(Problem("error", f"{where}: scores nothing (no selected assay "
-                                          "has data on the selected simulations)"))
+        if u.score:
+            try:
+                scored = any(u.scoring().values())
+            except (KeyError, ValueError) as exc:     # e.g. a contrast with no control
+                probs.append(Problem("error", f"{where}: {exc}"))
+                continue
+            if not scored:
+                probs.append(Problem("error", f"{where}: scores nothing (no selected assay "
+                                              "has data on the selected simulations)"))
     for p in opt.params:
         if p.by and not any(p.by in st.factors for st in opt.studies):
             probs.append(Problem("error", f"param {p.name!r}: by={p.by!r} is not a factor "
                                           "of any study used"))
         if p.bounds is not None and not isinstance(p.bounds, dict) and not isinstance(p.x0, dict):
-            lo, hi = p.bounds
-            if not (lo <= p.x0 <= hi):
+            lo, hi = p.bounds                      # either side may be None (open)
+            if (lo is not None and p.x0 < lo) or (hi is not None and p.x0 > hi):
                 probs.append(Problem("error", f"param {p.name!r}: x0={p.x0} outside {p.bounds}"))
     if opt.remarks:
         if remarks is None:

@@ -233,13 +233,22 @@ class Study:
         for fac, levs in factor_levels.items():
             if fac not in self.factors:
                 raise KeyError(f"simulate_all: unknown factor {fac!r}")
+            if isinstance(levs, str) and levs != "*":
+                levs = [levs]                      # one level, not its characters
             spec[fac] = (list(self.factors[fac].levels) if levs == "*"
                          else [str(x) for x in levs])
         out = []
         names = list(spec)
-        for s in subjects:
-            for combo in product(*(spec[n] for n in names)):
-                out.append(self._make_simulation(s, protocol, None, None, dict(zip(names, combo))))
+        try:
+            for s in subjects:
+                for combo in product(*(spec[n] for n in names)):
+                    out.append(self._make_simulation(s, protocol, None, None, dict(zip(names, combo))))
+        except Exception:
+            # All or nothing: a half-registered call would be scored but absent
+            # from the recorded design (and so from its fingerprint).
+            for sim in out:
+                del self.simulations[sim.id]
+            raise
         self._simulation_records.append({"all": {
             "subjects": subjects, "protocol": protocol,
             "factors": {k: ("*" if factor_levels[k] == "*" else spec[k]) for k in names}}})
