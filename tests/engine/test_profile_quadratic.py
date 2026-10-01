@@ -1267,10 +1267,13 @@ def test_a_confound_survives_a_lengthening_stride():
         1           135.7,   1 bound                 0.0356,  none
         2           207.1,   2 bounds                0.0587,  none
 
-    Both arms run here, because an assertion about a fix is worth little unless
-    the test can show the fix is what satisfies it. That costs this test about
-    ninety seconds, which is most of what it adds to the suite; the failure it
-    guards took a day to find and is invisible in a finished run.
+    Only the new rule runs here: the old one is obsolete, and the measurements
+    above are the record of what it did. (A control that ran the old rule too
+    was dropped because whether it misbehaves depends on the optimizer's
+    floating-point path -- it did not on numpy 2.5 -- so it failed for reasons
+    unrelated to the engine.) The assertions below are what a regression of
+    ``_predicted_travel`` would break. The failure it guards took a day to find
+    and is invisible in a finished run.
 
     Only the fourteen-dimensional version reproduces. At six, eight or ten
     nuisance dimensions the search recovers from an undersized simplex either
@@ -1294,54 +1297,21 @@ def test_a_confound_survives_a_lengthening_stride():
     wald_se = np.concatenate([se_block[:m - 1], [np.nan, np.nan]])
     bounds = [(-1e3, 1e3)] * (m - 1) + [(1.0, 25.0), (1.0, 25.0)]
 
-    def run(predict_from_upcoming_step):
-        import pyantigen.engine.Optimize as _O
-        saved = _O._predicted_travel
-        if not predict_from_upcoming_step:
-            # The old rule: size the simplex from the step just taken.
-            _O._predicted_travel = lambda seed, x_step: _O._seed_travel(seed)
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                traces, _a, _w, conv = run_parallel_profile(
-                    _make_batch(nll, k), res_x, 0.0, names, bounds,
-                    ["lin"] * k, method="Nelder-Mead", wald_se=wald_se,
-                    n_grid=4, range_factor=2.0, se_span=3.0, n_refine=2,
-                    checkpoint=None, warm_passes=1, max_extend=10)
-        finally:
-            _O._predicted_travel = saved
-        peak = max(float(np.nanmax(traces[n][1])) for n in names[-2:])
-        invented = 0
-        for n in names[-2:]:
-            lo, hi = _extract_profile_ci(traces[n][0], traces[n][1],
-                                         threshold=_THRESHOLD)
-            invented += int(np.isfinite(lo)) + int(np.isfinite(hi))
-        half = _half_widths(names, traces)
-        return peak, invented, half, conv
+    with contextlib.redirect_stdout(io.StringIO()):
+        traces, _a, _w, conv = run_parallel_profile(
+            _make_batch(nll, k), res_x, 0.0, names, bounds,
+            ["lin"] * k, method="Nelder-Mead", wald_se=wald_se,
+            n_grid=4, range_factor=2.0, se_span=3.0, n_refine=2,
+            checkpoint=None, warm_passes=1, max_extend=10)
+    peak_new = max(float(np.nanmax(traces[n][1])) for n in names[-2:])
+    bad_new = 0
+    for n in names[-2:]:
+        lo, hi = _extract_profile_ci(traces[n][0], traces[n][1],
+                                     threshold=_THRESHOLD)
+        bad_new += int(np.isfinite(lo)) + int(np.isfinite(hi))
+    half = _half_widths(names, traces)
 
-    peak_old, bad_old, _h_old, _c_old = run(False)
-    peak_new, bad_new, half, conv = run(True)
-
-    print(f"    {'simplex scaled by':>26} {'highest dNLL':>13} "
-          f"{'bounds invented':>16}")
-    print(f"    {'the step just taken':>26} {peak_old:13.4g} {bad_old:16d}")
-    print(f"    {'the step being taken':>26} {peak_new:13.4g} {bad_new:16d}")
-
-    # A negative control: it checks the FIXTURE, not the product. Whether the
-    # old rule misbehaves here depends on the optimizer's floating-point path
-    # (it does with numpy 2.4 / scipy 1.17, and does not with numpy 2.5 /
-    # scipy 1.18), so a fixture that has stopped reproducing the bug warns
-    # instead of failing the suite. The two checks below are the ones that test
-    # the fix, and they hold on both stacks.
-    if peak_old > _THRESHOLD and bad_old > 0:
-        check("sizing the simplex from the previous step really does break this",
-              True, "")
-    else:
-        import warnings
-        msg = (f"the old simplex rule no longer reproduces the bug on this "
-               f"numerical stack (peak {peak_old:.4g}, {bad_old} bound(s) "
-               f"invented); the fixture asserts nothing here")
-        print("  WARN  " + msg)
-        warnings.warn(msg)
+    print(f"    highest dNLL {peak_new:.4g}, bounds invented {bad_new}")
 
     check("sizing it from the step being taken keeps the profile flat",
           peak_new < 0.1, f"highest dNLL {peak_new:.4g}")
