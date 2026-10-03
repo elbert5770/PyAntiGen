@@ -219,6 +219,12 @@ def _shutdown_evaluator(opt):
 # Grid controls for the parallel profile, and the settings key that reaches each.
 # The engine holds the defaults; only keys a run actually sets are forwarded, so
 # there is one place to change a default rather than two.
+# Opening-grid placement, settable from a spec's profile_grid only. All default
+# to today's behaviour. open_from_screen ends each side's grid at the slice
+# screen's first crossing; open_decades caps the Wald/range_factor opening span
+# for sides with no crossing; grid_spacing is "linear" or "geometric".
+_PROFILE_GRID_SPEC_ONLY = {"open_from_screen", "open_decades", "grid_spacing"}
+
 _PROFILE_GRID_SETTINGS = {
     "profile_se_span":       "se_span",
     "profile_n_grid":        "n_grid",
@@ -265,7 +271,7 @@ def _profile_kwargs(settings, optimization_spec=None):
             out[arg] = value
 
     spec_kwargs = getattr(optimization_spec, "optimizer_kwargs", None) or {}
-    known = set(_PROFILE_GRID_SETTINGS.values())
+    known = set(_PROFILE_GRID_SETTINGS.values()) | _PROFILE_GRID_SPEC_ONLY
     for arg, value in (spec_kwargs.get("profile_grid") or {}).items():
         if arg not in known:
             raise ValueError(

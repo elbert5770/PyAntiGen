@@ -3762,8 +3762,53 @@ def _param_bounds(bounds, param_idx):
     return -np.inf, np.inf
 
 
+def _screen_crossing(screen, name, side, p_opt, sign, threshold=None):
+    """Opt-space value of the first slice point above the threshold, or None.
+
+    The slice screen walks each side outward and stops the round it first
+    crosses, so the crossing is the outermost point it holds. The slice is an
+    upper bound on the profile, so the profile crosses at or beyond this value:
+    it is where the opening grid should end, not a prediction of where the
+    profile threshold is. Only a "crossed" side has one; an open, short-reach,
+    blocked or empty side returns None and the caller falls back.
+    """
+    try:
+        rec = screen["parameters"][name][side]
+    except (KeyError, TypeError):
+        return None
+    if rec.get("state") != "crossed":
+        return None
+    thr = float(threshold if threshold is not None
+                else screen.get("threshold", _PROFILE_THRESHOLD))
+    for pt in rec.get("points") or []:
+        x, d = pt.get("x"), pt.get("dnll")
+        if x is None or d is None or not np.isfinite(d) or d <= thr:
+            continue
+        x = float(x)
+        if (x < p_opt) if sign < 0 else (x > p_opt):
+            return x
+    return None
+
+
+def _grid_between(p_opt, target, n_grid, spacing):
+    """*n_grid* values from the optimum out to *target*, the last one on it.
+
+    "linear" is the historical spacing. "geometric" halves the distance each
+    step inward (target, target/2, target/4, ...), which spends the points near
+    the optimum where a better minimum would show up as a negative dNLL, and
+    keeps the outermost one where the threshold is expected.
+    """
+    if spacing == "geometric":
+        fracs = [0.5 ** k for k in range(n_grid - 1, -1, -1)]
+        return [p_opt + f * (target - p_opt) for f in fracs]
+    # np.linspace itself, not an equivalent formula: the default grid must stay
+    # bit-identical so checkpointed points from earlier launches still match.
+    return list(np.linspace(p_opt, target, n_grid + 1)[1:])
+
+
 def _profile_grid_for(param_idx, res_x, bounds, scales, wald_se, n_grid,
-                      range_factor, se_span):
+                      range_factor, se_span, param_name=None, screen=None,
+                      open_decades=None, grid_spacing="linear"):
     """Grid of fixed values for one parameter, both directions, in opt space.
 
     Seeded from the Wald standard error when one is available: the profile
@@ -3779,6 +3824,20 @@ def _profile_grid_for(param_idx, res_x, bounds, scales, wald_se, n_grid,
     wide span here and waste points in the flat middle of every well-determined
     parameter, ``_build_extension_jobs`` walks whichever side has not reached
     the threshold outward from this grid until it does.
+
+    Three opt-in controls, all inert at their defaults so existing specs place
+    exactly the grid they always did:
+
+    ``screen`` (with ``param_name``)
+        The slice screen's report. A side whose slice crossed the threshold
+        ends its grid at that crossing, whatever the Wald SE says. The SE is
+        the unreliable input -- a Hessian taken away from a true optimum can be
+        enormous -- and the slice crossing is measured, not extrapolated.
+    ``open_decades``
+        Cap, in decades, on the half-width of a side that has no slice
+        crossing and so falls back to ``se_span * SE`` or ``range_factor``.
+    ``grid_spacing``
+        "linear" (default) or "geometric"; see ``_grid_between``.
     """
     p_opt = res_x[param_idx]
     is_log = scales[param_idx] == "log10"
@@ -3803,11 +3862,30 @@ def _profile_grid_for(param_idx, res_x, bounds, scales, wald_se, n_grid,
         lo_target = min(p_opt / range_factor, p_opt * range_factor)
         hi_target = max(p_opt / range_factor, p_opt * range_factor)
 
+    if open_decades is not None:
+        cap = float(open_decades)
+        if is_log:
+            lo_target = max(lo_target, p_opt - cap)
+            hi_target = min(hi_target, p_opt + cap)
+        elif p_opt > 0:
+            lo_target = max(lo_target, p_opt * 10.0 ** -cap)
+            hi_target = min(hi_target, p_opt * 10.0 ** cap)
+
+    if screen is not None and param_name is not None:
+        lo_x = _screen_crossing(screen, param_name, "lower", p_opt, -1)
+        hi_x = _screen_crossing(screen, param_name, "upper", p_opt, 1)
+        if lo_x is not None:
+            lo_target = lo_x
+        if hi_x is not None:
+            hi_target = hi_x
+
     lo = max(lo_target, lb)
     hi = min(hi_target, ub)
 
-    left = [v for v in np.linspace(p_opt, lo, n_grid + 1)[1:] if v < p_opt]
-    right = [v for v in np.linspace(p_opt, hi, n_grid + 1)[1:] if v > p_opt]
+    left = [v for v in _grid_between(p_opt, lo, n_grid, grid_spacing)
+            if v < p_opt]
+    right = [v for v in _grid_between(p_opt, hi, n_grid, grid_spacing)
+             if v > p_opt]
     return left, right, (lb, ub), is_log
 
 
@@ -4400,6 +4478,7 @@ def run_parallel_profile(
     n_grid=5, range_factor=2.0, se_span=4.0, n_refine=4,
     checkpoint=None, threshold=_PROFILE_THRESHOLD, warm_passes=1,
     max_extend=8, extend_growth=2.0, bracket_rtol=0.05,
+    screen=None, open_decades=None, grid_spacing="linear",
 ):
     """Profile likelihood for every parameter as parallel batches.
 
@@ -4597,7 +4676,9 @@ def run_parallel_profile(
     meta = {}
     for i, name in enumerate(param_names):
         left, right, _b, is_log = _profile_grid_for(
-            i, res_x, bounds, scales, wald_se, n_grid, range_factor, se_span
+            i, res_x, bounds, scales, wald_se, n_grid, range_factor, se_span,
+            param_name=name, screen=screen, open_decades=open_decades,
+            grid_spacing=grid_spacing,
         )
         meta[i] = {"is_log": is_log}
         nb = nuisance_bounds_for(i)
@@ -5455,6 +5536,7 @@ def _run_parallel_profile_with_checkpoint(
     fixed_sigmas=None, warm_passes=1, max_extend=8, extend_growth=2.0,
     bracket_rtol=0.05, screen_span_decades=None, screen_min_reach_decades=None,
     replicates=None, sigma_by_block=None,
+    open_from_screen=False, open_decades=None, grid_spacing="linear",
 ):
     """Wire the pool, the checkpoint store, the wall budget and the profile."""
     from pyantigen.engine.Profile_checkpoint import (
@@ -5565,6 +5647,8 @@ def _run_parallel_profile_with_checkpoint(
             se_span=se_span, n_refine=n_refine, checkpoint=ckpt,
             warm_passes=warm_passes, max_extend=max_extend,
             extend_growth=extend_growth, bracket_rtol=bracket_rtol,
+            screen=screen if open_from_screen else None,
+            open_decades=open_decades, grid_spacing=grid_spacing,
         )
         if ckpt.n_skipped_stale:
             print(f"[profile] ignored {ckpt.n_skipped_stale} checkpoint record(s) "
@@ -6951,7 +7035,9 @@ def run_optimization_from_groups(
                             n_refine=4, run_id=None, warm_passes=1,
                             max_extend=8, extend_growth=2.0,
                             bracket_rtol=0.05, screen_span_decades=None,
-                            screen_min_reach_decades=None:
+                            screen_min_reach_decades=None,
+                            open_from_screen=False, open_decades=None,
+                            grid_spacing="linear":
                             _run_parallel_profile_with_checkpoint(
                                 _pool_state["evaluator"], res.x, nll_at_optimum,
                                 param_names, bounds, scales,
@@ -6974,6 +7060,9 @@ def run_optimization_from_groups(
                                     screen_min_reach_decades),
                                 replicates=active_replicates,
                                 sigma_by_block=sigma_by_block,
+                                open_from_screen=open_from_screen,
+                                open_decades=open_decades,
+                                grid_spacing=grid_spacing,
                             )
                         )
 
