@@ -93,9 +93,9 @@ class CustomLaw(RateLaw):
 def get_rate_law_info(rate_type: str) -> str:
     """Return a short docstring for the given rate type (units and scaling)."""
     if rate_type in ("MA", "RMA"):
-        return MassActionLaw(rate_type).user_units_description
+        return MassActionLaw().user_units_description
     if rate_type in ("UDF", "BDF"):
-        return VolumeTransportLaw(rate_type).user_units_description
+        return VolumeTransportLaw().user_units_description
     if rate_type in ("custom_conc_per_time", "custom_amt_per_time", "custom"):
         return CustomLaw(rate_type).user_units_description
     return "Unknown rate type"
