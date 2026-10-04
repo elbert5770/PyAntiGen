@@ -98,6 +98,17 @@ SPAN_DECADES = 3.0
 # stops evaluating close in and the walk cannot get out to the span.
 MIN_REACH_DECADES = 1.0
 
+# The slice's own crossing, located. The ladder stops the round a side first
+# rises above THRESHOLD, and on a model whose other parameters compensate that
+# first point is wildly above it (a slice dNLL of 1e4 against a profile of 5).
+# With ``window_hi`` set, a side whose first crossing lands above it is walked
+# back inward until a point lands in (THRESHOLD, window_hi]: a slice crossing
+# that is actually near the threshold, and so a lower bound on the profile
+# crossing worth having. None keeps the old behaviour exactly.
+MAX_REFINE_ROUNDS = 6
+_REFINE_MIN_RATIO = 1.0 / 16.0
+_REFINE_MAX_RATIO = 0.95
+
 # One side's verdict. Only "open" halts the run.
 #   crossed      the slice rose above the threshold: profiling may proceed
 #   open         the slice is still below the threshold decades out: PROVEN open
@@ -392,11 +403,93 @@ def _verdict(points, bound, threshold, p_opt, sign, is_log,
     }
 
 
+def _side_distance(p_opt, x, is_log, ratio_mode):
+    """Distance from the optimum in the walk's own measure.
+
+    Opt-space offset for a log10 parameter, log10 ratio for a positive linear
+    one while every point so far is positive, plain offset otherwise.
+    """
+    if is_log:
+        return abs(float(x) - float(p_opt))
+    if ratio_mode:
+        return abs(float(np.log10(x)) - float(np.log10(p_opt)))
+    return abs(float(x) - float(p_opt))
+
+
+def _side_value(p_opt, d, sign, is_log, ratio_mode):
+    """Inverse of :func:`_side_distance`."""
+    if is_log:
+        return float(p_opt) + sign * float(d)
+    if ratio_mode:
+        return float(p_opt) * float(10.0 ** (sign * d))
+    return float(p_opt) + sign * float(d)
+
+
+def _refine_value(entry, threshold, window_hi):
+    """The next value on a side that is being walked back in, or None to stop.
+
+    Aims at the geometric middle of the window. With a point already at or
+    below the threshold inside the one that was too high, the crossing is
+    bracketed and the step is a sqrt(dNLL) interpolation, which is linear in
+    distance for a locally quadratic curve. With only the optimum inside, the
+    step is a power-law extrapolation from the too-high points, dNLL = c d^p
+    with p fitted from two of them when it can be and 2 otherwise. A value the
+    model could not evaluate counts as too high and halves the distance.
+    """
+    p_opt, sign, is_log = entry["p_opt"], entry["sign"], entry["is_log"]
+    pts = entry["points"]
+    ratio_mode = (not is_log) and p_opt > 0 and all(
+        float(p["x"]) > 0 for p in pts)
+    target = float(np.sqrt(threshold * window_hi))
+
+    recs = []
+    for p in pts:
+        d = _side_distance(p_opt, p["x"], is_log, ratio_mode)
+        usable = _is_usable(p)
+        recs.append((d, float(p["dnll"]) if usable else float("inf"), usable))
+
+    high = sorted((r for r in recs if r[1] > window_hi or not r[2]),
+                  key=lambda r: r[0])
+    if not high:
+        return None
+    d_hi, dnll_hi, hi_ok = high[0]
+    low = [r for r in recs if r[2] and r[1] <= threshold and r[0] < d_hi]
+    d_lo, dnll_lo = (max(low, key=lambda r: r[0])[:2]) if low else (0.0, 0.0)
+
+    if hi_ok and np.isfinite(dnll_hi) and dnll_hi > dnll_lo and d_hi > d_lo:
+        if d_lo > 0.0 and dnll_lo > 0.0:
+            r_lo, r_hi = np.sqrt(dnll_lo), np.sqrt(dnll_hi)
+            frac = (np.sqrt(target) - r_lo) / (r_hi - r_lo)
+            frac = float(min(max(frac, 0.1), 0.9))
+            d_new = d_lo + frac * (d_hi - d_lo)
+        else:
+            exponent = 2.0
+            ups = [r for r in high if r[2] and np.isfinite(r[1]) and r[1] > 0]
+            if len(ups) >= 2 and ups[1][0] > ups[0][0] * (1.0 + 1e-9) \
+                    and ups[1][1] > ups[0][1] * (1.0 + 1e-9):
+                cand = (np.log(ups[1][1] / ups[0][1])
+                        / np.log(ups[1][0] / ups[0][0]))
+                if np.isfinite(cand) and cand > 0:
+                    exponent = float(np.clip(cand, 0.5, 6.0))
+            ratio = (target / dnll_hi) ** (1.0 / exponent)
+            ratio = float(np.clip(ratio, _REFINE_MIN_RATIO, _REFINE_MAX_RATIO))
+            d_new = d_hi * ratio
+    else:
+        d_new = d_lo + 0.5 * (d_hi - d_lo)
+
+    if not np.isfinite(d_new) or d_new <= 1e-9:
+        return None
+    if any(abs(d_new - r[0]) <= 1e-12 * max(d_new, 1.0) for r in recs):
+        return None
+    return _side_value(p_opt, d_new, sign, is_log, ratio_mode)
+
+
 def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
                      scales=None, wald_se=None, threshold=THRESHOLD,
                      max_points=6, growth=2.0, range_factor=2.0,
                      span_decades=SPAN_DECADES,
-                     min_reach_decades=MIN_REACH_DECADES, verbose=True):
+                     min_reach_decades=MIN_REACH_DECADES, verbose=True,
+                     window_hi=None, max_refine_rounds=MAX_REFINE_ROUNDS):
     """Evaluate every parameter's slice out across decades, stopping each side
     the moment it crosses.
 
@@ -430,6 +523,15 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
     been read as "open" by a full evaluation, and reads "crossed" here
     instead. That trades a slower profile on a rare, specific slice shape for
     never paying an unbounded evaluation on the common one.
+
+    ``window_hi`` adds one thing after that first crossing. A side whose first
+    point above the threshold is also above ``window_hi`` is walked back inward
+    (see :func:`_refine_value`) until a point lands in (threshold, window_hi],
+    for at most ``max_refine_rounds`` further rounds. The points that come back
+    inside the first crossing are real evaluations and are kept: a slice point
+    at or below the threshold there is certified inside the interval, which is
+    what ``inner_bracket`` records. The "open" verdict is not touched, since a
+    side only enters this walk after it has crossed.
     """
     from pyantigen.engine.Optimize import _param_bounds
 
@@ -448,7 +550,8 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
                                  span_decades=span_decades)
             plan.append({"index": i, "name": name, "side": side, "sign": sign,
                         "is_log": is_log, "values": vals, "points": [],
-                        "settled": False,
+                        "settled": False, "ladder_i": 0, "refine": False,
+                        "n_refine": 0,
                         "p_opt": float(res_x[i]),
                         "bound": (lb if sign < 0 else ub)})
 
@@ -464,31 +567,56 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
               f"the profile, which is all the screen needs.", flush=True)
 
     n_evaluations = 0
-    for r in range(max_rounds):
+    r = 0
+    max_total = max_rounds + (int(max_refine_rounds) if window_hi else 0)
+    while r < max_total:
         round_xs, round_owner = [], []
         for entry in plan:
-            if entry["settled"] or r >= len(entry["values"]):
+            if entry["settled"]:
                 continue
-            v = entry["values"][r]
+            if entry["refine"]:
+                v = _refine_value(entry, threshold, window_hi)
+                if v is None:
+                    entry["settled"] = True
+                    continue
+            else:
+                if entry["ladder_i"] >= len(entry["values"]):
+                    continue
+                v = entry["values"][entry["ladder_i"]]
+                entry["ladder_i"] += 1
             x = res_x.copy()
             x[entry["index"]] = v
             round_xs.append(x)
             round_owner.append((entry, v))
         if not round_xs:
             break
+        r += 1
         if verbose:
-            print(f"[screen] round {r + 1}: {len(round_xs)} side(s) still "
-                  f"undecided.", flush=True)
+            n_ref = sum(1 for e, _ in round_owner if e["refine"])
+            extra = (f", {n_ref} walking back in toward the window"
+                     if n_ref else "")
+            print(f"[screen] round {r}: {len(round_xs)} side(s) still "
+                  f"undecided{extra}.", flush=True)
         n_evaluations += len(round_xs)
-        nlls = nll_batch(round_xs, label=f"slice-screen-r{r + 1}")
+        nlls = nll_batch(round_xs, label=f"slice-screen-r{r}")
         for (entry, v), nll in zip(round_owner, nlls):
             nll = float(nll)
             point = {"x": float(v),
                     "x_linear": float(10.0 ** v if entry["is_log"] else v),
                     "nll": nll, "dnll": float(nll - nll_at_optimum)}
             entry["points"].append(point)
-            if _is_usable(point) and point["dnll"] > threshold:
-                entry["settled"] = True
+            usable = _is_usable(point)
+            if entry["refine"]:
+                entry["n_refine"] += 1
+                if usable and threshold < point["dnll"] <= window_hi:
+                    entry["settled"] = True
+                elif entry["n_refine"] >= int(max_refine_rounds):
+                    entry["settled"] = True
+            elif usable and point["dnll"] > threshold:
+                if window_hi is None or point["dnll"] <= window_hi:
+                    entry["settled"] = True
+                else:
+                    entry["refine"] = True
 
     report = {"threshold": float(threshold),
               "anchor": float(nll_at_optimum),
@@ -496,17 +624,25 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
               "param_names": list(param_names),
               "span_decades": float(span_decades),
               "min_reach_decades": float(min_reach_decades),
+              "window_hi": (float(window_hi) if window_hi else None),
               "n_evaluations": n_evaluations,
               "n_candidates": n_candidates,
               "parameters": {}}
 
     for entry in plan:
+        # Evaluation order is not distance order once a side has been walked
+        # back in, and everything downstream (the verdict, the inner bracket,
+        # the fast profile's crossing) reads points outward from the optimum.
+        entry["points"].sort(key=lambda q: abs(q["x"] - entry["p_opt"]))
         side = _verdict(entry["points"], entry["bound"], threshold,
                         entry["p_opt"], entry["sign"], entry["is_log"],
                         min_reach_decades=min_reach_decades)
         side["is_log"] = entry["is_log"]
         side["stopped_early"] = bool(entry["settled"]
-                                     and len(entry["points"]) < len(entry["values"]))
+                                     and entry["ladder_i"] < len(entry["values"]))
+        side["crossing"] = _crossing_record(entry["points"], threshold,
+                                            window_hi, entry["p_opt"],
+                                            entry["is_log"])
         report["parameters"].setdefault(entry["name"], {})[entry["side"]] = side
 
     states = [s["state"] for sides in report["parameters"].values()
@@ -518,6 +654,27 @@ def run_slice_screen(nll_batch, res_x, nll_at_optimum, param_names, bounds,
         1 for sides in report["parameters"].values()
         for s in sides.values() if s["box_too_narrow"])
     return report
+
+
+def _crossing_record(points, threshold, window_hi, p_opt, is_log):
+    """The slice point nearest the threshold from above, or None.
+
+    This is the slice's crossing as far as the screen located it: the usable
+    point with the smallest dNLL among those above the threshold. ``in_window``
+    says whether it landed inside (threshold, window_hi]; when it did not, the
+    refinement ran out of rounds or was never asked for, and the crossing is
+    only an upper limit on where the slice crosses.
+    """
+    above = [q for q in points if _is_usable(q) and q["dnll"] > threshold]
+    if not above:
+        return None
+    q = min(above, key=lambda t: t["dnll"])
+    ratio_mode = (not is_log) and p_opt > 0 and q["x"] > 0
+    return {"x": float(q["x"]), "x_linear": float(q["x_linear"]),
+            "dnll": float(q["dnll"]),
+            "decades": float(_side_distance(p_opt, q["x"], is_log, ratio_mode)),
+            "in_window": bool(window_hi is not None
+                              and q["dnll"] <= window_hi)}
 
 
 def failing_sides(report):
@@ -550,6 +707,7 @@ def screen_summary(report):
         "parameters": {
             name: {side: {"state": rec["state"],
                           "inner_bracket": rec["inner_bracket"],
+                          "crossing": rec.get("crossing"),
                           "reach": rec["reach"],
                           "reach_decades": rec["reach_decades"],
                           "dnll_at_reach": rec["dnll_at_reach"],
@@ -658,7 +816,7 @@ def save_screen(report, ckpt_dir):
 
 def load_screen(ckpt_dir, param_names, res_x, threshold=THRESHOLD,
                 span_decades=SPAN_DECADES,
-                min_reach_decades=MIN_REACH_DECADES):
+                min_reach_decades=MIN_REACH_DECADES, window_hi=None):
     """A screen already run for this exact fit, or None.
 
     The checkpoint directory is keyed by model hash, spec hash and the optimum,
@@ -689,6 +847,13 @@ def load_screen(ckpt_dir, param_names, res_x, threshold=THRESHOLD,
                 return None
         except (TypeError, ValueError):
             return None
+    # A screen run without the window must not answer for one asked to refine,
+    # and the reverse: the points it holds are different points.
+    stored_hi = report.get("window_hi")
+    if (stored_hi is None) != (window_hi is None):
+        return None
+    if window_hi is not None and abs(float(stored_hi) - float(window_hi)) > 1e-12:
+        return None
     stored = np.asarray(report.get("res_x") or [], dtype=float)
     current = np.asarray(res_x, dtype=float)
     if stored.shape != current.shape or not np.allclose(stored, current,
@@ -701,7 +866,8 @@ def screen_or_raise(nll_batch, res_x, nll_at_optimum, param_names, bounds,
                     scales=None, wald_se=None, ckpt_dir=None,
                     threshold=THRESHOLD, max_points=6, growth=2.0,
                     range_factor=2.0, span_decades=SPAN_DECADES,
-                    min_reach_decades=MIN_REACH_DECADES, verbose=True):
+                    min_reach_decades=MIN_REACH_DECADES, verbose=True,
+                    window_hi=None):
     """Run the screen (or reuse one), report it, and stop the run if it failed.
 
     Raises :class:`UnidentifiableParameters` when any side is proven unbounded.
@@ -709,7 +875,7 @@ def screen_or_raise(nll_batch, res_x, nll_at_optimum, param_names, bounds,
     to lie inside the confidence interval.
     """
     report = load_screen(ckpt_dir, param_names, res_x, threshold,
-                         span_decades, min_reach_decades)
+                         span_decades, min_reach_decades, window_hi)
     if report is not None:
         if verbose:
             print(f"\n[screen] reusing the slice screen already run for this "
@@ -722,7 +888,7 @@ def screen_or_raise(nll_batch, res_x, nll_at_optimum, param_names, bounds,
             scales=scales, wald_se=wald_se, threshold=threshold,
             max_points=max_points, growth=growth, range_factor=range_factor,
             span_decades=span_decades, min_reach_decades=min_reach_decades,
-            verbose=verbose,
+            verbose=verbose, window_hi=window_hi,
         )
         path = save_screen(report, ckpt_dir)
 

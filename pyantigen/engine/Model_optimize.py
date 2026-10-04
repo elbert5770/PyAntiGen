@@ -223,7 +223,9 @@ def _shutdown_evaluator(opt):
 # to today's behaviour. open_from_screen ends each side's grid at the slice
 # screen's first crossing; open_decades caps the Wald/range_factor opening span
 # for sides with no crossing; grid_spacing is "linear" or "geometric".
-_PROFILE_GRID_SPEC_ONLY = {"open_from_screen", "open_decades", "grid_spacing"}
+_PROFILE_GRID_SPEC_ONLY = {"open_from_screen", "open_decades", "grid_spacing",
+                           "screen_window_hi", "screen_span_decades",
+                           "screen_min_reach_decades"}
 
 _PROFILE_GRID_SETTINGS = {
     "profile_se_span":       "se_span",
@@ -305,7 +307,8 @@ def _fast_profile_kwargs(settings, optimization_spec=None):
             out[arg] = value
     spec_kwargs = getattr(optimization_spec, "optimizer_kwargs", None) or {}
     grid = spec_kwargs.get("profile_grid") or {}
-    for arg in ("screen_span_decades", "screen_min_reach_decades"):
+    for arg in ("screen_span_decades", "screen_min_reach_decades",
+                "screen_window_hi"):
         if grid.get(arg) is not None:
             out[arg] = grid[arg]
     return out

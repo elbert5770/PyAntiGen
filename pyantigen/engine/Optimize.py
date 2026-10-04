@@ -4437,6 +4437,24 @@ def _carry_resume_state(keep, res):
     return keep
 
 
+# Which pass wrote a record, by the phase number it carries. The phase numbers
+# are older than the pass numbering and do not match it (phase 2 is refinement,
+# which is pass 3; phase 3 is warm continuation, pass 4; phase 4 is extension,
+# pass 2), and the counts that cap each pass key off them, so they stay. The
+# label is for the reader of the checkpoint file.
+_PASS_LABELS = {1: "pass1-grid", 2: "pass3-refine", 3: "pass4-warm",
+                4: "pass2-extend"}
+
+
+def _side_of(x_fixed, p_opt):
+    """-1 below the optimum, +1 above, 0 only at the optimum itself."""
+    try:
+        d = float(x_fixed) - float(p_opt)
+    except (TypeError, ValueError):
+        return 0
+    return -1 if d < 0 else (1 if d > 0 else 0)
+
+
 def _build_resume_jobs(param_names, completed, meta, nuisance_bounds_for,
                        make_job, spend_cap=None):
     """One job per point the clock stopped, continuing from where it stopped.
@@ -4602,7 +4620,13 @@ def run_parallel_profile(
             # refinement a side already has and stop, instead of adding another
             # probe on every launch.
             "phase": phase,
-            "direction": direction,
+            # Always the side of the optimum the point is on, whichever pass
+            # made it. Passes 2-4 used to pass it and pass 1 left it 0, so a
+            # checkpoint could not be read without knowing the optimum. A
+            # caller's own value wins only when it is not 0, and every caller
+            # that passes one passes this same sign.
+            "direction": int(direction) or _side_of(x_fixed, res_x[i]),
+            "pass_label": _PASS_LABELS.get(phase, f"phase{phase}"),
             # Carried into the record so the *next* point on this chain can turn
             # this one's travel into a rate. See _predicted_travel.
             "x_step": x_step,
@@ -5529,6 +5553,24 @@ def ProfileCheckpointKey(x):
         return None
 
 
+def _print_profile_provenance(tag, **grid):
+    """Which engine and which grid settings this run is actually using.
+
+    Printed first so the head of a cluster log answers "did the new settings
+    reach this run?" without anyone having to infer it from the shape of the
+    points afterwards. Reports the settings as the engine received them, which
+    is the only place that cannot be out of date.
+    """
+    try:
+        from pyantigen._version import __version__, __commit_id__
+        ver = f"{__version__} ({__commit_id__})"
+    except Exception:
+        ver = "unknown version"
+    print(f"[{tag}] PyAntiGen {ver}")
+    shown = ", ".join(f"{k}={v!r}" for k, v in grid.items())
+    print(f"[{tag}] profile settings in effect: {shown}", flush=True)
+
+
 def _run_parallel_profile_with_checkpoint(
     evaluator, res_x, nll_at_optimum, param_names, bounds, scales, groups,
     model_text, paths, method, optimizer_kwargs, wald_se,
@@ -5537,6 +5579,7 @@ def _run_parallel_profile_with_checkpoint(
     bracket_rtol=0.05, screen_span_decades=None, screen_min_reach_decades=None,
     replicates=None, sigma_by_block=None,
     open_from_screen=False, open_decades=None, grid_spacing="linear",
+    screen_window_hi=None,
 ):
     """Wire the pool, the checkpoint store, the wall budget and the profile."""
     from pyantigen.engine.Profile_checkpoint import (
@@ -5563,6 +5606,14 @@ def _run_parallel_profile_with_checkpoint(
     if ckpt.dir:
         print(f"\n[profile] checkpointing to {ckpt.dir}")
 
+    _print_profile_provenance(
+        "profile", n_grid=n_grid, se_span=se_span, range_factor=range_factor,
+        open_from_screen=open_from_screen, open_decades=open_decades,
+        grid_spacing=grid_spacing, screen_window_hi=screen_window_hi,
+        screen_span_decades=screen_span_decades,
+        screen_min_reach_decades=screen_min_reach_decades,
+        max_extend=max_extend, extend_growth=extend_growth,
+        n_refine=n_refine, bracket_rtol=bracket_rtol, warm_passes=warm_passes)
     budget = RunBudget(deadline=resolve_deadline())
     print(f"[profile] {budget.describe()}")
     # Each running point keeps its resumable optimizer state here, beside the
@@ -5609,7 +5660,8 @@ def _run_parallel_profile_with_checkpoint(
         lambda xs, label=None: evaluator.evaluate_batch(xs, label=label),
         res_x, nll_at_optimum, param_names, bounds,
         scales=scales, wald_se=wald_se, ckpt_dir=ckpt.dir,
-        threshold=_PROFILE_THRESHOLD, range_factor=range_factor, **screen_kw,
+        threshold=_PROFILE_THRESHOLD, range_factor=range_factor,
+        window_hi=screen_window_hi, **screen_kw,
     )
 
     def batch(jobs, on_result=None, label=None):
@@ -5667,7 +5719,7 @@ def _run_fast_profile_with_checkpoint(
     checkpoint_enabled=True, fixed_sigmas=None, replicates=None,
     round_evals=None, n_rounds=None, near_zero_frac=None,
     screen_span_decades=None, screen_min_reach_decades=None,
-    sigma_by_block=None,
+    sigma_by_block=None, screen_window_hi=None,
 ):
     """Wire the pool, the checkpoint store and the wall budget to the fast pass.
 
@@ -5700,6 +5752,11 @@ def _run_fast_profile_with_checkpoint(
     if ckpt.dir:
         print(f"\n[fast profile] checkpointing to {ckpt.dir}")
 
+    _print_profile_provenance(
+        "fast profile", screen_window_hi=screen_window_hi,
+        screen_span_decades=screen_span_decades,
+        screen_min_reach_decades=screen_min_reach_decades,
+        round_evals=round_evals, n_rounds=n_rounds)
     budget = RunBudget(deadline=resolve_deadline())
     print(f"[fast profile] {budget.describe()}")
     state_dir = os.path.join(ckpt.dir, "state") if ckpt.dir else None
@@ -5753,6 +5810,8 @@ def _run_fast_profile_with_checkpoint(
             min_reach_decades=(float(screen_min_reach_decades)
                                if screen_min_reach_decades is not None
                                else MIN_REACH_DECADES),
+            window_hi=(float(screen_window_hi)
+                       if screen_window_hi is not None else None),
         )
         path = save_report(report, ckpt.dir)
         if path:
@@ -6992,7 +7051,8 @@ def run_optimization_from_groups(
                             lambda round_evals=None, n_rounds=None,
                             near_zero_frac=None, run_id=None,
                             screen_span_decades=None,
-                            screen_min_reach_decades=None:
+                            screen_min_reach_decades=None,
+                            screen_window_hi=None:
                             _run_fast_profile_with_checkpoint(
                                 _pool_state["evaluator"], res.x, nll_at_optimum,
                                 param_names, bounds, scales,
@@ -7011,6 +7071,7 @@ def run_optimization_from_groups(
                                 screen_span_decades=screen_span_decades,
                                 screen_min_reach_decades=(
                                     screen_min_reach_decades),
+                                screen_window_hi=screen_window_hi,
                                 sigma_by_block=sigma_by_block,
                             )
                         )
@@ -7037,7 +7098,7 @@ def run_optimization_from_groups(
                             bracket_rtol=0.05, screen_span_decades=None,
                             screen_min_reach_decades=None,
                             open_from_screen=False, open_decades=None,
-                            grid_spacing="linear":
+                            grid_spacing="linear", screen_window_hi=None:
                             _run_parallel_profile_with_checkpoint(
                                 _pool_state["evaluator"], res.x, nll_at_optimum,
                                 param_names, bounds, scales,
@@ -7063,6 +7124,7 @@ def run_optimization_from_groups(
                                 open_from_screen=open_from_screen,
                                 open_decades=open_decades,
                                 grid_spacing=grid_spacing,
+                                screen_window_hi=screen_window_hi,
                             )
                         )
 

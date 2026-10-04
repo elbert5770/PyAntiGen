@@ -495,7 +495,7 @@ class ProfileCheckpoint:
         if not (self.enabled and self.dir):
             return
         name = record.get("param_name", "param")
-        rec = dict(record)
+        rec = {k: v for k, v in record.items() if k not in _NOT_STORED}
         rec.setdefault("timestamp", datetime.now().isoformat(timespec="seconds"))
         rec["model_hash"] = self.model_hash
         rec["spec_hash"] = self.spec_hash
@@ -524,6 +524,16 @@ class ProfileCheckpoint:
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
+
+
+# Job inputs that ride on a result dict but that nothing reads back from a
+# record. The nuisance bounds are rebuilt from the spec's bounds on every
+# resume (``nuisance_bounds_for``), and the method and optimizer kwargs are the
+# same for every record of a run and covered by its spec hash. Together they
+# were a large share of each line. ``x_start`` and ``nm_simplex`` stay: the
+# next point on a chain is seeded from them (``_predicted_travel``,
+# ``_warm_simplex``).
+_NOT_STORED = frozenset({"nuisance_bounds", "optimizer_kwargs", "method"})
 
 
 def _jsonable(obj):

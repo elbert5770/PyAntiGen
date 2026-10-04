@@ -282,7 +282,7 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
                      near_zero_frac=DEFAULT_NEAR_ZERO_FRAC,
                      span_decades=SPAN_DECADES,
                      min_reach_decades=MIN_REACH_DECADES, verbose=True,
-                     nll_at_optimum_profile=None):
+                     nll_at_optimum_profile=None, window_hi=None):
     """Screen, then one capped profile point per crossed side, in rounds.
 
     *batch* has the profile_batch signature: ``batch(jobs, on_result, label)``.
@@ -314,13 +314,13 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
 
     # ── The screen, reused when this fit already has one ──────────────────
     screen = load_screen(ckpt_dir, param_names, res_x, threshold,
-                         span_decades, min_reach_decades)
+                         span_decades, min_reach_decades, window_hi)
     if screen is None:
         screen = run_slice_screen(
             nll_batch, res_x, nll_at_optimum, param_names, bounds,
             scales=scales, wald_se=wald_se, threshold=threshold,
             span_decades=span_decades, min_reach_decades=min_reach_decades,
-            verbose=verbose)
+            verbose=verbose, window_hi=window_hi)
         save_screen(screen, ckpt_dir)
     elif verbose:
         print(f"\n[fast profile] reusing the slice screen already run for this "
@@ -400,7 +400,8 @@ def run_fast_profile(batch, nll_batch, res_x, nll_at_optimum, param_names,
                 # A cold grid point as far as the full profile is concerned:
                 # its warm pass owes this point a sweep like any other.
                 "phase": 1,
-                "direction": 0,
+                "direction": -1 if x_slice < p_opt else 1,
+                "pass_label": "fast",
                 "x_step": abs(x_slice - p_opt),
                 "fast_profile": True,
                 "_side": side_name,
