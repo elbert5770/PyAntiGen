@@ -4497,6 +4497,8 @@ def run_parallel_profile(
     checkpoint=None, threshold=_PROFILE_THRESHOLD, warm_passes=1,
     max_extend=8, extend_growth=2.0, bracket_rtol=0.05,
     screen=None, open_decades=None, grid_spacing="linear",
+    adaptive_pass1=False, max_step_decades=0.7, n_workers=None,
+    first_probe="max",
 ):
     """Profile likelihood for every parameter as parallel batches.
 
@@ -4580,7 +4582,7 @@ def run_parallel_profile(
         return 10.0 ** v if is_log else v
 
     def make_job(i, x_fixed, is_log, nb, phase=1, direction=0, x_start=None,
-                 resume_from=None, seed=None):
+                 resume_from=None, seed=None, pass_label=None):
         # x_start defaults to the MLE (a cold start). Every continuation pass
         # overrides it with a neighbour's nuisance solution, which is the whole
         # mechanism by which continuation is cheaper than starting over.
@@ -4626,7 +4628,8 @@ def run_parallel_profile(
             # caller's own value wins only when it is not 0, and every caller
             # that passes one passes this same sign.
             "direction": int(direction) or _side_of(x_fixed, res_x[i]),
-            "pass_label": _PASS_LABELS.get(phase, f"phase{phase}"),
+            "pass_label": (pass_label
+                           or _PASS_LABELS.get(phase, f"phase{phase}")),
             # Carried into the record so the *next* point on this chain can turn
             # this one's travel into a rate. See _predicted_travel.
             "x_step": x_step,
@@ -4819,6 +4822,63 @@ def run_parallel_profile(
     stopped_early = None
     warm_stats = {"n_attempted": 0, "n_improved": 0, "nats_recovered": 0.0,
                   "passes": 0}
+
+    # ── Adaptive pass 1 ───────────────────────────────────────────────────
+    # Replaces the fixed grid when ``adaptive_pass1`` is set. The pool is kept
+    # at exactly ``n_workers`` points in flight, and every time one lands the
+    # next is planned from all the records so far (see Profile_plan). The grid
+    # points the other branch would have submitted up front are not built at
+    # all in this mode.
+    def run_adaptive_pass1():
+        from pyantigen.engine.Profile_plan import plan_next_points
+        for i in range(n_params):
+            meta.setdefault(i, {"is_log": scales[i] == "log10"})
+        attempted = set()
+        seq = {"n": 0}
+        workers = int(n_workers) if n_workers else max(1, 2 * n_params)
+
+        def plan(n_free, in_flight):
+            anchor_p, _w = profile_anchor_gap(completed)
+            specs = plan_next_points(
+                n_free, param_names=param_names, completed=completed,
+                in_flight=in_flight, res_x=res_x, bounds=bounds, scales=scales,
+                wald_se=wald_se, n_grid=n_grid, range_factor=range_factor,
+                open_decades=open_decades, screen=screen,
+                threshold=threshold, anchor=anchor_p, max_extend=max_extend,
+                extend_growth=extend_growth, bracket_rtol=bracket_rtol,
+                max_step_decades=max_step_decades, attempted=attempted,
+                first_probe=first_probe)
+            out = []
+            for sp in specs:
+                i = sp["i"]
+                if sp.get("attempt_key") is not None:
+                    attempted.add(sp["attempt_key"])
+                seq["n"] += 1
+                job = make_job(i, sp["x"], meta[i]["is_log"],
+                               nuisance_bounds_for(i), phase=sp["phase"],
+                               seed=sp["seed"],
+                               pass_label=f"pass1-adaptive:{sp['kind']}")
+                job["plan_seq"] = seq["n"]
+                job["plan_tier"] = sp["tier"]
+                out.append(job)
+            if out:
+                kinds = {}
+                for sp in specs:
+                    kinds[sp["kind"]] = kinds.get(sp["kind"], 0) + 1
+                desc = ", ".join(f"{v} {k}" for k, v in kinds.items())
+                print(f"[profile] pass 1 (adaptive): {len(out)} point(s) "
+                      f"planned for {n_free} free of {workers} worker(s): "
+                      f"{desc}", flush=True)
+            return out
+
+        n_cached = sum(len(v) for v in completed.values())
+        if n_cached:
+            print(f"\n[profile] resuming: {n_cached} point(s) already computed")
+        print(f"\n[profile] pass 1 (adaptive): up to {workers} point(s) in "
+              f"flight, each planned from every result so far, across "
+              f"{n_params} parameter(s)")
+        nll_batch_profile([], on_result=record, label="profile-pass1",
+                          refill=plan)
     # ── Pass 0: drive unfinished points to completion ─────────────────────
     # Runs before any new grid point, and again after them. A point stopped
     # part-way is sunk cost that is worth nothing until it is finished, and its
@@ -4877,8 +4937,12 @@ def run_parallel_profile(
     try:
         drain_unfinished()
 
-        # ── Pass 1: the coarse grid assembled above ───────────────────────
-        if jobs:
+        # ── Pass 1 ────────────────────────────────────────────────────────
+        if adaptive_pass1:
+            run_adaptive_pass1()
+            drain_unfinished()
+        elif jobs:
+            # The coarse grid assembled above.
             nll_batch_profile(jobs, on_result=record, label="profile-pass1")
             # Anything a stop time cut short is carried on here rather than
             # left for the next launch.
@@ -4972,6 +5036,8 @@ def run_parallel_profile(
             parts.append(f"{len(still_unfinished)} point(s) mid-optimization")
         if convergence["n_not_started"]:
             parts.append(f"{convergence['n_not_started']} point(s) not started")
+        if not parts:
+            parts.append("the clock stopped before every side was planned")
         print(f"\n[profile] INCOMPLETE: {' and '.join(parts)}. Every interval "
               f"below is provisional and, where a side is still unfinished, "
               f"too narrow rather than too wide. Relaunch the same command to "
@@ -5579,7 +5645,8 @@ def _run_parallel_profile_with_checkpoint(
     bracket_rtol=0.05, screen_span_decades=None, screen_min_reach_decades=None,
     replicates=None, sigma_by_block=None,
     open_from_screen=False, open_decades=None, grid_spacing="linear",
-    screen_window_hi=None,
+    screen_window_hi=None, adaptive_pass1=False, max_step_decades=0.7,
+    first_probe="max",
 ):
     """Wire the pool, the checkpoint store, the wall budget and the profile."""
     from pyantigen.engine.Profile_checkpoint import (
@@ -5610,6 +5677,9 @@ def _run_parallel_profile_with_checkpoint(
         "profile", n_grid=n_grid, se_span=se_span, range_factor=range_factor,
         open_from_screen=open_from_screen, open_decades=open_decades,
         grid_spacing=grid_spacing, screen_window_hi=screen_window_hi,
+        adaptive_pass1=adaptive_pass1, max_step_decades=max_step_decades,
+        first_probe=first_probe,
+        n_workers=getattr(evaluator, "n_workers", None),
         screen_span_decades=screen_span_decades,
         screen_min_reach_decades=screen_min_reach_decades,
         max_extend=max_extend, extend_growth=extend_growth,
@@ -5664,17 +5734,20 @@ def _run_parallel_profile_with_checkpoint(
         window_hi=screen_window_hi, **screen_kw,
     )
 
-    def batch(jobs, on_result=None, label=None):
+    def batch(jobs, on_result=None, label=None, refill=None):
         # sigma_by_block: every profile point is a nuisance re-optimization,
         # and letting a floored block's sigma re-concentrate at each point is
         # the same self-forgiveness the floor exists to stop. Pinned instead
         # at the block's own sigma_used from the fit -- its floor only when
         # the floor was actually binding there, its sharper sigma_hat
         # otherwise -- for the whole profile. See _freeze_floor.
+        # refill is passed only when there is one, so an evaluator (or a test
+        # double) written before streaming existed is called exactly as before.
+        extra = {"refill": refill} if refill is not None else {}
         return evaluator.profile_batch(jobs, on_result=on_result, label=label,
                                        budget=budget,
                                        frozen_sigmas=sigma_by_block,
-                                       state_dir=state_dir)
+                                       state_dir=state_dir, **extra)
 
     # Every profile point comes back frozen (batch, above), so dNLL has to be
     # read against an anchor computed the same way -- reusing nll_at_optimum
@@ -5699,8 +5772,11 @@ def _run_parallel_profile_with_checkpoint(
             se_span=se_span, n_refine=n_refine, checkpoint=ckpt,
             warm_passes=warm_passes, max_extend=max_extend,
             extend_growth=extend_growth, bracket_rtol=bracket_rtol,
-            screen=screen if open_from_screen else None,
+            screen=(screen if (open_from_screen or adaptive_pass1) else None),
             open_decades=open_decades, grid_spacing=grid_spacing,
+            adaptive_pass1=adaptive_pass1, max_step_decades=max_step_decades,
+            n_workers=getattr(evaluator, "n_workers", None),
+            first_probe=first_probe,
         )
         if ckpt.n_skipped_stale:
             print(f"[profile] ignored {ckpt.n_skipped_stale} checkpoint record(s) "
@@ -7098,7 +7174,9 @@ def run_optimization_from_groups(
                             bracket_rtol=0.05, screen_span_decades=None,
                             screen_min_reach_decades=None,
                             open_from_screen=False, open_decades=None,
-                            grid_spacing="linear", screen_window_hi=None:
+                            grid_spacing="linear", screen_window_hi=None,
+                            adaptive_pass1=False, max_step_decades=0.7,
+                            first_probe="max":
                             _run_parallel_profile_with_checkpoint(
                                 _pool_state["evaluator"], res.x, nll_at_optimum,
                                 param_names, bounds, scales,
@@ -7125,6 +7203,9 @@ def run_optimization_from_groups(
                                 open_decades=open_decades,
                                 grid_spacing=grid_spacing,
                                 screen_window_hi=screen_window_hi,
+                                adaptive_pass1=adaptive_pass1,
+                                max_step_decades=max_step_decades,
+                                first_probe=first_probe,
                             )
                         )
 

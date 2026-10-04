@@ -924,7 +924,7 @@ class ParallelEvaluator:
 
     def profile_batch(self, jobs, on_result=None, label=None,
                       heartbeat_s=_HEARTBEAT_SECONDS, budget=None,
-                      frozen_sigmas=None, state_dir=None):
+                      frozen_sigmas=None, state_dir=None, refill=None):
         """Run profile-likelihood points in parallel, within a wall budget.
 
         ``state_dir`` is where each running point keeps its own resumable
@@ -973,8 +973,20 @@ class ParallelEvaluator:
 
         *on_result* is called with each result dict the moment it arrives.
         Returns results in completion order; callers key off the job fields.
+
+        *refill*, when given, turns the batch into a stream. It is called as
+        ``refill(n_free, in_flight)`` at the start and again each time results
+        land, with the number of worker slots not occupied by a running or
+        waiting point and the job dicts currently running, and returns up to
+        *n_free* new jobs. Those are queued behind anything already waiting and
+        admitted like the rest, so the pool holds ``n_workers`` points whenever
+        there is work to give it and never more, and each new point is planned
+        from every result so far rather than from the state when the batch was
+        assembled. The batch ends when nothing is running and *refill* returns
+        nothing. It is not consulted once the wall budget has stopped
+        admissions, so a stream cannot plan work the clock will not allow.
         """
-        if not jobs:
+        if not jobs and refill is None:
             return []
         if self._pool is None:
             self.start()
@@ -1001,6 +1013,23 @@ class ParallelEvaluator:
             # renaming it into place; one per kill, so a preempted run collects
             # them.
             sweep_stale_temp_files(state_dir)
+
+        def top_up():
+            """Ask the planner for work to fill whatever slots are empty."""
+            nonlocal n_jobs, halted
+            if refill is None or halted:
+                return
+            if budget is not None and not budget.admits():
+                # Nothing planned now could start, so do not plan it.
+                halted = True
+                return
+            n_free = self.n_workers - len(pending) - len(backlog)
+            if n_free <= 0:
+                return
+            new = refill(n_free, [futures[f] for f in pending]) or []
+            for j in list(new)[:n_free]:
+                backlog.append(dict(j, frozen_sigmas=frozen_sigmas))
+                n_jobs += 1
 
         def admit():
             """Start points until the pool is full or the clock says stop."""
@@ -1035,6 +1064,7 @@ class ParallelEvaluator:
                 print(f"[pool]{tag} {budget.describe()}",
                       flush=True)
 
+        top_up()
         admit()
 
         while pending:
@@ -1097,6 +1127,7 @@ class ParallelEvaluator:
                           f"({res.get('n_evals')} evals, {res.get('wall_s', 0):.0f}s)"
                           f"  [{_fmt_dur(elapsed)} elapsed]", flush=True)
 
+            top_up()
             admit()
 
         if self.verbose:
@@ -1105,7 +1136,7 @@ class ParallelEvaluator:
             print(f"[pool]{tag} {done} profile points in {elapsed:.0f}s wall "
                   f"({work:.0f}s of work, {work / elapsed:.1f}x)", flush=True)
 
-        if backlog:
+        if backlog or (halted and refill is not None):
             if budget is not None:
                 budget.stopped_early = True
             raise DeadlineReached(len(backlog), label)

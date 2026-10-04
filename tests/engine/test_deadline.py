@@ -1423,6 +1423,67 @@ def test_zz_every_check_passed():
     assert not failures, "failed checks: " + ", ".join(failures)
 
 
+# ---------------------------------------------------------------------------
+# The stream: profile_batch with a refill
+# ---------------------------------------------------------------------------
+
+def _stream_planner(total, calls):
+    """A refill that hands out *total* points, as many as it is told are free."""
+    state = {"next": 0}
+
+    def refill(n_free, in_flight):
+        calls.append((n_free, len(in_flight)))
+        out = []
+        while len(out) < n_free and state["next"] < total:
+            out.extend(_jobs(state["next"] + 1)[state["next"]:])
+            state["next"] += 1
+        return out
+    return refill
+
+
+def test_a_stream_is_filled_to_the_worker_count_and_no_further():
+    print("\nStream with a refill:")
+    ev = _evaluator(_ok, n_workers=3)
+    calls = []
+    got = []
+    res = ev.profile_batch([], on_result=got.append, label="t",
+                           refill=_stream_planner(8, calls))
+    check("every planned point ran", len(got) == 8, str(len(got)))
+    check("the first request is for every worker slot", calls[0][0] == 3,
+          str(calls[0]))
+    check("no request ever asks for more than the pool holds",
+          all(n_free <= 3 for n_free, _ in calls), str(calls))
+    check("the stream ends when the planner has nothing left",
+          len(res) == 8, str(len(res)))
+
+
+def test_a_stream_alongside_initial_jobs_counts_them_as_occupied():
+    print("\nStream with initial jobs already queued:")
+    ev = _evaluator(_ok, n_workers=4)
+    calls = []
+    ev.profile_batch(_jobs(3), on_result=lambda r: None, label="t",
+                     refill=_stream_planner(0, calls))
+    check("the planner is told only one slot is free", calls[0][0] == 1,
+          str(calls[0]))
+
+
+def test_a_stream_plans_nothing_the_clock_will_not_allow():
+    print("\nStream with the deadline already gone:")
+    ev = _evaluator(_ok, n_workers=3)
+    calls = []
+    try:
+        ev.profile_batch([], on_result=lambda r: None, label="t",
+                         budget=RunBudget(deadline=time.time() - 1.0),
+                         refill=_stream_planner(8, calls))
+    except DeadlineReached:
+        check("DeadlineReached is raised", True)
+    else:
+        check("DeadlineReached is raised", False, "no exception")
+    check("the planner was never asked", not calls, str(calls))
+    check("nothing ran", not ev._pool.submitted)
+
+
+
 def main():
     test_parse_duration()
     test_resolve_deadline()
@@ -1452,6 +1513,9 @@ def main():
     test_profile_without_a_deadline_is_untouched()
     test_wall_time_env_reaches_the_pool()
     test_workers_are_capped_by_memory()
+    test_a_stream_is_filled_to_the_worker_count_and_no_further()
+    test_a_stream_alongside_initial_jobs_counts_them_as_occupied()
+    test_a_stream_plans_nothing_the_clock_will_not_allow()
 
     print("\n" + "=" * 72)
     if failures:

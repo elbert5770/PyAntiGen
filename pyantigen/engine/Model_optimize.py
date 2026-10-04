@@ -225,7 +225,8 @@ def _shutdown_evaluator(opt):
 # for sides with no crossing; grid_spacing is "linear" or "geometric".
 _PROFILE_GRID_SPEC_ONLY = {"open_from_screen", "open_decades", "grid_spacing",
                            "screen_window_hi", "screen_span_decades",
-                           "screen_min_reach_decades"}
+                           "screen_min_reach_decades", "adaptive_pass1",
+                           "max_step_decades", "first_probe"}
 
 _PROFILE_GRID_SETTINGS = {
     "profile_se_span":       "se_span",
