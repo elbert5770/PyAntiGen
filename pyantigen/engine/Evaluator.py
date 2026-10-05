@@ -239,14 +239,40 @@ def _worker_nll(x, frozen_sigmas=None):
     )
 
 
-def _eval_task(x, frozen_sigmas=None):
+def _eval_context(eval_mode):
+    """Context for one task: the solver limits an ``eval_mode`` asks for.
+
+    ``eval_mode`` is a plain dict so it pickles cheaply:
+
+        {"retry_limits": (max_attempts, max_depth), "relax": factor}
+
+    Applied around ONE task and undone after it, never at worker start-up: both
+    settings are process-global, and the same worker goes on to serve profile
+    points and diagnostics that must run exactly as configured. Absent or empty,
+    this does nothing.
+    """
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    if eval_mode:
+        from pyantigen.engine.Simulate import relaxed_tolerances, retry_limits
+        limits = eval_mode.get("retry_limits")
+        if limits:
+            stack.enter_context(retry_limits(limits[0], limits[1]))
+        if eval_mode.get("relax"):
+            stack.enter_context(relaxed_tolerances(eval_mode["relax"]))
+    return stack
+
+
+def _eval_task(x, frozen_sigmas=None, eval_mode=None):
     """Evaluate one parameter vector. Never raises across the pool boundary."""
     if _WORKER["spec"] is None:
         return (FAILURE_VALUE, "worker-not-initialized", 0.0)
 
     t0 = time.time()
     try:
-        val = _worker_nll(x, frozen_sigmas=frozen_sigmas)
+        with _eval_context(eval_mode):
+            val = _worker_nll(x, frozen_sigmas=frozen_sigmas)
         _WORKER["n_evals"] += 1
         status = "ok" if np.isfinite(val) and val < FAILURE_VALUE else "sentinel"
         return (float(val), status, time.time() - t0)
@@ -791,8 +817,11 @@ class ParallelEvaluator:
     # -- evaluation --------------------------------------------------------
 
     def evaluate_batch(self, xs, label=None, heartbeat_s=_HEARTBEAT_SECONDS,
-                       frozen_sigmas=None):
+                       frozen_sigmas=None, eval_mode=None):
         """Evaluate every parameter vector in *xs*; return losses in input order.
+
+        ``eval_mode`` ({"retry_limits": (attempts, depth), "relax": factor})
+        runs each evaluation under those solver limits; see :func:`_eval_context`.
 
         Uses submit/wait, not map -- see profile_batch's docstring for the
         general reasoning. map() (the previous implementation here) returns
@@ -833,7 +862,7 @@ class ParallelEvaluator:
                   flush=True)
 
         try:
-            futures = {self._pool.submit(_eval_task, x, frozen_sigmas): i
+            futures = {self._pool.submit(_eval_task, x, frozen_sigmas, eval_mode): i
                       for i, x in enumerate(xs)}
         except RuntimeError as exc:
             if "bootstrapping phase" in str(exc):

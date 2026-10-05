@@ -147,7 +147,9 @@ def log_optimization_results(
     method="",
 ):
     """
-    Append one row of optimization results to *csv_path*.
+    Append one row of optimization results to *csv_path* -- unless this was a
+    multi-start run (``opt["multistart"]`` set, or ``opt["n_starts"]`` above 1),
+    whose result goes to the JSON snapshot only. The CSV is for single-start fits.
 
     Parameters
     ----------
@@ -301,9 +303,21 @@ def log_optimization_results(
     # ------------------------------------------------------------------ #
     # Append to CSV.                                                       #
     # ------------------------------------------------------------------ #
-    df_row = pd.DataFrame([row])
-    _write_results_row(df_row, csv_path)
-    print(f"Optimization results appended to: {csv_path}")
+    # The results CSV is the running table of SINGLE-START fits. A multi-start
+    # run is not one more row of it: its answer is the standard fit's, but how it
+    # was reached, and whether the objective is multimodal, is a separate
+    # report, and a row alone would present it as the same kind of result as a
+    # single fit's. Its snapshot below carries everything, the multi-start report
+    # included.
+    multistart_run = bool(opt.get("multistart")) or int(opt.get("n_starts") or 1) > 1
+    if multistart_run:
+        print(f"Multi-start run: not appended to the results CSV ({csv_path}), which "
+              f"holds single-start fits only. The snapshot below has the result "
+              f"and the multi-start report.")
+    else:
+        df_row = pd.DataFrame([row])
+        _write_results_row(df_row, csv_path)
+        print(f"Optimization results appended to: {csv_path}")
 
     # ------------------------------------------------------------------ #
     # Per-run JSON snapshot. The "parameters" block is shaped like the    #
@@ -369,6 +383,10 @@ def log_optimization_results(
             # Recorded so a run is reproducible: fit_mode says whether the
             # optimizer ran at all, and x0 pins down a randomized multi-start.
             "fit_mode":      opt.get("fit_mode"),
+            # 1 for a single-start fit. Above 1 the result is in this snapshot
+            # only, not in the results CSV, and the "multistart" block says how
+            # the starting point was found.
+            "n_starts":      int(opt.get("n_starts") or 1),
             # Path of the cached fit the optimum was reused from (a relaunch
             # of the same problem), or null when the optimizer ran in this
             # process.
@@ -388,6 +406,22 @@ def log_optimization_results(
         }
     if opt.get("parameter_scale") is not None:
         snapshot["parameter_scale"] = dict(zip(param_names, opt["parameter_scale"]))
+    if opt.get("multistart"):
+        # How the starting point was found: the triage counts, the reference set,
+        # the decision about the worker pool, one record per local fit (with its
+        # triage score and where it ended), the basins those fits ended in, and
+        # "candidates": every Sobol candidate's score and fate, which is what a
+        # waterfall plot is drawn from.
+        # Absent for a single-start fit. "from_cache" marks a stage that ran in an
+        # earlier launch of the same fit rather than in this one.
+        from pyantigen.engine.Multistart import json_safe
+        ms = dict(opt["multistart"])
+        if opt.get("starts"):
+            ms["starts"] = opt["starts"]
+        # What the columns of every candidate's "x" mean (the order of the
+        # parameters, as in "parameters" above).
+        ms["param_names"] = list(param_names)
+        snapshot["multistart"] = json_safe(ms)
     if stats.get("curvature_se"):
         snapshot["curvature_se"] = {
             name: _finite_or_none(val)

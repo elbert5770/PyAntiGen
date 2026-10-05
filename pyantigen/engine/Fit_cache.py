@@ -161,7 +161,7 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
     # spec a default stage does not invalidate the fits already cached.
     if int(n_starts or 1) <= 1:
         for k in ("multistart_method", "multistart_optimizer_kwargs",
-                  "multistart_limits"):
+                  "multistart_limits", "multistart_triage"):
             kwargs.pop(k, None)
 
     key = {
@@ -386,6 +386,58 @@ class FitCache:
         data.pop("partial", None)
         data["complete"] = block
         return self._write(data)
+
+    def save_stage(self, state):
+        """Checkpoint of the multi-start stage in progress.
+
+        Written after every candidate scored and every local fit finished, so a
+        kill costs the evaluation or fit in flight and nothing before it. Kept
+        under its own key: the stage is not the fit, and the fit's partial must
+        not appear until the stage is over (see ``_persist_stage_result``). Must
+        already be plain JSON data.
+        """
+        if not self.enabled:
+            return False
+        data = self._read() or {}
+        data["multistart_stage"] = state
+        return self._write(data)
+
+    def load_stage(self):
+        """The stage checkpoint :meth:`save_stage` kept, or None."""
+        data = self._read()
+        block = data.get("multistart_stage") if data else None
+        return block if isinstance(block, dict) else None
+
+    def clear_stage(self):
+        """Drop the stage checkpoint, once the stage's result is on record."""
+        if not self.enabled:
+            return False
+        data = self._read()
+        if not data or "multistart_stage" not in data:
+            return False
+        data.pop("multistart_stage")
+        return self._write(data)
+
+    def save_multistart(self, report):
+        """Keep the multi-start stage's report with the fit it produced.
+
+        Stored beside the ``complete``/``partial`` records, not inside them, so it
+        survives both: a relaunch that resumes the standard fit skips the stage,
+        and one that reuses a finished fit skips both, yet the result written at
+        the end should still say how the starting point was found. *report* must
+        already be plain JSON data (see ``Multistart.json_safe``).
+        """
+        if not self.enabled:
+            return False
+        data = self._read() or {}
+        data["multistart"] = report
+        return self._write(data)
+
+    def load_multistart(self):
+        """The report :meth:`save_multistart` kept, or None."""
+        data = self._read()
+        block = data.get("multistart") if data else None
+        return block if isinstance(block, dict) else None
 
     def save_partial(self, x_lin, fun, n_evals=None, force=False, nm_state=None,
                      interval=None, de_state=None, cal_x_lin=None):

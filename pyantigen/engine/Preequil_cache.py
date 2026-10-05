@@ -90,9 +90,12 @@ def _digest(state, block, solver_settings):
     for field in ("start", "end", "n_points", "variable_step_size",
                   "maximum_num_steps"):
         h.update(f"{field}={block.get(field)!r}".encode("utf-8"))
-    for field in ("integrator", "absolute_tolerance", "relative_tolerance",
-                  "stiff", "maximum_num_steps"):
+    for field in ("integrator", "stiff", "maximum_num_steps"):
         h.update(f"{field}={solver_settings.get(field)!r}".encode("utf-8"))
+    # The tolerances the block is ACTUALLY run under, so a state integrated at
+    # relaxed tolerances (multi-start triage) is never served to a normal run.
+    from pyantigen.engine.Simulate import effective_tolerances
+    h.update(f"tolerances={effective_tolerances(solver_settings)!r}".encode("utf-8"))
     return h.hexdigest()
 
 
