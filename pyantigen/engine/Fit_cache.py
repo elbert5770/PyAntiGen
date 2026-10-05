@@ -156,6 +156,13 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
     for k in ("profile_method", "profile_optimizer_kwargs", "profile_grid",
               "profile_without_opt"):
         kwargs.pop(k, None)
+    # The multi-start stage decides where the fit starts, which matters only
+    # when there is more than one start. Dropped otherwise so that giving every
+    # spec a default stage does not invalidate the fits already cached.
+    if int(n_starts or 1) <= 1:
+        for k in ("multistart_method", "multistart_optimizer_kwargs",
+                  "multistart_limits"):
+            kwargs.pop(k, None)
 
     key = {
             "format": _FORMAT,
@@ -175,8 +182,9 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
             "data": data_hash,
     }
     # Left out at the default so fits cached before the sampler existed keep
-    # their hash; it matters only when n_starts > 1.
-    if (start_sampler or "lhs") != "lhs":
+    # their hash, and left out at one start, where nothing is sampled, so that
+    # a project-wide default of "sobol" does not invalidate single-start fits.
+    if int(n_starts or 1) > 1 and (start_sampler or "lhs") != "lhs":
         key["start_sampler"] = start_sampler
     blob = json.dumps(key, sort_keys=True, default=_json_default)
     fit_hash = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]

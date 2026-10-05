@@ -359,6 +359,62 @@ class search_mode:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Retry limits: a shorter ladder, but still a ladder
+# ---------------------------------------------------------------------------
+#
+# Search mode (above) removes the ladder altogether. The multi-start stage wants
+# something in between: most vectors it samples integrate on the first attempt,
+# and a handful need a looser tolerance, but none is worth the full ladder of ten
+# attempts and four levels of time-span subdivision that a vector somebody cares
+# about gets. Limits cap both. With max_attempts=4 and max_depth=0 a vector gets
+# the fast path plus three loosened retries, is never subdivided, and a failure
+# raises -- which the objective turns into its failure value.
+#
+# Unlike search mode this does not cap the step allowance, so a vector that
+# integrates slowly still integrates. Process-global, like search mode; the
+# default (None) is the original behaviour, 10 attempts and depth 4.
+_DEFAULT_MAX_ATTEMPTS = 10
+_DEFAULT_MAX_DEPTH = 4
+_RETRY_LIMITS = None
+
+
+def set_retry_limits(max_attempts=None, max_depth=None):
+    """Cap safe_simulate's ladder. ``None`` for both restores the defaults.
+
+    max_attempts counts the first (fast-path) attempt, as the log's
+    "Attempt n/N" does. Returns the previous setting so a caller can restore it.
+    """
+    global _RETRY_LIMITS
+    previous = _RETRY_LIMITS
+    if max_attempts is None and max_depth is None:
+        _RETRY_LIMITS = None
+        return previous
+    attempts = _DEFAULT_MAX_ATTEMPTS if max_attempts is None else int(max_attempts)
+    depth = _DEFAULT_MAX_DEPTH if max_depth is None else int(max_depth)
+    if attempts < 1 or depth < 0:
+        raise ValueError(f"retry limits need max_attempts >= 1 and max_depth >= 0, "
+                         f"got {attempts} and {depth}")
+    _RETRY_LIMITS = (attempts, depth)
+    return previous
+
+
+class retry_limits:
+    """``with retry_limits(4, 0): ...`` -- the limits for the block."""
+
+    def __init__(self, max_attempts=None, max_depth=None):
+        self.max_attempts, self.max_depth = max_attempts, max_depth
+
+    def __enter__(self):
+        self._previous = set_retry_limits(self.max_attempts, self.max_depth)
+        return self
+
+    def __exit__(self, *exc):
+        global _RETRY_LIMITS
+        _RETRY_LIMITS = self._previous
+        return False
+
+
 def _simulate_search(r, start, end, points, observed_species):
     """One capped attempt. Raises on failure; leaves the step allowance as found."""
     original = r.integrator.maximum_num_steps
@@ -454,7 +510,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
     label_prefix = f" [{label}]" if label else ""
     print(f"      [safe_simulate]{label_prefix} (Depth {depth}) Initial attempt failed: {first_err_str}")
 
-    max_attempts = 10
+    max_attempts, max_depth = _RETRY_LIMITS or (_DEFAULT_MAX_ATTEMPTS, _DEFAULT_MAX_DEPTH)
     attempt = 1  # one attempt already burned on the fast path
 
     while attempt < max_attempts:
@@ -513,7 +569,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
             )
 
     # Subdivide as last resort
-    if depth < 4 and points >= 2:
+    if depth < max_depth and points >= 2:
         mid = (start + end) / 2.0
         p1 = max(2, points // 2)
         p2 = max(2, points - p1)

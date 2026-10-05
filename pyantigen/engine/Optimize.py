@@ -2259,6 +2259,10 @@ _ENGINE_ONLY_OPTIMIZER_KEYS = (
     "profile_method",
     "profile_optimizer_kwargs",
     "profile_grid",             # read by pyantigen.engine.Model_optimize._profile_kwargs
+    # Multi-start as its own stage: see _resolve_multistart_stage.
+    "multistart_method",
+    "multistart_optimizer_kwargs",
+    "multistart_limits",
 )
 
 
@@ -2312,6 +2316,58 @@ def _resolve_profile_optimizer(method, optimizer_kwargs):
         profile_method = "Nelder-Mead"
     profile_kwargs = kw.get("profile_optimizer_kwargs") or {}
     return profile_method, profile_kwargs
+
+
+def _resolve_multistart_stage(method, optimizer_kwargs):
+    """Method and kwargs for a separate multi-start stage, or (None, {}).
+
+    Absent ``multistart_method`` in optimizer_kwargs, multi-start is what it
+    always was: every start is fitted with the spec's own method and options and
+    the best of them IS the fit.
+
+    Present, multi-start becomes a stage that runs BEFORE the fit. Each start is
+    run with this method and ``multistart_optimizer_kwargs`` -- typically a
+    bounds-respecting method with a small iteration cap, since the point is to
+    find the basin, not to converge -- and the best point it reaches is where
+    the standard fit then starts. A global method is not accepted here: it would
+    search the box the starts are meant to sample.
+    """
+    kw = optimizer_kwargs or {}
+    ms_method = kw.get("multistart_method")
+    if not ms_method:
+        return None, {}
+    if str(ms_method).lower() in _GLOBAL_METHODS:
+        raise ValueError(
+            f"multistart_method {ms_method!r} is a global method; the multi-start "
+            f"stage runs a local method from each sampled start.")
+    return ms_method, dict(kw.get("multistart_optimizer_kwargs") or {})
+
+
+# What a multi-start evaluation may spend, and what a failure costs.
+#   max_attempts   safe_simulate attempts per simulation, the first included.
+#   max_depth      levels of time-span subdivision after those fail; 0 = none.
+#   failure_dnll   a failed evaluation is scored at the worst finite NLL among
+#                  the screened starts PLUS this, instead of 1e10.
+# 1e10 is a cliff: a gradient method that steps into it reads a slope of
+# ~1e10/step, shrinks to nothing and stalls. A finite, merely large penalty is
+# something the line search can step back from. It is fixed once, from the
+# screen, so the surface does not move under the optimizer while it runs.
+_MULTISTART_LIMIT_DEFAULTS = {"max_attempts": 4, "max_depth": 0, "failure_dnll": 1000.0}
+
+
+def _resolve_multistart_limits(optimizer_kwargs):
+    """The multi-start stage's evaluation limits: defaults overlaid by the spec's
+    ``multistart_limits``. An unknown key is an error, not a silent no-op."""
+    given = dict((optimizer_kwargs or {}).get("multistart_limits") or {})
+    unknown = sorted(set(given) - set(_MULTISTART_LIMIT_DEFAULTS))
+    if unknown:
+        raise ValueError(f"unknown multistart_limits key(s) {unknown}; expected a "
+                         f"subset of {sorted(_MULTISTART_LIMIT_DEFAULTS)}")
+    out = {**_MULTISTART_LIMIT_DEFAULTS, **given}
+    if out["failure_dnll"] is not None and not float(out["failure_dnll"]) > 0:
+        raise ValueError("multistart_limits['failure_dnll'] must be positive, or "
+                         "None to keep the 1e10 failure value")
+    return out
 
 
 def _resolve_named(value, param_names, label):
@@ -2558,7 +2614,8 @@ def _multistart_points(x0, bounds, scales, n_starts, search_decades=None,
 
 
 def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
-                    screen=True, failure_value=1e10, verbose=True):
+                    screen=True, failure_value=1e10, verbose=True,
+                    failure_dnll=None):
     """Fit from every start, keep the best, and report the spread.
 
     The spread is as much the point as the best value.  If every start lands on
@@ -2567,6 +2624,13 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     confidence interval anchored on any single one of them is measuring the
     wrong basin -- which the engine can otherwise only discover much later, via
     ``profile_anchor_gap`` finding a point better than the reported optimum.
+
+    ``failure_dnll``: when given, an evaluation that fails (the objective's
+    ``failure_value``, or a non-finite NLL) is scored at the worst finite NLL
+    seen in the screen plus this, for the fits. The fits then see a large but
+    finite wall rather than a 1e10 cliff, which a gradient method such as
+    L-BFGS-B can step back from. The reference is fixed once, so the surface
+    does not move while the optimizer runs.
     """
     from scipy.optimize import minimize
 
@@ -2582,17 +2646,24 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     #
     # Start 1 is never screened out. It is the spec's own x0, and if that
     # cannot be integrated the caller needs to see the failure, not a silent skip.
+    def _eval(s):
+        try:
+            return float(objective(s))
+        except Exception:
+            return float("inf")
+
+    seen = []          # finite NLLs from the screen: the failure penalty's reference
     if screen and len(starts) > 1:
         kept, dropped = [], 0
         for i, s in enumerate(starts):
-            if i == 0:
+            if i == 0 and failure_dnll is None:
                 kept.append(s)
                 continue
-            try:
-                v = float(objective(s))
-            except Exception:
-                v = float("inf")
-            if np.isfinite(v) and v < failure_value:
+            v = _eval(s)
+            ok = np.isfinite(v) and v < failure_value
+            if ok:
+                seen.append(v)
+            if i == 0 or ok:
                 kept.append(s)
             else:
                 dropped += 1
@@ -2601,14 +2672,42 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
                   f"the model does not integrate there.")
         starts = kept
 
+    fit_objective, failed, penalty = objective, [0], None
+    if failure_dnll is not None:
+        if not seen and starts:
+            v = _eval(starts[0])
+            if np.isfinite(v) and v < failure_value:
+                seen.append(v)
+        if seen:
+            penalty = max(seen) + float(failure_dnll)
+
+            def fit_objective(x):
+                v = _eval(x)
+                if np.isfinite(v) and v < failure_value:
+                    return v
+                failed[0] += 1
+                return penalty
+
+            if verbose:
+                print(f"  [opt] a failed evaluation scores {penalty:.6g} "
+                      f"(worst screened nll {max(seen):.6g} + {float(failure_dnll):g}) "
+                      f"during the multi-start fits.")
+        elif verbose:
+            print("  [opt] no screened start evaluated, so failed evaluations keep "
+                  "their 1e10 value in the multi-start fits.")
+
     records, best, best_i = [], None, -1
     for i, s in enumerate(starts):
         s = np.asarray(s, dtype=float)
         try:
-            r = minimize(objective, s, method=method,
+            r = minimize(fit_objective, s, method=method,
                          bounds=bounds or None, **opt_kw)
             fun = float(r.fun)
             ok, msg = bool(r.success), str(r.message)
+            if penalty is not None and fun >= penalty:
+                # Ended on the failure plateau: not an optimum of anything.
+                fun, ok = float("inf"), False
+                msg = "ended where the model does not integrate (failure penalty)"
         except Exception as exc:
             r, fun, ok = None, float("inf"), False
             msg = f"{type(exc).__name__}: {exc}"
@@ -2625,6 +2724,10 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
             mark = "  <-- best so far" if i == best_i else ""
             print(f"  [opt] start {i + 1}/{len(starts)}: nll={fun:.6g}{mark}",
                   flush=True)
+
+    if verbose and failed[0]:
+        print(f"  [opt] {failed[0]} evaluation(s) failed during the multi-start fits "
+              f"and were scored at the failure penalty.")
 
     if verbose:
         vals = [rec["fun"] for rec in records if rec["fun"] is not None]
@@ -6713,8 +6816,43 @@ def run_optimization_from_groups(
                 seed=getattr(optimization_spec, "start_seed", None),
                 sampler=getattr(optimization_spec, "start_sampler", "lhs"),
             )
+            # A separate multi-start stage, when the spec asks for one: the
+            # starts are run with their own (cheaper, bounds-respecting) method
+            # and the best point reached is where the standard fit below starts.
+            # Without it, the branch further down fits every start with the
+            # spec's own method and the best of them is the answer.
+            staged_start = None
+            ms_method, ms_kw_raw = _resolve_multistart_stage(method, optimizer_kwargs)
+            if len(starts) > 1 and ms_method:
+                if fit_cache is not None and fit_cache.load_partial() is not None:
+                    # The standard fit already started in an earlier launch, so
+                    # the stage finished then; its answer is in the partial.
+                    print("[opt] multi-start stage skipped: an earlier launch "
+                          "already began the standard fit from its result.")
+                else:
+                    ms_kw = _prepare_optimizer_kwargs(ms_method, ms_kw_raw, fast, None, None)
+                    limits = _resolve_multistart_limits(optimizer_kwargs)
+                    print(f"[opt] multi-start stage: {len(starts)} starts with "
+                          f"{ms_method}, then the standard fit ({method}) from the best. "
+                          f"Per evaluation: {limits['max_attempts']} solver attempt(s), "
+                          f"subdivision depth {limits['max_depth']}.")
+                    from pyantigen.engine.Simulate import retry_limits
+                    # The full ladder is restored on leaving the block, so the
+                    # standard fit and every diagnostic after it run as before.
+                    with retry_limits(limits["max_attempts"], limits["max_depth"]):
+                        ms_res, start_records, _best_start = _run_multistart(
+                            objective, starts, ms_method, bounds, ms_kw, scales,
+                            failure_dnll=limits["failure_dnll"])
+                    if ms_res is None:
+                        print("[opt] every multi-start fit failed; the standard "
+                              "fit starts from the spec's x0.")
+                    else:
+                        staged_start = np.asarray(ms_res.x, dtype=float)
+                        print(f"[opt] multi-start stage best nll {float(ms_res.fun):.6g} "
+                              f"(start {_best_start + 1}); the standard fit starts there.")
+                starts = starts[:1]
             if len(starts) == 1:
-                x_start = x0
+                x_start = x0 if staged_start is None else staged_start
                 partial = fit_cache.load_partial() if fit_cache is not None else None
                 if partial is not None:
                     # A previous launch of this same fit was killed before it
