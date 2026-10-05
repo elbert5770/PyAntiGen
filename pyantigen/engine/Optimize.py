@@ -2263,6 +2263,7 @@ _ENGINE_ONLY_OPTIMIZER_KEYS = (
     "multistart_method",
     "multistart_optimizer_kwargs",
     "multistart_limits",
+    "multistart_triage",
 )
 
 
@@ -2615,8 +2616,17 @@ def _multistart_points(x0, bounds, scales, n_starts, search_decades=None,
 
 def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
                     screen=True, failure_value=1e10, verbose=True,
-                    failure_dnll=None):
+                    failure_dnll=None, penalty_reference=None,
+                    cluster_radius=0.15, report_dnll=1.0, summary=None,
+                    resume=None, on_fit=None, stop_check=None):
     """Fit from every start, keep the best, and report the spread.
+
+    Resumable, for a stage that can be killed between fits: ``resume`` is a list
+    aligned with *starts* holding each fit's record from an earlier launch (or
+    None where it never finished), which is used as it stands instead of fitting
+    again; ``on_fit(i, record)`` is called as each fit finishes, so the caller can
+    keep it; ``stop_check(n_remaining)`` is called before each new fit and may
+    raise to stop the run. A kill INSIDE one fit loses that fit and no other.
 
     The spread is as much the point as the best value.  If every start lands on
     the same NLL the objective is unimodal in that region and one start will do
@@ -2630,7 +2640,14 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     seen in the screen plus this, for the fits. The fits then see a large but
     finite wall rather than a 1e10 cliff, which a gradient method such as
     L-BFGS-B can step back from. The reference is fixed once, so the surface
-    does not move while the optimizer runs.
+    does not move while the optimizer runs. ``penalty_reference`` supplies that
+    reference when the caller has already scored the starts (the triage), so
+    nothing is evaluated again here.
+
+    The spread is reported as BASINS: fits whose end points lie within
+    ``cluster_radius`` (RMS decades per parameter, log10 space) share one, and
+    only a basin at least ``report_dnll`` worse than the best is called a
+    different optimum. ``summary``, a dict, is filled with the result.
     """
     from scipy.optimize import minimize
 
@@ -2652,7 +2669,11 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
         except Exception:
             return float("inf")
 
+    from scipy.optimize import OptimizeResult
+
     seen = []          # finite NLLs from the screen: the failure penalty's reference
+    if penalty_reference is not None and np.isfinite(penalty_reference):
+        seen.append(float(penalty_reference))
     if screen and len(starts) > 1:
         kept, dropped = [], 0
         for i, s in enumerate(starts):
@@ -2690,7 +2711,7 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
 
             if verbose:
                 print(f"  [opt] a failed evaluation scores {penalty:.6g} "
-                      f"(worst screened nll {max(seen):.6g} + {float(failure_dnll):g}) "
+                      f"(worst scored nll {max(seen):.6g} + {float(failure_dnll):g}) "
                       f"during the multi-start fits.")
         elif verbose:
             print("  [opt] no screened start evaluated, so failed evaluations keep "
@@ -2699,6 +2720,27 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     records, best, best_i = [], None, -1
     for i, s in enumerate(starts):
         s = np.asarray(s, dtype=float)
+
+        # A fit finished in an earlier launch comes back as it was recorded.
+        saved = resume[i] if resume is not None and i < len(resume) else None
+        if saved is not None:
+            ok_saved = saved.get("x") is not None and saved.get("fun") is not None
+            r = (OptimizeResult(x=_to_opt_space(saved["x"], scales), fun=float(saved["fun"]),
+                                success=bool(saved.get("success")),
+                                message=str(saved.get("message", "")),
+                                nfev=saved.get("nfev")) if ok_saved else None)
+            fun = float(saved["fun"]) if ok_saved else float("inf")
+            records.append(dict(saved))
+            if r is not None and (best is None or fun < best.fun):
+                best, best_i = r, i
+            if verbose:
+                mark = "  <-- best so far" if i == best_i else ""
+                print(f"  [opt] start {i + 1}/{len(starts)}: nll={fun:.6g}  "
+                      f"(finished in an earlier launch){mark}", flush=True)
+            continue
+
+        if stop_check is not None:
+            stop_check(len(starts) - i)
         try:
             r = minimize(fit_objective, s, method=method,
                          bounds=bounds or None, **opt_kw)
@@ -2717,7 +2759,11 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
             "success": ok,
             "message": msg,
             "nfev": getattr(r, "nfev", None) if r is not None else None,
+            "x": (_to_linear(r.x, scales).tolist()
+                  if r is not None and np.isfinite(fun) else None),
         })
+        if on_fit is not None:
+            on_fit(i, records[-1])
         if r is not None and np.isfinite(fun) and (best is None or fun < best.fun):
             best, best_i = r, i
         if verbose:
@@ -2729,18 +2775,412 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
         print(f"  [opt] {failed[0]} evaluation(s) failed during the multi-start fits "
               f"and were scored at the failure penalty.")
 
-    if verbose:
-        vals = [rec["fun"] for rec in records if rec["fun"] is not None]
-        if len(vals) > 1:
-            uniq = sorted({round(v, 3) for v in vals})
-            print(f"\n[opt] multi-start: best {min(vals):.6g} from start "
-                  f"{best_i + 1} of {len(starts)}; {len(uniq)} distinct "
-                  f"optimum/optima {[f'{u:.5g}' for u in uniq[:8]]}")
-            if len(uniq) > 1:
-                print("[opt] this objective is multimodal here: a profile or CI "
-                      "anchored on one start would describe whichever basin it "
-                      "happened to reach.")
+    from pyantigen.engine.Multistart import basins as _basins
+    done = [i for i, rec in enumerate(records) if rec["x"] is not None]
+    found, verdict, text = _basins(
+        [records[i]["x"] for i in done] or np.zeros((0, 1)),
+        [records[i]["fun"] for i in done], cluster_radius, report_dnll)
+    # Basin members are indices into `done`; report them as start numbers.
+    for b in found:
+        b["members"] = [done[m] for m in b["members"]]
+    if summary is not None:
+        summary.update({"basins": found, "verdict": verdict, "n_fits": len(records),
+                        "n_failed_evals": int(failed[0])})
+    if verbose and records:
+        print(f"\n[opt] multi-start: {len(records)} fit(s)"
+              + (f", best {best.fun:.6g} from start {best_i + 1}" if best is not None else "")
+              + f". {text}")
+        if len(found) > 1:
+            for n_b, b in enumerate(found, 1):
+                print(f"        basin {n_b}: nll {b['nll']:.6g}, "
+                      f"start(s) {[m + 1 for m in b['members']]}")
     return best, records, best_i
+
+
+def _persist_stage_result(fit_cache, report, records, staged_start, x0_lin, scales):
+    """Keep what the multi-start stage found, so a kill after it costs nothing.
+
+    Two records, in this order:
+
+    * the report (see ``FitCache.save_multistart``), so a relaunch can still say
+      how the starting point was found;
+    * the stage's best point as the fit's partial. The standard fit starts from
+      whatever partial is on record, and this is what makes that the stage's
+      choice. ``cal_x_lin`` is x0, not the stage's best: the stage scores x0
+      first, so the noise floors were calibrated THERE, and a resume must
+      re-evaluate that point before anything else to score against the same
+      floors again (see ``FitCache.save_partial``).
+
+    The FIT's partial is not written while the stage runs -- the objective's own
+    best-point writes are switched off for it -- so a kill DURING the stage leaves
+    no partial; what it leaves is the stage's own checkpoint (see
+    ``_run_multistart_stage``), which the relaunch continues from.
+    """
+    if fit_cache is None or report is None:
+        return
+    fit_cache.save_multistart({**report, "starts": records})
+    if staged_start is not None and report.get("best_fun") is not None:
+        fit_cache.save_partial(
+            _to_linear(staged_start, scales), report["best_fun"], n_evals=0,
+            force=True, cal_x_lin=np.asarray(x0_lin, dtype=float))
+        # The result is on record, so the checkpoint that led to it is not
+        # needed. Cleared only AFTER the partial, so a kill between the two
+        # leaves both and the relaunch skips the stage on the partial. When no
+        # fit finished there is no partial and the checkpoint stays: a relaunch
+        # then finds every fit recorded and reaches the same verdict at once.
+        fit_cache.clear_stage()
+
+
+def _load_saved_multistart(fit_cache):
+    """(report, records) the fit cache kept from the launch that ran the stage,
+    or (None, None). The report is marked ``"from_cache": True`` so a result
+    never presents a stage it did not run in this process as if it had."""
+    saved = fit_cache.load_multistart() if fit_cache is not None else None
+    if not saved:
+        return None, None
+    report = {k: v for k, v in saved.items() if k != "starts"}
+    report["from_cache"] = True
+    return report, saved.get("starts")
+
+
+def _now():
+    """The clock the stage's timings read; a seam for tests."""
+    import time
+    return time.time()
+
+
+def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits):
+    """Identity of what a stage checkpoint holds scores for.
+
+    The fit cache's own key already covers the spec, so a checkpoint cannot
+    normally meet a different stage; this is the check that does not rely on
+    that. Where the candidates are scored (the pool or here) is left out: it
+    changes how long the scores take, not what they are.
+    """
+    import hashlib
+    import json
+    blob = json.dumps({
+        "candidates": [[round(float(v), 12) for v in np.atleast_1d(c)] for c in candidates],
+        "triage": {k: tri[k] for k in sorted(tri) if k != "parallel"},
+        "limits": limits, "method": str(ms_method), "kw": ms_kw, "n_fits": int(n_fits),
+    }, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
+                          ms_kw_raw, tri, limits, *, n_fits, method, fast=False,
+                          verbose=True, pool_builder=None, n_workers_hint=None,
+                          fit_cache=None, budget=None):
+    """The multi-start stage: triage the candidates, then fit from the survivors.
+
+    *candidates* are opt-space points, row 0 the spec's x0 (see
+    ``_multistart_points``). The steps and what they are for are in
+    ``pyantigen.engine.Multistart``; this function owns what that module cannot,
+    the objective and the solver settings.
+
+      fast pass     one evaluation per candidate, at relaxed tolerances and under
+                    the limited retry ladder (a failure raises at once and
+                    counts as infeasible).
+      triage        prune, rank, cluster, pick one leader per niche.
+      fits          ``ms_method`` from x0 and the leaders, at the CONFIGURED
+                    tolerances but still under the limited ladder, with a failed
+                    evaluation scored at a finite wall (see ``_run_multistart``).
+
+    RESUMABLE. With a *fit_cache* the stage keeps a checkpoint, rewritten after
+    every candidate scored (every chunk, on the pool) and every fit finished. A
+    relaunch after a kill skips what is recorded: candidates already scored are
+    not scored again, the reference set is recomputed from the scores (it is
+    deterministic), and fits already finished are used as they stand. What a kill
+    costs is the evaluation, or the one local fit, that was in flight. x0 is the
+    exception: it is ALWAYS scored again, first, because it is where the noise
+    floors are calibrated and so must be in the process that goes on to score
+    the rest; the score it gives is also checked against the recorded one.
+
+    With a *budget* that has a stop time, the stage stops between candidates,
+    chunks and fits, saves, and raises
+    :class:`~pyantigen.engine.Deadline.DeadlineReached`. On a preemptible
+    partition there is no stop time and only the kill-and-resume path applies.
+
+    Returns ``(start, records, report)``: the best point reached in opt space
+    (None if every fit failed), one record per fit, and a plain-data report of
+    what the stage did and found.
+    """
+    import time
+
+    from pyantigen.engine.Deadline import DeadlineReached
+    from pyantigen.engine.Multistart import json_safe
+    from pyantigen.engine.Multistart import triage as _triage
+    from pyantigen.engine.Simulate import relaxed_tolerances, retry_limits
+
+    ms_kw = _prepare_optimizer_kwargs(ms_method, ms_kw_raw, fast, None, None)
+    cand_lin = np.array([_to_linear(s, scales) for s in candidates])
+    n = len(candidates)
+    n_cand = n - 1
+    if verbose:
+        print(f"[opt] multi-start stage: triage {n_cand} candidate(s) + x0 at "
+              f"{tri['tolerance_factor']:g}x relaxed tolerances; fit from at most "
+              f"{n_fits} with {ms_method}, then the standard fit ({method}) from "
+              f"the best. Per evaluation: {limits['max_attempts']} solver "
+              f"attempt(s), subdivision depth {limits['max_depth']}.", flush=True)
+
+    def _finite(v):
+        return v if np.isfinite(v) and v < 1e10 else np.inf
+
+    # -- the checkpoint -------------------------------------------------------
+    sig = _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits)
+    st = None
+    if fit_cache is not None:
+        saved = fit_cache.load_stage()
+        if saved is not None and saved.get("version") == 1 and saved.get("signature") == sig:
+            st = saved
+            st["launches"] = int(st.get("launches", 1)) + 1
+        elif saved is not None and verbose:
+            print("[opt] a multi-start checkpoint from an earlier launch does not "
+                  "match this stage (different candidates or settings); starting "
+                  "the stage over.", flush=True)
+    if st is None:
+        st = {"version": 1, "signature": sig, "launches": 1, "scores": {}, "fits": {},
+              "seconds": {"triage": 0.0, "fits": 0.0}}
+    prior = {"scores": len([k for k in st["scores"] if k != "0"]), "fits": len(st["fits"])}
+    phase = {"name": "triage", "base": float(st["seconds"].get("triage", 0.0)), "t0": _now()}
+
+    def _tick():
+        st["seconds"][phase["name"]] = phase["base"] + (_now() - phase["t0"])
+
+    def _save():
+        if fit_cache is not None:
+            _tick()
+            fit_cache.save_stage(json_safe(st))
+
+    def _stop(n_remaining, label):
+        if budget is not None and budget.is_limited and time.time() >= budget.work_deadline():
+            _save()
+            raise DeadlineReached(n_remaining, label=label)
+
+    def _score_here(i):
+        """Candidate i, scored in this process: relaxed tolerances, limited ladder."""
+        with retry_limits(limits["max_attempts"], limits["max_depth"]), \
+                relaxed_tolerances(tri["tolerance_factor"]):
+            try:
+                v = _finite(float(objective(candidates[i])))
+            except Exception:
+                v = np.inf
+        st["scores"][str(i)] = float(v) if np.isfinite(v) else None
+
+    # 1-2. Fast pass. A failure under the limited ladder raises, which the
+    # objective turns into its failure value; either way it is infeasible here.
+    #
+    # x0 goes first, serially, in this process and at the CONFIGURED tolerances.
+    # Whatever the objective calibrates on first use (the noise floors) is then
+    # calibrated from the spec's own x0 on the real model, and a pool built
+    # afterwards is seeded from that rather than from whichever candidate each
+    # worker happens to draw first. It also makes x0's score exact -- and on a
+    # relaunch it is the same calibration the interrupted launch scored under.
+    t_fast0 = _now()
+    t0 = _now()
+    v0 = np.inf
+    with retry_limits(limits["max_attempts"], limits["max_depth"]):
+        try:
+            v0 = _finite(float(objective(candidates[0])))
+        except Exception:
+            pass
+    t_x0 = _now() - t0
+    before = st["scores"].get("0")
+    if before is not None and np.isfinite(v0) and abs(v0 - before) > 1e-4 * (1.0 + abs(v0)):
+        # Not the objective the checkpoint was written under. The cache key is
+        # meant to rule that out, so do not build on what it holds.
+        print(f"[opt] WARNING: x0 scores {v0:.6g} now but {before:.6g} in the "
+              f"checkpoint; the objective has changed, so the checkpoint is "
+              f"discarded and the stage starts over.", flush=True)
+        st["scores"], st["fits"] = {}, {}
+        st["launches"] = 1
+        st["seconds"] = {"triage": 0.0, "fits": 0.0}
+        phase["base"] = 0.0
+        prior = {"scores": 0, "fits": 0}
+    st["scores"]["0"] = float(v0) if np.isfinite(v0) else None
+    _save()
+    if prior["scores"] and verbose:
+        print(f"  [opt] resuming the multi-start stage (launch {st['launches']}): "
+              f"{prior['scores']}/{n_cand} candidate(s) and {prior['fits']} fit(s) "
+              f"are on record.", flush=True)
+
+    # Where the rest is scored. "auto" times ONE warm candidate here -- x0's own
+    # time is mostly cold start, which is what each worker would pay, not what
+    # an evaluation costs -- and sends the batch to the pool only when that
+    # clearly beats scoring it here (see Multistart.prefer_pool).
+    decision = {"parallel": tri["parallel"], "used_pool": False}
+    pooled, n_workers_used = False, 1
+    todo = [i for i in range(1, n) if str(i) not in st["scores"]]
+    if not todo:
+        decision["skipped"] = "every candidate was scored in an earlier launch"
+    else:
+        use_pool = pool_builder is not None and tri["parallel"] is not False
+        if use_pool and tri["parallel"] == "auto":
+            from pyantigen.engine.Evaluator import default_worker_count
+            from pyantigen.engine.Multistart import prefer_pool
+            _stop(len(todo), "multi-start fast pass")
+            t1 = _now()
+            _score_here(todo[0])
+            _save()
+            t_eval = _now() - t1
+            todo = todo[1:]
+            w = default_worker_count(n_workers_hint)
+            use_pool, est_serial, est_pool = prefer_pool(len(todo), t_x0, t_eval, w)
+            decision.update({"t_x0_s": round(t_x0, 1), "t_eval_s": round(t_eval, 1),
+                             "workers": w, "serial_estimate_s": round(est_serial, 1),
+                             "pool_estimate_s": round(est_pool, 1)})
+            if verbose:
+                print(f"  [opt] fast pass: x0 {t_x0:.0f} s (cold), one candidate "
+                      f"{t_eval:.1f} s warm; {len(todo)} more would take ~{est_serial:.0f} s "
+                      f"here against ~{est_pool:.0f} s on {w} workers -> "
+                      f"{'worker pool' if use_pool else 'serial'}.", flush=True)
+
+        evaluator = pool_builder() if (use_pool and todo) else None
+        if evaluator is not None:
+            try:
+                w_pool = int(getattr(evaluator, "n_workers", 1) or 1)
+                # Chunks, so that a kill costs one chunk rather than the batch:
+                # the pool persists across them, so the start-up is paid once.
+                chunk = max(2 * w_pool, 8)
+                mode = {"retry_limits": (limits["max_attempts"], limits["max_depth"]),
+                        "relax": tri["tolerance_factor"]}
+                for k in range(0, len(todo), chunk):
+                    part = todo[k:k + chunk]
+                    _stop(len(todo) - k, "multi-start fast pass")
+                    vals = evaluator.evaluate_batch(
+                        [candidates[i] for i in part], label="multistart triage", eval_mode=mode)
+                    for i, v in zip(part, vals):
+                        v = _finite(float(v))
+                        st["scores"][str(i)] = float(v) if np.isfinite(v) else None
+                    _save()
+                pooled, n_workers_used = True, w_pool
+                decision["used_pool"] = True
+            except DeadlineReached:
+                raise
+            except Exception as exc:
+                # A broken pool must not cost the stage: score the rest here
+                # instead. What the pool did score is already recorded.
+                print(f"  [opt] the worker pool failed during the fast pass "
+                      f"({type(exc).__name__}: {exc}); scoring the rest serially.",
+                      flush=True)
+            finally:
+                try:
+                    evaluator.shutdown()
+                except Exception:
+                    pass
+        left = [i for i in todo if str(i) not in st["scores"]]
+        for k, i in enumerate(left):
+            _stop(len(left) - k, "multi-start fast pass")
+            _score_here(i)
+            _save()
+    t_fast = _now() - t_fast0
+
+    scores = np.full(n, np.inf)
+    for key, v in st["scores"].items():
+        scores[int(key)] = np.inf if v is None else float(v)
+
+    # 3-5. Threshold, niche, reference set.
+    rep = _triage(cand_lin, scores, keep_fraction=tri["keep_fraction"],
+                  cluster_radius=tri["cluster_radius"], max_fits=n_fits)
+    finite = scores[np.isfinite(scores)]
+    if verbose:
+        print(f"  [opt] triage ({t_fast:.0f} s, "
+              + (f"{n_workers_used} workers" if pooled else "serial")
+              + f"): {rep['n_feasible']}/{rep['n_candidates']} "
+              f"feasible ({rep['n_pruned']} pruned: the model does not integrate); "
+              f"kept the best {tri['keep_fraction']:.0%} = {rep['n_kept']}"
+              + (f" (nll {scores[rep['kept']].min():.6g} .. {scores[rep['kept']].max():.6g}"
+                 f", of {finite.min():.6g} .. {finite.max():.6g} overall)"
+                 if rep['n_kept'] else "")
+              + f"; {rep['n_clusters']} niche(s) within {tri['cluster_radius']:g} "
+              f"decade(s) RMS; reference set x0 + {len(rep['starts']) - 1}"
+              + (f" ({rep['n_duplicates_of_x0']} niche leader(s) duplicated x0)"
+                 if rep['n_duplicates_of_x0'] else "") + ".", flush=True)
+    if not np.isfinite(scores[0]) and verbose:
+        print("  [opt] WARNING: x0 itself did not integrate under the limited "
+              "fast pass. It is still fitted from; check the model there.")
+
+    # Local fits from the reference set.
+    _tick()
+    phase.update(name="fits", base=float(st["seconds"].get("fits", 0.0)), t0=_now())
+    _save()
+    fit_idx = list(rep["starts"])
+    fit_starts = [candidates[i] for i in fit_idx]
+    penalty_ref = float(finite.max()) if len(finite) else None
+    summary = {}
+
+    def _on_fit(k, rec):
+        idx = fit_idx[k]
+        rec["candidate"] = int(idx)
+        rec["triage_nll"] = float(scores[idx]) if np.isfinite(scores[idx]) else None
+        st["fits"][str(idx)] = json_safe(rec)
+        _save()
+
+    with retry_limits(limits["max_attempts"], limits["max_depth"]):
+        res, records, best_i = _run_multistart(
+            objective, fit_starts, ms_method, bounds, ms_kw, scales, screen=False,
+            failure_dnll=limits["failure_dnll"], penalty_reference=penalty_ref,
+            cluster_radius=tri["cluster_radius"], summary=summary, verbose=verbose,
+            resume=[st["fits"].get(str(i)) for i in fit_idx], on_fit=_on_fit,
+            stop_check=lambda n_left: _stop(n_left, "multi-start fits"))
+    _tick()
+
+    for rec, idx in zip(records, fit_idx):
+        rec["candidate"] = int(idx)
+        rec["triage_nll"] = float(scores[idx]) if np.isfinite(scores[idx]) else None
+
+    # Every candidate's score and what became of it, for a waterfall plot. The
+    # fit_nll column is where each local fit ended (None for a fit that failed).
+    from pyantigen.engine.Multistart import candidate_table
+    table = candidate_table(cand_lin, scores, rep,
+                            {int(r["candidate"]): r["fun"] for r in records})
+    kept_scores = scores[rep["kept"]] if rep["kept"] else np.array([])
+
+    report = {
+        "mode": "triage",
+        **{k: rep[k] for k in ("n_candidates", "n_pruned", "n_feasible", "n_kept",
+                               "n_clusters", "n_duplicates_of_x0", "cutoff")},
+        "keep_fraction": float(tri["keep_fraction"]),
+        "cluster_radius": float(tri["cluster_radius"]),
+        "tolerance_factor": float(tri["tolerance_factor"]),
+        "triage_workers": n_workers_used if pooled else 1,
+        "triage_decision": decision,
+        "reference_set": [{"candidate": int(i),
+                           "triage_nll": (float(scores[i]) if np.isfinite(scores[i]) else None)}
+                          for i in fit_idx],
+        # The worst score the ranked threshold let through: the line a waterfall
+        # plot draws where "kept" ends.
+        "kept_threshold_nll": float(kept_scores.max()) if len(kept_scores) else None,
+        "candidates": table,
+        # Summed over every launch that worked on this stage.
+        "seconds": {"triage": round(st["seconds"]["triage"], 1),
+                    "fits": round(st["seconds"]["fits"], 1)},
+        "launches": int(st["launches"]),
+        **summary,
+    }
+    if st["launches"] > 1:
+        report["resumed"] = {
+            "candidates_scored_in_earlier_launches": prior["scores"],
+            "fits_finished_in_earlier_launches": prior["fits"],
+        }
+
+    # The best point the stage reached, in linear units, for the caller to keep.
+    report["best_fun"] = float(res.fun) if res is not None else None
+    report["best_x"] = _to_linear(res.x, scales).tolist() if res is not None else None
+
+    # Plain JSON data from here on: this goes into the fit cache and the result
+    # snapshot, which is written with allow_nan=False.
+    report, records = json_safe(report), json_safe(records)
+
+    if res is None:
+        if verbose:
+            print("[opt] every multi-start fit failed; the standard fit starts "
+                  "from the spec's x0.")
+        return None, records, report
+    if verbose:
+        print(f"[opt] multi-start stage best nll {float(res.fun):.6g} (fit "
+              f"{best_i + 1} of {len(records)}); the standard fit starts there.")
+    return np.asarray(res.x, dtype=float), records, report
 
 
 def _any_log(scales):
@@ -6725,6 +7165,7 @@ def run_optimization_from_groups(
 
         opt_kw = _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol)
         start_records = None
+        multistart_report = None
         # Where the optimum came from when it was not fitted here: the path of
         # the cached fit. None means the optimizer ran in this process.
         fit_source = None
@@ -6760,6 +7201,7 @@ def run_optimization_from_groups(
                     message=f"Optimum reused from {cached['path']}",
                     nit=cached.get("nit", 0), nfev=cached.get("nfev", 1))
                 fit_source = cached["path"]
+                multistart_report, start_records = _load_saved_multistart(fit_cache)
             else:
                 print(f"[opt] a cached fit exists at {cached['path']} but its NLL "
                       f"re-evaluates as {fun_now:.6g} against the stored "
@@ -6809,47 +7251,83 @@ def run_optimization_from_groups(
             # wrapping it in multi-start would only pay for the same thing twice.
             res = _run_global_optimization(objective, x0, bounds, method, opt_kw)
         else:
+            # A separate multi-start stage, when the spec asks for one
+            # (multistart_method): a triage of many Sobol candidates -- see
+            # pyantigen.engine.Multistart -- then local fits from the few that
+            # survive it, and the best point reached is where the standard fit
+            # below starts. Without it, the branch further down fits every
+            # sampled start with the spec's own method and the best of them is
+            # the answer. n_starts is the cap on local fits either way.
+            n_fits = getattr(optimization_spec, "n_starts", 1)
+            ms_method, ms_kw_raw = _resolve_multistart_stage(method, optimizer_kwargs)
+            staged = bool(ms_method) and int(n_fits or 1) > 1
+            from pyantigen.engine.Multistart import resolve_triage
+            tri = resolve_triage(optimizer_kwargs) if staged else None
             starts = _multistart_points(
                 x0, bounds, scales,
-                getattr(optimization_spec, "n_starts", 1),
+                (tri["n_candidates"] + 1) if staged else n_fits,
                 search_decades=getattr(optimization_spec, "search_decades", None),
                 seed=getattr(optimization_spec, "start_seed", None),
                 sampler=getattr(optimization_spec, "start_sampler", "lhs"),
             )
-            # A separate multi-start stage, when the spec asks for one: the
-            # starts are run with their own (cheaper, bounds-respecting) method
-            # and the best point reached is where the standard fit below starts.
-            # Without it, the branch further down fits every start with the
-            # spec's own method and the best of them is the answer.
             staged_start = None
-            ms_method, ms_kw_raw = _resolve_multistart_stage(method, optimizer_kwargs)
-            if len(starts) > 1 and ms_method:
+            if staged and len(starts) > 1:
                 if fit_cache is not None and fit_cache.load_partial() is not None:
                     # The standard fit already started in an earlier launch, so
                     # the stage finished then; its answer is in the partial.
                     print("[opt] multi-start stage skipped: an earlier launch "
                           "already began the standard fit from its result.")
+                    multistart_report, start_records = _load_saved_multistart(fit_cache)
                 else:
-                    ms_kw = _prepare_optimizer_kwargs(ms_method, ms_kw_raw, fast, None, None)
-                    limits = _resolve_multistart_limits(optimizer_kwargs)
-                    print(f"[opt] multi-start stage: {len(starts)} starts with "
-                          f"{ms_method}, then the standard fit ({method}) from the best. "
-                          f"Per evaluation: {limits['max_attempts']} solver attempt(s), "
-                          f"subdivision depth {limits['max_depth']}.")
-                    from pyantigen.engine.Simulate import retry_limits
-                    # The full ladder is restored on leaving the block, so the
-                    # standard fit and every diagnostic after it run as before.
-                    with retry_limits(limits["max_attempts"], limits["max_depth"]):
-                        ms_res, start_records, _best_start = _run_multistart(
-                            objective, starts, ms_method, bounds, ms_kw, scales,
-                            failure_dnll=limits["failure_dnll"])
-                    if ms_res is None:
-                        print("[opt] every multi-start fit failed; the standard "
-                              "fit starts from the spec's x0.")
-                    else:
-                        staged_start = np.asarray(ms_res.x, dtype=float)
-                        print(f"[opt] multi-start stage best nll {float(ms_res.fun):.6g} "
-                              f"(start {_best_start + 1}); the standard fit starts there.")
+                    def _triage_pool():
+                        # Built after x0 has been scored in this process (see
+                        # _run_multistart_stage) so workers inherit its
+                        # calibration; closed again as soon as the batch is done.
+                        return _try_build_evaluator(
+                            model_text, paths, models, active_replicates,
+                            param_names, scales, optimization_spec, {},
+                            _events_dynamic, n_workers, preequil_cache=preequil_ok)
+
+                    # The objective writes the fit's best-so-far partial whenever
+                    # it is not told a driver does that. During the stage it must
+                    # not: that record would be the best of triage scores (some at
+                    # relaxed tolerances) and stage fits, and the standard fit
+                    # below would prefer it to the start the stage chose.
+                    _saves_before = _progress["driver_saves"]
+                    _progress["driver_saves"] = True
+                    from pyantigen.engine.Deadline import (
+                        DeadlineReached, RunBudget, resolve_deadline,
+                    )
+                    _stage_budget = RunBudget(deadline=resolve_deadline())
+                    if _stage_budget.is_limited:
+                        print(f"[opt] {_stage_budget.describe()}")
+                    try:
+                        staged_start, start_records, multistart_report = _run_multistart_stage(
+                            objective, starts, x0, bounds, scales, ms_method, ms_kw_raw,
+                            tri, _resolve_multistart_limits(optimizer_kwargs),
+                            n_fits=int(n_fits), method=method, fast=fast,
+                            pool_builder=(_triage_pool if tri["parallel"] is not False
+                                          and n_workers != 1 else None),
+                            n_workers_hint=n_workers,
+                            fit_cache=fit_cache, budget=_stage_budget)
+                    except DeadlineReached as exc:
+                        # Like the standard fit: nothing finished to hand the rest
+                        # of the pipeline, so stop the run cleanly. The stage's
+                        # checkpoint is saved; the same command continues it.
+                        print(f"\n[opt] INCOMPLETE: this run reached its stop time "
+                              f"during the multi-start stage ({exc}). Its progress is "
+                              f"saved; relaunch the same command to continue.")
+                        import sys
+                        sys.exit(0)
+                    finally:
+                        _progress["driver_saves"] = _saves_before
+                    _persist_stage_result(fit_cache, multistart_report, start_records,
+                                          staged_start, x0_lin, scales)
+                    # The stage's evaluations are not the standard fit's: a
+                    # relaxed-tolerance score must not stand as its best-so-far.
+                    _progress["best"] = float("inf")
+                    _progress["best_x"] = None
+                    _progress["best_dirty"] = False
                 starts = starts[:1]
             if len(starts) == 1:
                 x_start = x0 if staged_start is None else staged_start
@@ -6919,9 +7397,12 @@ def run_optimization_from_groups(
                     res = minimize(objective, x_start, method=method,
                                    bounds=bounds or None, **opt_kw)
             else:
+                _summary = {}
                 res, start_records, _best_start = _run_multistart(
-                    objective, starts, method, bounds, opt_kw, scales
+                    objective, starts, method, bounds, opt_kw, scales,
+                    summary=_summary,
                 )
+                multistart_report = {"mode": "all-starts", **_summary}
                 if res is None:
                     print("[opt] every multi-start fit failed; falling back to "
                           "a single fit from the spec's x0.")
@@ -6965,6 +7446,13 @@ def run_optimization_from_groups(
             # Every start and where it landed, so the spread that justified
             # (or did not justify) the extra fits is on the record.
             "starts": start_records,
+            # What the multi-start did and found: the triage counts, the
+            # reference set, and the basins the fits ended in. None at one start.
+            "multistart": multistart_report,
+            # The spec's n_starts, so that the result writer can tell a multi-start
+            # run even when its report is not to hand (a reused fit from a cache
+            # that predates the report).
+            "n_starts": int(getattr(optimization_spec, "n_starts", 1) or 1),
         }
 
         param_dict = dict(zip(param_names, x_lin_opt.tolist()))

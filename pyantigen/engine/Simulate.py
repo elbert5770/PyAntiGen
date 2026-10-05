@@ -415,6 +415,71 @@ class retry_limits:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Relaxed tolerances: a cheap, coarse objective
+# ---------------------------------------------------------------------------
+#
+# The multi-start triage scores every candidate once, to tell the mountains from
+# the valleys, not to locate a minimum. For that the integrator can be run
+# looser. The relaxation is applied where tolerances are applied -- in
+# configure_integrator, which simulate() calls before every run and which
+# re-derives them from each replicate's solver_settings -- so setting the
+# integrator directly would be overwritten on the next call.
+#
+# Both tolerances are multiplied by *factor* and capped (the retry ladder's own
+# ceiling is 1e-4), and it never TIGHTENS: a configured tolerance already above
+# the cap is left alone. Process-global, like search mode and retry limits; the
+# default (None) changes nothing.
+#
+# A state integrated under relaxed tolerances must never be mistaken for one
+# integrated under the configured ones. The pre-dose cache keys on the
+# tolerances, so it reads effective_tolerances() rather than the settings dict.
+_TOL_RELAX = None
+
+
+def set_tolerance_relaxation(factor=None, abs_cap=1e-4, rel_cap=1e-4):
+    """Loosen the integrator tolerances by *factor*. ``None`` switches it off.
+    Returns the previous setting so a caller can restore it."""
+    global _TOL_RELAX
+    previous = _TOL_RELAX
+    if factor is None:
+        _TOL_RELAX = None
+        return previous
+    factor = float(factor)
+    if not factor >= 1.0:
+        raise ValueError(f"tolerance relaxation factor must be >= 1, got {factor}")
+    _TOL_RELAX = (factor, float(abs_cap), float(rel_cap))
+    return previous
+
+
+class relaxed_tolerances:
+    """``with relaxed_tolerances(100): ...`` -- relaxed tolerances for the block."""
+
+    def __init__(self, factor, abs_cap=1e-4, rel_cap=1e-4):
+        self.args = (factor, abs_cap, rel_cap)
+
+    def __enter__(self):
+        self._previous = set_tolerance_relaxation(*self.args)
+        return self
+
+    def __exit__(self, *exc):
+        global _TOL_RELAX
+        _TOL_RELAX = self._previous
+        return False
+
+
+def effective_tolerances(solver_settings):
+    """(absolute, relative) tolerance a run under *solver_settings* is held to,
+    with any relaxation applied."""
+    atol = float(solver_settings.get("absolute_tolerance", 1e-8))
+    rtol = float(solver_settings.get("relative_tolerance", 1e-8))
+    if _TOL_RELAX is not None:
+        factor, abs_cap, rel_cap = _TOL_RELAX
+        atol = max(atol, min(atol * factor, abs_cap))
+        rtol = max(rtol, min(rtol * factor, rel_cap))
+    return atol, rtol
+
+
 def _simulate_search(r, start, end, points, observed_species):
     """One capped attempt. Raises on failure; leaves the step allowance as found."""
     original = r.integrator.maximum_num_steps
@@ -664,16 +729,19 @@ def configure_integrator(r, solver_settings):
     # solver_settings["initial_time_step"] = solver_settings.get("initial_time_step", 1e-6)
     solver_settings["maximum_num_steps"] = solver_settings.get("maximum_num_steps", 20000)
     r.setIntegrator(solver_settings["integrator"])
-    r.integrator.absolute_tolerance = solver_settings["absolute_tolerance"]
+    # The settings dict keeps the CONFIGURED tolerances; what the integrator is
+    # given is the effective pair, which differs only under relaxed_tolerances.
+    atol, rtol = effective_tolerances(solver_settings)
+    r.integrator.absolute_tolerance = atol
     # Cache the scalar where safe_simulate can recover it. The integrator's
     # own getter is unreliable for this: after floor_tolerance_vector uses
     # setIndividualTolerance it returns the per-species vector, whose min is
     # the 1e-30 floor rather than the configured accuracy.
     try:
-        r._scalar_abs_tol = float(solver_settings["absolute_tolerance"])
+        r._scalar_abs_tol = float(atol)
     except Exception:
         pass
-    r.integrator.relative_tolerance = solver_settings["relative_tolerance"]
+    r.integrator.relative_tolerance = rtol
     r.integrator.setValue('stiff', solver_settings["stiff"])
     r.integrator.variable_step_size = solver_settings["variable_step_size"]
     # r.integrator.setValue('initial_time_step', solver_settings["initial_time_step"])
