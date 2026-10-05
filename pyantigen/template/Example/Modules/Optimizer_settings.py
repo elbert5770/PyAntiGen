@@ -16,6 +16,15 @@ class Optimization:
     # a {name: scale} dict, or a list aligned with param_names. x0 and bounds
     # stay in linear units; so does everything reported back.
     parameter_scale: object = None
+    # Multi-start. n_starts=1 is a single local fit. Above 1, start 1 is always
+    # x0 and the rest are drawn within search_decades (log10 units) of it, with
+    # start_seed making the draw reproducible. start_sampler is "lhs" (Latin
+    # hypercube, default) or "sobol"; for Sobol use n_starts - 1 = 2, 4, 8, ...
+    # See docs/MULTISTART.md.
+    n_starts: int = 1
+    start_seed: int = None
+    search_decades: float = None
+    start_sampler: str = "lhs"
 
 
 def _build_example_opt1_ADpos():
@@ -250,8 +259,27 @@ def _build_example5_flipflop_swapped():
         passive_simulations=[],
     )
 
+def _build_example6_flipflop_multistart():
+    """
+    Example5's wrong-basin problem, fit with a Sobol multi-start.
+
+    Start 1 is Example5's x0 (inside the swapped basin); the other eight are a
+    scrambled Sobol sequence within one decade of it. The true mode is about
+    0.7 decades away in both rate constants, so a radius of 1.0 can reach it.
+    Compare the final NLLs across starts: a spread means the objective is
+    multimodal and the best start, not start 1, is the fit to trust.
+    """
+    opt = _build_example5_flipflop_swapped()
+    opt.n_starts = 9          # 1 + 8: a power of two of Sobol points
+    opt.start_sampler = "sobol"
+    opt.search_decades = 1.0
+    opt.start_seed = 20260909
+    return opt
+
+
 OPTIMIZATION_Example4_flipflop = _build_example4_flipflop()
 OPTIMIZATION_Example5_flipflop_swapped = _build_example5_flipflop_swapped()
+OPTIMIZATION_Example6_flipflop_multistart = _build_example6_flipflop_multistart()
 
 def get_OPTIMIZATION(name):
     """Returns a single Optimization configuration by name."""

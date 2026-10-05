@@ -48,6 +48,7 @@ class LoweredSpec:
     search_decades: float = None
     n_starts: int = 1
     start_seed: int = None
+    start_sampler: str = "lhs"
 
 
 class LoweredExperiment:
@@ -302,7 +303,8 @@ def lower(opt):
         optimizer_kwargs=dict(opt.optimizer_kwargs), groups=groups,
         passive_simulations=passive,
         parameter_scale=scale, search_decades=opt.search_decades,
-        n_starts=opt.n_starts, start_seed=opt.start_seed)
+        n_starts=opt.n_starts, start_seed=opt.start_seed,
+        start_sampler=opt.start_sampler)
     return LoweredExperiment(replicates), spec
 
 

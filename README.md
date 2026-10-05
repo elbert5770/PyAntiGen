@@ -159,6 +159,7 @@ python Model_run.py --optimize Example2
 python Model_run.py --optimize Example3
 python Model_run.py --optimize Example4
 python Model_run.py --optimize Example5
+python Model_run.py --optimize Example6   # Sobol multi-start, see docs/MULTISTART.md
 ```
 
 Each example prints a banner explaining what it demonstrates before the run and a "what to look for" summary after it. All output lands in `results/Example/`, prefixed with the example and group names so runs never overwrite each other — e.g. `Example_Example2_ADpos_profile_likelihood.png`, `Example_Example4_Flipflop_optimization_results.csv`.

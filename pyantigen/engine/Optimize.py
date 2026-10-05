@@ -2483,8 +2483,11 @@ def _resolve_scales(parameter_scale, param_names, bounds=None, x0=None,
     return scales
 
 
+_START_SAMPLERS = ("lhs", "sobol")
+
+
 def _multistart_points(x0, bounds, scales, n_starts, search_decades=None,
-                       seed=None, verbose=True):
+                       seed=None, verbose=True, sampler="lhs"):
     """Starting points for a multi-start fit, in opt space.
 
     Point 0 is always the declared x0, so a multi-start run can never come back
@@ -2492,6 +2495,12 @@ def _multistart_points(x0, bounds, scales, n_starts, search_decades=None,
     a radius *around* x0 -- ``search_decades`` in opt units for a log-scaled
     parameter, which makes the perturbation multiplicative and therefore the
     right shape for a rate constant.
+
+    ``sampler`` is "lhs" (default, Latin hypercube) or "sobol" (scrambled Sobol
+    sequence).  Sobol fills the box more evenly in higher dimension, but its
+    balance properties hold only when the number of points is a power of two,
+    so ``n_starts - 1`` should be 2, 4, 8, ... (n_starts = 3, 5, 9, 17).  Any
+    other count still runs, with a warning from scipy.
 
     Sampling a radius rather than the whole declared box is the part that pays.
     On the NfL fit, drawing log-uniformly across its (1e-9, 1) bound put three
@@ -2527,10 +2536,17 @@ def _multistart_points(x0, bounds, scales, n_starts, search_decades=None,
         if not hi[i] > lo[i]:          # bound collapsed the range to a point
             lo[i] = hi[i] = x0[i]
 
-    how = "Latin hypercube"
+    sampler = str(sampler or "lhs").lower()
+    if sampler not in _START_SAMPLERS:
+        raise ValueError(f"start_sampler must be one of {_START_SAMPLERS}, "
+                         f"got {sampler!r}")
+    how = "Sobol" if sampler == "sobol" else "Latin hypercube"
     try:
         from scipy.stats import qmc
-        unit = qmc.LatinHypercube(d=k, seed=seed).random(n - 1)
+        if sampler == "sobol":
+            unit = qmc.Sobol(d=k, scramble=True, seed=seed).random(n - 1)
+        else:
+            unit = qmc.LatinHypercube(d=k, seed=seed).random(n - 1)
     except Exception:
         how = "uniform random"
         unit = np.random.default_rng(seed).random((n - 1, k))
@@ -6462,6 +6478,7 @@ def run_optimization_from_groups(
                 n_starts=getattr(optimization_spec, "n_starts", 1),
                 start_seed=getattr(optimization_spec, "start_seed", None),
                 search_decades=getattr(optimization_spec, "search_decades", None),
+                start_sampler=getattr(optimization_spec, "start_sampler", "lhs"),
                 solver_hash=solver_fingerprint(active_replicates),
                 data_hash=data_fingerprint(
                     {k: models[k] for k in active_replicates}),
@@ -6694,6 +6711,7 @@ def run_optimization_from_groups(
                 getattr(optimization_spec, "n_starts", 1),
                 search_decades=getattr(optimization_spec, "search_decades", None),
                 seed=getattr(optimization_spec, "start_seed", None),
+                sampler=getattr(optimization_spec, "start_sampler", "lhs"),
             )
             if len(starts) == 1:
                 x_start = x0

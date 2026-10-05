@@ -131,6 +131,23 @@ The unambiguous signature that the fit missed the global optimum:
 Compare Example_Example5_Flipflop_profile_likelihood*.png against
 'python Flipflop_reference.py --anchor swapped' (same wrong-mode anchor).""",
     },
+    "Example6": {
+        'opt_key': ['OPTIMIZATION_Example6_flipflop_multistart'],
+        'experiment': 'EXPERIMENT_Flipflop',
+        'diagnostics': _NO_DIAGNOSTICS,
+        'title': "Flip-flop kinetics, Sobol multi-start from the WRONG basin",
+        'description': """\
+Example5's wrong-basin problem, but fit from nine starts: the spec's x0 plus
+eight scrambled-Sobol points within one decade of it (start_sampler="sobol").
+Start 1 still lands in the swapped local minimum; the others can reach the
+true mode.""",
+        'interpretation': """\
+Read the multi-start report, not just the final value:
+  * Final NLLs that scatter mean the objective is multimodal here, and the
+    best start -- not start 1 -- is the fit to profile around.
+  * Final NLLs that all agree mean one start would have done.
+Compare with Example5, which has no such search and stays in the wrong mode.""",
+    },
     "Example3": {
         'opt_key': ['OPTIMIZATION_Example3_joint'],
         'experiment': 'EXPERIMENT_Example',
