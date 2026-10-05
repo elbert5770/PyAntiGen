@@ -104,6 +104,7 @@ class Optimization:
     search_decades: float = None
     remarks: list = field(default_factory=list)
     uses: list = field(default_factory=list)      # [Use]
+    start_sampler: str = "lhs"                    # "lhs" | "sobol"
 
     def __post_init__(self):
         names = [p.name for p in self.params]
@@ -184,6 +185,8 @@ class Optimization:
             d["start_seed"] = self.start_seed
         if self.search_decades is not None:
             d["search_decades"] = self.search_decades
+        if self.start_sampler != "lhs":
+            d["start_sampler"] = self.start_sampler
         return d
 
     @classmethod
@@ -202,7 +205,7 @@ class Optimization:
         opt = cls(d["name"], [Param.from_json(n, p) for n, p in d["params"].items()],
                   d.get("method", "Nelder-Mead"), d.get("optimizer_kwargs", {}),
                   d.get("n_starts", 1), d.get("start_seed"), d.get("search_decades"),
-                  d.get("remarks", []))
+                  d.get("remarks", []), start_sampler=d.get("start_sampler", "lhs"))
         for u in d["uses"]:
             st = studies[u["study"]]
             if u.get("score", True):

@@ -700,3 +700,13 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_start_sampler_default_keeps_existing_hash():
+    assert _fp() == _fp(start_sampler="lhs")
+
+
+def test_start_sampler_sobol_changes_fit_hash_only():
+    lhs, sobol = _fp(), _fp(start_sampler="sobol")
+    assert lhs[0] == sobol[0]      # model hash
+    assert lhs[1] != sobol[1]      # fit hash

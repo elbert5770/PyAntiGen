@@ -126,7 +126,8 @@ def data_fingerprint(models):
 
 def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
                     method, optimizer_kwargs, n_starts=1, start_seed=None,
-                    search_decades=None, solver_hash=None, data_hash=None):
+                    search_decades=None, solver_hash=None, data_hash=None,
+                    start_sampler="lhs"):
     """Hashes identifying a fit *problem*, before it has been solved.
 
     Deliberately distinct from :func:`pyantigen.engine.Profile_checkpoint.spec_fingerprint`,
@@ -156,8 +157,7 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
               "profile_without_opt"):
         kwargs.pop(k, None)
 
-    blob = json.dumps(
-        {
+    key = {
             "format": _FORMAT,
             "param_names": list(param_names),
             "x0": [_r(v) for v in np.atleast_1d(x0_lin)],
@@ -173,9 +173,12 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
             "search_decades": search_decades,
             "solver": solver_hash,
             "data": data_hash,
-        },
-        sort_keys=True, default=_json_default,
-    )
+    }
+    # Left out at the default so fits cached before the sampler existed keep
+    # their hash; it matters only when n_starts > 1.
+    if (start_sampler or "lhs") != "lhs":
+        key["start_sampler"] = start_sampler
+    blob = json.dumps(key, sort_keys=True, default=_json_default)
     fit_hash = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
     return model_hash, fit_hash
 
