@@ -973,11 +973,19 @@ def _slice_dnll_at_optimum(param_vals, dnll, opt_val, rtol=1e-6):
     return float(y[i])
 
 
-def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="ALL"):
-    """Run likelihood slice once per parameter and save plot."""
+def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="ALL",
+                                slice_settings=None):
+    """Run likelihood slice once per parameter and save plot.
+
+    slice_settings is the spec's ``slice_settings`` ({"n_points", "range_factor"});
+    absent keys keep the values that used to be fixed here, 20 and 2.0.
+    """
     from datetime import datetime
     import numpy as np
     import matplotlib.pyplot as plt
+
+    n_points = int((slice_settings or {}).get("n_points", 20))
+    range_factor = float((slice_settings or {}).get("range_factor", 2.0))
 
     slice_func = opt.get("stats", {}).get("likelihood_slice")
     if not slice_func:
@@ -1004,7 +1012,7 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
     results = None
     if slice_all is not None:
         try:
-            results = slice_all(n_points=20, range_factor=2.0)
+            results = slice_all(n_points=n_points, range_factor=range_factor)
         except Exception as exc:
             print(f"  batched slice failed ({exc}); falling back per parameter.")
 
@@ -1014,7 +1022,7 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
             if results is not None and pname in results:
                 pv, nr = results[pname]
             else:
-                pv, nr = slice_func(i, n_points=20, range_factor=2.0)
+                pv, nr = slice_func(i, n_points=n_points, range_factor=range_factor)
             cache[i] = (pv, nr)
             slice_traces[pname] = {"x": np.asarray(pv).tolist(),
                                    "y": np.asarray(nr).tolist()}
@@ -1233,7 +1241,9 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
 
         if settings.get("slice_analysis") and opt.get("stats", {}).get("likelihood_slice"):
             _save_likelihood_slice_plot(opt, optimization_settings.param_names, paths["plot_path"],
-                                        MODEL_NAME, tag=groups_tag)
+                                        MODEL_NAME, tag=groups_tag,
+                                        slice_settings=getattr(optimization_settings,
+                                                               "slice_settings", None))
         if (settings.get("profile_likelihood_analysis") or settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
             _save_profile_likelihood_plot(
                 opt, optimization_settings.param_names, paths["plot_path"],

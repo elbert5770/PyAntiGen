@@ -707,6 +707,10 @@ def test_start_sampler_default_keeps_existing_hash():
 
 
 def test_start_sampler_sobol_changes_fit_hash_only():
-    lhs, sobol = _fp(), _fp(start_sampler="sobol")
+    lhs, sobol = _fp(n_starts=5), _fp(n_starts=5, start_sampler="sobol")
     assert lhs[0] == sobol[0]      # model hash
     assert lhs[1] != sobol[1]      # fit hash
+
+
+def test_start_sampler_ignored_at_one_start():
+    assert _fp(start_sampler="sobol") == _fp()
