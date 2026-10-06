@@ -1,6 +1,8 @@
 import time
 import numpy as np
 
+from pyantigen.engine import Model_cache as _model_cache
+
 # Magnitude below which a species value is numerical dust rather than a
 # quantity.
 #
@@ -249,10 +251,11 @@ class StackedResult(np.ndarray):
         return super().__getitem__(key)
 
 def save_model_state(r):
-    # Cache the state keys on the RoadRunner instance to minimize overhead
-    try:
-        keys = r._cached_state_keys
-    except AttributeError:
+    # Cache the state keys on the RoadRunner instance to minimize overhead.
+    # Read through Model_cache, not r._cached_state_keys: a missed attribute on
+    # a RoadRunner builds every selection id the model has (see Model_cache).
+    keys = _model_cache.get(r, "_cached_state_keys")
+    if keys is None:
         try:
             assignment_rules = set(r.getAssignmentRuleIds())
         except Exception:
@@ -261,7 +264,7 @@ def save_model_state(r):
         keys += [s for s in r.getFloatingSpeciesIds() if s not in assignment_rules]
         keys += [s for s in r.getBoundarySpeciesIds() if s not in assignment_rules]
         keys += [s for s in r.getGlobalParameterIds() if s not in assignment_rules]
-        r._cached_state_keys = keys
+        _model_cache.put(r, "_cached_state_keys", keys)
 
     prev_selections = r.selections
     r.selections = keys
@@ -543,7 +546,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
     # forever. configure_integrator caches the real scalar for exactly this
     # read; the getter path remains only for callers that never went through
     # configure_integrator.
-    orig_abs_tol = getattr(r, "_scalar_abs_tol", None)
+    orig_abs_tol = _model_cache.get(r, "_scalar_abs_tol")
     if orig_abs_tol is None:
         orig_abs_tol = _scalar_tolerance(r.integrator.absolute_tolerance)
     orig_rel_tol = _scalar_tolerance(r.integrator.relative_tolerance)
@@ -738,7 +741,7 @@ def configure_integrator(r, solver_settings):
     # setIndividualTolerance it returns the per-species vector, whose min is
     # the 1e-30 floor rather than the configured accuracy.
     try:
-        r._scalar_abs_tol = float(atol)
+        _model_cache.put(r, "_scalar_abs_tol", float(atol))
     except Exception:
         pass
     r.integrator.relative_tolerance = rtol
@@ -770,17 +773,13 @@ def simulate(r, solver_settings, observed_species, label=None):
     # cache it on the RoadRunner instance to avoid 5 SWIG round-trips per
     # block per optimization step. The negative-clamp that used to live here
     # has moved into safe_simulate's failure-recovery path.
-    try:
-        _available = r._available_symbols
-    except AttributeError:
+    _available = _model_cache.get(r, "_available_symbols")
+    if _available is None:
         _ids = (set(r.getFloatingSpeciesIds()) | set(r.getBoundarySpeciesIds())
                 | set(r.getAssignmentRuleIds()) | set(r.getGlobalParameterIds())
                 | set(r.getReactionIds()))
         _available = {'time'} | _ids | {'[' + s + ']' for s in _ids}
-        try:
-            r._available_symbols = _available
-        except Exception:
-            pass
+        _model_cache.put(r, "_available_symbols", _available)
     observed_species = [s for s in observed_species if s in _available]
 
     all_results = None

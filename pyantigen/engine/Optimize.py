@@ -14,6 +14,7 @@ import numdifftools as nd
 from pyantigen.generate.TelluriumGen import TelluriumGen
 from pyantigen.engine.Event_times import attach_event_times
 from pyantigen.engine.Simulate import simulate
+from pyantigen.engine import Model_cache as _model_cache
 from pyantigen.engine.Profile_checkpoint import record_is_better as _profile_record_is_better
 from pyantigen.engine.Noise_floor import get_noise_floor
 from pyantigen.engine.Noise_floor import clear_cache as _clear_noise_floor_cache
@@ -332,7 +333,7 @@ def remember_parameter_baseline(r):
     rules = set(r.getAssignmentRuleIds())
     idx = np.array([i for i, p in enumerate(ids) if p not in rules], dtype=int)
     vals = np.asarray(r.getGlobalParameterValues(), dtype=float)
-    r._pyantigen_param_baseline = (ids, idx, vals[idx].copy())
+    _model_cache.put(r, "_pyantigen_param_baseline", (ids, idx, vals[idx].copy()))
 
 
 def restore_parameter_baseline(r):
@@ -340,7 +341,7 @@ def restore_parameter_baseline(r):
 
     Returns the names restored (empty when nothing had changed).
     """
-    base = getattr(r, "_pyantigen_param_baseline", None)
+    base = _model_cache.get(r, "_pyantigen_param_baseline")
     if base is None:
         remember_parameter_baseline(r)
         return []
@@ -8098,7 +8099,7 @@ def predict_concentrations(params, observable_data, model, param_names, observab
     try:
         model.setIntegrator('cvode')
         model.integrator.absolute_tolerance = 1e-8
-        model._scalar_abs_tol = 1e-8
+        _model_cache.put(model, "_scalar_abs_tol", 1e-8)
         model.integrator.relative_tolerance = 1e-8
         model.integrator.setValue('stiff', True)
         model.integrator.variable_step_size = True
