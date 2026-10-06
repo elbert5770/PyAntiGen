@@ -161,7 +161,7 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
     # spec a default stage does not invalidate the fits already cached.
     if int(n_starts or 1) <= 1:
         for k in ("multistart_method", "multistart_optimizer_kwargs",
-                  "multistart_limits", "multistart_triage"):
+                  "multistart_limits", "multistart_triage", "multistart_gradient"):
             kwargs.pop(k, None)
 
     key = {
