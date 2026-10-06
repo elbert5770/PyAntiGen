@@ -2264,6 +2264,7 @@ _ENGINE_ONLY_OPTIMIZER_KEYS = (
     "multistart_optimizer_kwargs",
     "multistart_limits",
     "multistart_triage",
+    "multistart_gradient",
 )
 
 
@@ -2618,8 +2619,16 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
                     screen=True, failure_value=1e10, verbose=True,
                     failure_dnll=None, penalty_reference=None,
                     cluster_radius=0.15, report_dnll=1.0, summary=None,
-                    resume=None, on_fit=None, stop_check=None):
+                    resume=None, on_fit=None, stop_check=None,
+                    fd=None, grad_batch=None, gradient_where="serial"):
     """Fit from every start, keep the best, and report the spread.
+
+    Gradient methods (see ``Multistart.GRADIENT_METHODS``) take their gradient
+    from ``Multistart.FDObjective`` when *fd* (``resolve_gradient``'s dict, scheme
+    not "scipy") is given: x and its perturbed points are evaluated as ONE batch,
+    by ``grad_batch(points) -> values`` (the worker pool) or, without one, in this
+    process. Each record then says how the gradient was taken, and its ``nfev`` is
+    the number of objective evaluations rather than scipy's call count.
 
     Resumable, for a stage that can be killed between fits: ``resume`` is a list
     aligned with *starts* holding each fit's record from an earlier launch (or
@@ -2650,6 +2659,8 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     different optimum. ``summary``, a dict, is filled with the result.
     """
     from scipy.optimize import minimize
+
+    from pyantigen.engine.Multistart import GRADIENT_METHODS, FDObjective
 
     starts = [np.asarray(s, dtype=float) for s in starts]
 
@@ -2741,9 +2752,32 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
 
         if stop_check is not None:
             stop_check(len(starts) - i)
+        fdo, gradient_info = None, None
         try:
-            r = minimize(fit_objective, s, method=method,
-                         bounds=bounds or None, **opt_kw)
+            if (fd is not None and fd.get("scheme") != "scipy"
+                    and str(method).lower() in GRADIENT_METHODS):
+                import time as _time
+                batch = grad_batch if grad_batch is not None else (
+                    lambda pts: [_eval(p) for p in pts])
+                fdo = FDObjective(batch, bounds, scales, step=fd["step"],
+                                  scheme=fd["scheme"], failure_value=failure_value,
+                                  penalty=penalty)
+                gradient_info = {"scheme": fd["scheme"], "step": fd["step"],
+                                 "where": gradient_where}
+                t_fit0, n_iter = _time.time(), [0]
+
+                def _progress_line(_xk, _fdo=fdo, _t0=t_fit0, _n=n_iter):
+                    _n[0] += 1
+                    if verbose:
+                        print(f"      iteration {_n[0]}: last nll {_fdo.last_f:.6g}, "
+                              f"{_fdo.n_evals} evaluation(s), {_time.time() - _t0:.0f} s",
+                              flush=True)
+
+                r = minimize(fdo, s, jac=True, method=method, bounds=bounds or None,
+                             callback=_progress_line, **opt_kw)
+            else:
+                r = minimize(fit_objective, s, method=method,
+                             bounds=bounds or None, **opt_kw)
             fun = float(r.fun)
             ok, msg = bool(r.success), str(r.message)
             if penalty is not None and fun >= penalty:
@@ -2758,10 +2792,16 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
             "fun": fun if np.isfinite(fun) else None,
             "success": ok,
             "message": msg,
-            "nfev": getattr(r, "nfev", None) if r is not None else None,
+            "nfev": (fdo.n_evals if fdo is not None
+                     else getattr(r, "nfev", None) if r is not None else None),
             "x": (_to_linear(r.x, scales).tolist()
                   if r is not None and np.isfinite(fun) else None),
         })
+        if fdo is not None:
+            records[-1]["nit"] = getattr(r, "nit", None) if r is not None else None
+            records[-1]["gradient"] = {**gradient_info, "n_gradients": fdo.n_calls,
+                                       "n_retried": fdo.n_retried,
+                                       "n_zeroed_components": fdo.n_zeroed}
         if on_fit is not None:
             on_fit(i, records[-1])
         if r is not None and np.isfinite(fun) and (best is None or fun < best.fun):
@@ -2849,13 +2889,14 @@ def _now():
     return time.time()
 
 
-def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits):
+def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient=None):
     """Identity of what a stage checkpoint holds scores for.
 
     The fit cache's own key already covers the spec, so a checkpoint cannot
     normally meet a different stage; this is the check that does not rely on
-    that. Where the candidates are scored (the pool or here) is left out: it
-    changes how long the scores take, not what they are.
+    that. Where the candidates are scored, or the gradients evaluated (the pool or
+    here), is left out: it changes how long they take, not what they are. The
+    gradient's step and scheme ARE in it: they change where a fit ends.
     """
     import hashlib
     import json
@@ -2863,14 +2904,69 @@ def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits):
         "candidates": [[round(float(v), 12) for v in np.atleast_1d(c)] for c in candidates],
         "triage": {k: tri[k] for k in sorted(tri) if k != "parallel"},
         "limits": limits, "method": str(ms_method), "kw": ms_kw, "n_fits": int(n_fits),
+        "gradient": ({k: gradient[k] for k in sorted(gradient) if k != "parallel"}
+                     if gradient else None),
     }, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+class _PoolHolder:
+    """The worker pool a stage may use, built on first use and closed once.
+
+    The fast pass and the local fits' gradients share ONE pool: building it costs
+    every worker a spawn and a compile of every model, so it is paid once for the
+    stage. If the builder cannot make one (or it breaks), ``get`` returns None
+    from then on and the callers score serially.
+    """
+
+    def __init__(self, builder):
+        self.builder, self.ev, self.tried = builder, None, False
+
+    def get(self):
+        if self.ev is None and self.builder is not None and not self.tried:
+            self.tried = True
+            self.ev = self.builder()
+        return self.ev
+
+    @property
+    def n_workers(self):
+        return int(getattr(self.ev, "n_workers", 1) or 1) if self.ev is not None else 1
+
+    def drop(self):
+        ev, self.ev = self.ev, None
+        if ev is not None:
+            try:
+                ev.shutdown()
+            except Exception:
+                pass
+
+    close = drop
 
 
 def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
                           ms_kw_raw, tri, limits, *, n_fits, method, fast=False,
                           verbose=True, pool_builder=None, n_workers_hint=None,
-                          fit_cache=None, budget=None):
+                          fit_cache=None, budget=None, gradient=None):
+    """The multi-start stage; see :func:`_run_multistart_stage_body`.
+
+    This wrapper owns the worker pool's lifetime: whatever the body does, the pool
+    it used is shut down when the stage ends, even on a kill-like exception.
+    """
+    holder = _PoolHolder(pool_builder)
+    try:
+        return _run_multistart_stage_body(
+            objective, candidates, x0, bounds, scales, ms_method, ms_kw_raw, tri, limits,
+            n_fits=n_fits, method=method, fast=fast, verbose=verbose, holder=holder,
+            n_workers_hint=n_workers_hint, fit_cache=fit_cache, budget=budget,
+            gradient=gradient)
+    finally:
+        holder.close()
+
+
+def _run_multistart_stage_body(objective, candidates, x0, bounds, scales, ms_method,
+                               ms_kw_raw, tri, limits, *, n_fits, method, fast=False,
+                               verbose=True, holder=None, n_workers_hint=None,
+                               fit_cache=None, budget=None, gradient=None):
     """The multi-start stage: triage the candidates, then fit from the survivors.
 
     *candidates* are opt-space points, row 0 the spec's x0 (see
@@ -2927,7 +3023,7 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
         return v if np.isfinite(v) and v < 1e10 else np.inf
 
     # -- the checkpoint -------------------------------------------------------
-    sig = _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits)
+    sig = _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient)
     st = None
     if fit_cache is not None:
         saved = fit_cache.load_stage()
@@ -3010,11 +3106,12 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
     # clearly beats scoring it here (see Multistart.prefer_pool).
     decision = {"parallel": tri["parallel"], "used_pool": False}
     pooled, n_workers_used = False, 1
+    t_eval = None                      # a WARM evaluation, once something has measured one
     todo = [i for i in range(1, n) if str(i) not in st["scores"]]
     if not todo:
         decision["skipped"] = "every candidate was scored in an earlier launch"
     else:
-        use_pool = pool_builder is not None and tri["parallel"] is not False
+        use_pool = holder.builder is not None and tri["parallel"] is not False
         if use_pool and tri["parallel"] == "auto":
             from pyantigen.engine.Evaluator import default_worker_count
             from pyantigen.engine.Multistart import prefer_pool
@@ -3035,7 +3132,7 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
                       f"here against ~{est_pool:.0f} s on {w} workers -> "
                       f"{'worker pool' if use_pool else 'serial'}.", flush=True)
 
-        evaluator = pool_builder() if (use_pool and todo) else None
+        evaluator = holder.get() if (use_pool and todo) else None
         if evaluator is not None:
             try:
                 w_pool = int(getattr(evaluator, "n_workers", 1) or 1)
@@ -3059,15 +3156,12 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
                 raise
             except Exception as exc:
                 # A broken pool must not cost the stage: score the rest here
-                # instead. What the pool did score is already recorded.
+                # instead, and leave the fits to do the same. What the pool did
+                # score is already recorded.
                 print(f"  [opt] the worker pool failed during the fast pass "
                       f"({type(exc).__name__}: {exc}); scoring the rest serially.",
                       flush=True)
-            finally:
-                try:
-                    evaluator.shutdown()
-                except Exception:
-                    pass
+                holder.drop()
         left = [i for i in todo if str(i) not in st["scores"]]
         for k, i in enumerate(left):
             _stop(len(left) - k, "multi-start fast pass")
@@ -3116,13 +3210,91 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
         st["fits"][str(idx)] = json_safe(rec)
         _save()
 
+    # How the local fits take their gradient. A gradient method's cost is the
+    # gradient: k + 1 evaluations an iteration, one after another unless they are
+    # sent to the pool together (see Multistart.FDObjective). Whether that is
+    # worth the pool is a different question from the fast pass's, because the
+    # batch is only k + 1 wide and the iterations are sequential.
+    from pyantigen.engine.Multistart import GRADIENT_METHODS, prefer_pool_gradient
+    use_fd = (gradient is not None and gradient["scheme"] != "scipy"
+              and str(ms_method).lower() in GRADIENT_METHODS)
+    gdecision = {"scheme": (gradient or {}).get("scheme", "scipy" if gradient is None else None),
+                 "step": (gradient or {}).get("step"), "used_pool": False}
+    grad_batch, gradient_where = None, "serial"
+    fits_left = [i for i in fit_idx if str(i) not in st["fits"]]
+    if use_fd and fits_left:
+        k_par = len(candidates[0])
+        n_points = k_par * (2 if gradient["scheme"] == "central" else 1) + 1
+        max_iter = int((ms_kw.get("options") or {}).get("maxiter") or 50)
+        want = gradient["parallel"]
+        gdecision.update({"parallel": want, "points_per_gradient": n_points,
+                          "iteration_cap": max_iter})
+        use_pool_g = holder is not None and holder.builder is not None and want is not False
+        if use_pool_g and want == "auto":
+            from pyantigen.engine.Evaluator import default_worker_count
+            if t_eval is None:
+                # Nothing has timed a warm evaluation yet (the fast pass was skipped
+                # or ran on a pool): re-score x0, which is warm now.
+                t1 = _now()
+                with retry_limits(limits["max_attempts"], limits["max_depth"]):
+                    try:
+                        objective(candidates[0])
+                    except Exception:
+                        pass
+                t_eval = _now() - t1
+            w_g = holder.n_workers if holder.ev is not None else default_worker_count(n_workers_hint)
+            use_pool_g, est_serial, est_pool = prefer_pool_gradient(
+                max_iter * len(fits_left), n_points, t_x0, t_eval, w_g,
+                pool_ready=holder.ev is not None)
+            gdecision.update({"t_eval_s": round(t_eval, 1), "workers": w_g,
+                              "serial_estimate_s": round(est_serial, 1),
+                              "pool_estimate_s": round(est_pool, 1)})
+            if verbose:
+                print(f"  [opt] local fits: {n_points} evaluation(s) per gradient, up to "
+                      f"{max_iter} iteration(s) x {len(fits_left)} fit(s), {t_eval:.1f} s an "
+                      f"evaluation: ~{est_serial / 60:.0f} min one at a time against "
+                      f"~{est_pool / 60:.0f} min on {w_g} workers -> "
+                      f"{'worker pool' if use_pool_g else 'serial'}.", flush=True)
+        if use_pool_g:
+            ev_g = holder.get()
+            if ev_g is not None:
+                gradient_where = "pool"
+                gdecision.update({"used_pool": True, "workers": holder.n_workers})
+                g_mode = {"retry_limits": (limits["max_attempts"], limits["max_depth"])}
+                g_state = {"ev": ev_g}
+
+                def grad_batch(points):
+                    ev = g_state["ev"]
+                    if ev is not None:
+                        try:
+                            return ev.evaluate_batch(list(points), label="multistart gradient",
+                                                     eval_mode=g_mode)
+                        except Exception as exc:
+                            print(f"  [opt] the worker pool failed during a gradient "
+                                  f"({type(exc).__name__}: {exc}); taking the rest "
+                                  f"serially.", flush=True)
+                            g_state["ev"] = None
+                            holder.drop()
+                    out = []
+                    for p in points:
+                        try:
+                            out.append(float(objective(p)))
+                        except Exception:
+                            out.append(float("inf"))
+                    return out
+        if verbose and not use_pool_g and gdecision.get("used_pool") is False and "workers" not in gdecision:
+            print(f"  [opt] local fits: {n_points} evaluation(s) per gradient taken one at a "
+                  f"time (step {gradient['step']:g}, {gradient['scheme']}).", flush=True)
+
     with retry_limits(limits["max_attempts"], limits["max_depth"]):
         res, records, best_i = _run_multistart(
             objective, fit_starts, ms_method, bounds, ms_kw, scales, screen=False,
             failure_dnll=limits["failure_dnll"], penalty_reference=penalty_ref,
             cluster_radius=tri["cluster_radius"], summary=summary, verbose=verbose,
             resume=[st["fits"].get(str(i)) for i in fit_idx], on_fit=_on_fit,
-            stop_check=lambda n_left: _stop(n_left, "multi-start fits"))
+            stop_check=lambda n_left: _stop(n_left, "multi-start fits"),
+            fd=(gradient if use_fd else None), grad_batch=grad_batch,
+            gradient_where=gradient_where)
     _tick()
 
     for rec, idx in zip(records, fit_idx):
@@ -3145,6 +3317,9 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
         "tolerance_factor": float(tri["tolerance_factor"]),
         "triage_workers": n_workers_used if pooled else 1,
         "triage_decision": decision,
+        # How the local fits took their gradient (scheme, step, and whether the
+        # points went to the pool).
+        "gradient": gdecision,
         "reference_set": [{"candidate": int(i),
                            "triage_nll": (float(scores[i]) if np.isfinite(scores[i]) else None)}
                           for i in fit_idx],
@@ -7282,7 +7457,8 @@ def run_optimization_from_groups(
                     def _triage_pool():
                         # Built after x0 has been scored in this process (see
                         # _run_multistart_stage) so workers inherit its
-                        # calibration; closed again as soon as the batch is done.
+                        # calibration; shared by the fast pass and the local fits'
+                        # gradients and closed when the stage ends.
                         return _try_build_evaluator(
                             model_text, paths, models, active_replicates,
                             param_names, scales, optimization_spec, {},
@@ -7301,15 +7477,21 @@ def run_optimization_from_groups(
                     _stage_budget = RunBudget(deadline=resolve_deadline())
                     if _stage_budget.is_limited:
                         print(f"[opt] {_stage_budget.describe()}")
+                    from pyantigen.engine.Multistart import resolve_gradient
+                    _gradient = resolve_gradient(optimizer_kwargs)
+                    # A pool is offered if either the fast pass or the gradients
+                    # may use one; each decides for itself whether to.
+                    _pool_wanted = (n_workers != 1 and (
+                        tri["parallel"] is not False or _gradient["parallel"] is not False))
                     try:
                         staged_start, start_records, multistart_report = _run_multistart_stage(
                             objective, starts, x0, bounds, scales, ms_method, ms_kw_raw,
                             tri, _resolve_multistart_limits(optimizer_kwargs),
                             n_fits=int(n_fits), method=method, fast=fast,
-                            pool_builder=(_triage_pool if tri["parallel"] is not False
-                                          and n_workers != 1 else None),
+                            pool_builder=(_triage_pool if _pool_wanted else None),
                             n_workers_hint=n_workers,
-                            fit_cache=fit_cache, budget=_stage_budget)
+                            fit_cache=fit_cache, budget=_stage_budget,
+                            gradient=_gradient)
                     except DeadlineReached as exc:
                         # Like the standard fit: nothing finished to hand the rest
                         # of the pipeline, so stop the run cleanly. The stage's

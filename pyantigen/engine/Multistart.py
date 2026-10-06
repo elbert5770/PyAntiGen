@@ -73,6 +73,166 @@ def resolve_triage(optimizer_kwargs):
     return out
 
 
+# -- the gradient of the local fits ------------------------------------------------------
+#
+# The stage's local fits use a gradient method (L-BFGS-B). Left alone, scipy takes
+# the gradient by forward differences with a step of 1e-8: one evaluation per
+# parameter, one after another, so an 18-parameter fit pays 19 evaluations -- 7
+# minutes at 22 s each -- per iteration, with the worker pool idle. And 1e-8 is
+# far below the noise of this objective (its integrator tolerances are 1e-8
+# relative, so values wobble at roughly 1e-6 to 1e-3): dividing that noise by
+# 1e-8 gives a gradient that is mostly noise, and the line search fails on it
+# ("ABNORMAL" termination).
+#
+# FDObjective evaluates x and every perturbed point TOGETHER, as one batch. On the
+# pool that is one round of evaluations per iteration (~22 s) instead of 19, and
+# with a step the noise cannot swamp (1e-3) the gradient is usable. The same code
+# runs serially, one point after another, when there is no pool: it is the step,
+# not the parallelism, that makes the gradient trustworthy.
+GRADIENT_DEFAULTS = {
+    # Where each gradient's points are evaluated: "auto" decides from timings (see
+    # prefer_pool_gradient), True always uses the worker pool, False never does.
+    "parallel": "auto",
+    # Finite-difference step in optimizer units: decades for a log10 parameter,
+    # and relative (scaled by max(|x|, 1)) for a linear one.
+    "step": 1e-3,
+    # "forward", "central" (twice the evaluations, second-order accurate) or
+    # "scipy" (scipy's own serial forward differences at 1e-8: the old behaviour).
+    "scheme": "forward",
+}
+
+# Methods that take a gradient. Nelder-Mead and Powell do not: none of this applies.
+GRADIENT_METHODS = frozenset({"l-bfgs-b", "bfgs", "cg", "tnc", "slsqp"})
+
+
+def resolve_gradient(optimizer_kwargs):
+    """The local fits' gradient settings: defaults overlaid by ``multistart_gradient``.
+    An unknown key is an error rather than a silent no-op."""
+    given = dict((optimizer_kwargs or {}).get("multistart_gradient") or {})
+    unknown = sorted(set(given) - set(GRADIENT_DEFAULTS))
+    if unknown:
+        raise ValueError(f"unknown multistart_gradient key(s) {unknown}; expected a "
+                         f"subset of {sorted(GRADIENT_DEFAULTS)}")
+    out = {**GRADIENT_DEFAULTS, **given}
+    if not float(out["step"]) > 0.0:
+        raise ValueError("multistart_gradient['step'] must be positive")
+    out["step"] = float(out["step"])
+    scheme = str(out["scheme"]).lower()
+    if scheme not in ("forward", "central", "scipy"):
+        raise ValueError("multistart_gradient['scheme'] must be 'forward', 'central' or 'scipy'")
+    out["scheme"] = scheme
+    par = out["parallel"]
+    if isinstance(par, str):
+        if par.lower() != "auto":
+            raise ValueError("multistart_gradient['parallel'] must be 'auto', True or False")
+        out["parallel"] = "auto"
+    else:
+        out["parallel"] = bool(par)
+    return out
+
+
+class FDObjective:
+    """``x -> (f, gradient)`` for scipy's ``jac=True``, with the points of one
+    gradient evaluated as ONE batch.
+
+    ``batch_eval(points) -> values`` is whatever evaluates a list of opt-space
+    points: the worker pool, or a loop in this process. Values that are not finite
+    or reach *failure_value* are failures.
+
+    A failed PERTURBED point is never scored as a cliff: it is retried on the
+    opposite side of x (one more batch, rare), and if that fails too the
+    component is 0. A step that would leave the bounds is taken the other way.
+    If f(x) itself fails the call returns *penalty* (or the failure value) and a
+    zero gradient -- the plateau semantics of the failure wall -- without using
+    the perturbed points.
+    """
+
+    def __init__(self, batch_eval, bounds, scales, *, step=1e-3, scheme="forward",
+                 failure_value=1e10, penalty=None):
+        if scheme not in ("forward", "central"):
+            raise ValueError(f"FDObjective scheme must be 'forward' or 'central', got {scheme!r}")
+        self.batch_eval = batch_eval
+        self.scales = list(scales)
+        self.k = len(self.scales)
+        bounds = list(bounds) if bounds else [(None, None)] * self.k
+        self.lb = np.array([-np.inf if b[0] is None else float(b[0]) for b in bounds])
+        self.ub = np.array([np.inf if b[1] is None else float(b[1]) for b in bounds])
+        self.step, self.scheme = float(step), scheme
+        self.failure_value, self.penalty = failure_value, penalty
+        self.last_f = float("nan")  # f at the most recent x whose value evaluated
+        self.n_calls = 0          # gradients taken
+        self.n_evals = 0          # objective evaluations, all of them
+        self.n_retried = 0        # perturbed points retried on the other side
+        self.n_zeroed = 0         # components set to 0 because no side evaluated
+
+    def points_per_call(self):
+        """Evaluations in one gradient's first batch."""
+        return 1 + self.k * (2 if self.scheme == "central" else 1)
+
+    def _ok(self, v):
+        return bool(np.isfinite(v)) and v < self.failure_value
+
+    def _h(self, x):
+        return np.array([self.step if sc == "log10" else self.step * max(abs(x[i]), 1.0)
+                         for i, sc in enumerate(self.scales)])
+
+    def __call__(self, x):
+        x = np.asarray(x, dtype=float)
+        h = self._h(x)
+        pts, plan = [x.copy()], []              # plan[i]: {sign: index into pts}
+        for i in range(self.k):
+            signs = (1, -1) if self.scheme == "central" else \
+                ((1,) if x[i] + h[i] <= self.ub[i] else (-1,))
+            slot = {}
+            for s in signs:
+                xi = x[i] + s * h[i]
+                if self.lb[i] <= xi <= self.ub[i]:
+                    p = x.copy()
+                    p[i] = xi
+                    pts.append(p)
+                    slot[s] = len(pts) - 1
+            plan.append(slot)
+        vals = [float(v) for v in self.batch_eval(pts)]
+        self.n_evals += len(pts)
+        self.n_calls += 1
+        f0 = vals[0]
+        if not self._ok(f0):
+            fail = self.penalty if self.penalty is not None else (
+                f0 if np.isfinite(f0) else self.failure_value)
+            return float(fail), np.zeros(self.k)
+        self.last_f = f0
+
+        # One-sided scheme: a perturbed point that failed is retried on the other side.
+        retry = []
+        for i, slot in enumerate(plan):
+            if self.scheme == "forward" and slot and not self._ok(vals[next(iter(slot.values()))]):
+                s_try = -next(iter(slot))
+                xi = x[i] + s_try * h[i]
+                if self.lb[i] <= xi <= self.ub[i]:
+                    p = x.copy()
+                    p[i] = xi
+                    retry.append((i, s_try, p))
+        if retry:
+            extra = [float(v) for v in self.batch_eval([p for _, _, p in retry])]
+            self.n_evals += len(retry)
+            self.n_retried += len(retry)
+            for (i, s_try, _), v in zip(retry, extra):
+                vals.append(v)
+                plan[i][s_try] = len(vals) - 1
+
+        g = np.zeros(self.k)
+        for i, slot in enumerate(plan):
+            good = {s: vals[j] for s, j in slot.items() if self._ok(vals[j])}
+            if self.scheme == "central" and len(good) == 2:
+                g[i] = (good[1] - good[-1]) / (2.0 * h[i])
+            elif good:
+                s = next(iter(good))                      # one-sided from whichever side worked
+                g[i] = s * (good[s] - f0) / h[i]
+            else:
+                self.n_zeroed += 1
+        return f0, g
+
+
 def json_safe(obj):
     """*obj* as plain JSON data: numpy scalars and arrays become Python ones, a
     non-finite float becomes None, tuples become lists. The result snapshot is
@@ -122,6 +282,35 @@ def prefer_pool(n_remaining, t_first, t_eval, n_workers, margin=1.5):
     serial = n_remaining * float(t_eval)
     startup = max(2.0 * float(t_first), POOL_STARTUP_FLOOR_S)
     pool = startup + math.ceil(n_remaining / n_workers) * float(t_eval)
+    return serial > float(margin) * pool, serial, pool
+
+
+def prefer_pool_gradient(n_iterations, n_points, t_first, t_eval, n_workers, *,
+                         pool_ready=False, margin=1.5):
+    """Whether the local fits' gradients are worth the worker pool.
+
+    Not the same question as :func:`prefer_pool`. A gradient's points are a batch
+    only ``n_points`` wide (k + 1 for forward differences) and the iterations that
+    follow are sequential, so the pool can win at most a factor of
+    ``n_points / ceil(n_points / n_workers)`` per iteration -- nothing at all for a
+    1-parameter fit, ~19x for 18 parameters on 24 workers.
+
+        serial   n_iterations * n_points * t_eval
+        pool     start-up + n_iterations * ceil(n_points / n_workers) * t_eval
+
+    *pool_ready*: the pool is already up (the fast pass built it), so there is no
+    start-up to pay. *n_iterations* is an upper bound (the optimizer's iteration
+    cap, summed over the fits still to run), which flatters the pool a little; the
+    margin covers that.
+
+    Returns ``(use_pool, serial_estimate_s, pool_estimate_s)``.
+    """
+    n_iterations, n_points, n_workers = int(n_iterations), int(n_points), int(n_workers)
+    if n_iterations <= 0 or n_workers <= 1 or n_points <= 1:
+        return False, 0.0, 0.0
+    serial = n_iterations * n_points * float(t_eval)
+    startup = 0.0 if pool_ready else max(2.0 * float(t_first), POOL_STARTUP_FLOOR_S)
+    pool = startup + n_iterations * math.ceil(n_points / n_workers) * float(t_eval)
     return serial > float(margin) * pool, serial, pool
 
 
