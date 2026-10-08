@@ -5166,7 +5166,8 @@ def _carry_resume_state(keep, res):
     allowance never advancing and its optimizer state never moving.
     """
     for field in ("interrupted", "converged", "nfev_total", "nit_total",
-                  "nm_simplex", "opt_message"):
+                  "nm_simplex", "opt_message", "stop_reason", "trace",
+                  "shadow_stops"):
         if field in res:
             keep[field] = res[field]
     return keep
@@ -5233,9 +5234,16 @@ def run_parallel_profile(
     max_extend=8, extend_growth=2.0, bracket_rtol=0.05,
     screen=None, open_decades=None, grid_spacing="linear",
     adaptive_pass1=False, max_step_decades=0.7, n_workers=None,
-    first_probe="max",
+    first_probe="max", shadow_stop_rules=True,
 ):
     """Profile likelihood for every parameter as parallel batches.
+
+    *shadow_stop_rules* attaches a watcher to every point (see
+    :mod:`pyantigen.engine.Stop_rules`): a sparse trace of the best value reached
+    and the evaluation at which each candidate stop rule would first have
+    fired, written into the record, and summarised at the end of the run. It
+    never stops anything. ``False`` turns it off; a dict overrides the rule
+    constants.
 
     Five passes:
       1. coarse grid, cold-started from the optimum, fully parallel;
@@ -5369,6 +5377,15 @@ def run_parallel_profile(
             # this one's travel into a rate. See _predicted_travel.
             "x_step": x_step,
         }
+        if shadow_stop_rules:
+            cfg = dict(shadow_stop_rules) if isinstance(shadow_stop_rules, dict) else {}
+            cfg.setdefault("threshold", float(threshold))
+            cfg["anchor"] = float(nll_at_optimum)
+            job["stop_rules"] = cfg
+            if resume_from is not None:
+                # One history across launches of the same point.
+                job["trace"] = resume_from.get("trace")
+                job["shadow_stops"] = resume_from.get("shadow_stops")
         # Every job carries an explicit starting simplex, from its neighbour
         # where there is one and from the Wald SE otherwise. Leaving it to
         # scipy is what the two constructors exist to avoid: its 5%-of-value
@@ -5765,6 +5782,21 @@ def run_parallel_profile(
         param_names, res_x, meta, anchor, where, nll_at_optimum)
     _print_profile_convergence(convergence)
     _print_profile_reach(convergence["reach"])
+    if shadow_stop_rules:
+        try:
+            from pyantigen.engine.Stop_rules import (
+                format_shadow_summary, shadow_summary)
+            cfg = (dict(shadow_stop_rules)
+                   if isinstance(shadow_stop_rules, dict) else {})
+            cfg.setdefault("threshold", float(threshold))
+            text = format_shadow_summary(shadow_summary(
+                [r for pts in completed.values() for r in pts.values()],
+                nll_at_optimum, cfg))
+            if text:
+                print(f"\n{text}", flush=True)
+        except Exception as exc:        # reporting must never end a run
+            print(f"[profile] shadow stop rules: summary failed ({exc})",
+                  flush=True)
     if convergence["incomplete"]:
         parts = []
         if still_unfinished:

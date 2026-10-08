@@ -353,6 +353,11 @@ def _profile_task(job):
     out.pop("frozen_sigmas", None)
     # A location on this machine's disk, meaningless in a stored record.
     out.pop("state_path", None)
+    # An input as well: the settings for the shadow stop rules. What they
+    # observed comes back as `trace`, `shadow_stops` and `stop_reason` below;
+    # `trace` and `shadow_stops` are also inputs when a point is resumed, and
+    # are overwritten with the continued history.
+    stop_rules = out.pop("stop_rules", None)
     out.update({"nll": None, "status": "ok", "n_evals": 0, "wall_s": 0.0,
                 "worker": os.getpid(), "converged": True, "nit": -1,
                 "nfev": -1, "opt_message": "", "interrupted": False})
@@ -384,6 +389,12 @@ def _profile_task(job):
         # because a point stopped before its first simplex is complete has no
         # sorted vertex to read it from.
         best = {"f": float("inf"), "x": x_start}
+        # The shadow stop rules' watcher (pyantigen.engine.Stop_rules). It only
+        # observes -- nothing it computes feeds back into the optimizer -- and
+        # is None unless the job asked for it. `base` is the point's evaluation
+        # count when this job began, so a resumed point numbers on from where
+        # it stopped.
+        shadow = {"mon": None, "base": 0}
 
         # Every profile point pins each floored block at its own sigma_used
         # from the fit rather than letting it re-concentrate (see
@@ -404,6 +415,12 @@ def _profile_task(job):
             if np.isfinite(v) and v < best["f"]:
                 best["f"] = float(v)
                 best["x"] = x_arr.copy()
+            if shadow["mon"] is not None:
+                try:
+                    shadow["mon"].update(shadow["base"] + eval_count["n"],
+                                         best["f"])
+                except Exception:       # a watcher must never fail a point
+                    shadow["mon"] = None
             return v
 
         def time_is_up():
@@ -419,7 +436,8 @@ def _profile_task(job):
             # is just the objective at the fixed value -- exact by definition.
             nll = raw_objective(x_start, x_fixed)
             x_opt = x_start
-            out.update({"converged": True, "nit": 0, "nfev": 1})
+            out.update({"converged": True, "nit": 0, "nfev": 1,
+                        "stop_reason": "exact"})
             eval_count["n"] = 1
         else:
             options, extra_kwargs = nuisance_options(
@@ -428,6 +446,19 @@ def _profile_task(job):
             max_it = options.get("maxiter", float("inf"))
             resumable = str(method).lower() == "nelder-mead" and can_run(
                 options, extra_kwargs)
+
+            def start_shadow(base):
+                if not stop_rules or stop_rules.get("anchor") is None:
+                    return
+                try:
+                    from pyantigen.engine.Stop_rules import PointMonitor
+                    shadow["mon"] = PointMonitor(
+                        stop_rules["anchor"], max_fev, x_start.size,
+                        cfg=stop_rules, trace=job.get("trace"),
+                        fired=job.get("shadow_stops"))
+                    shadow["base"] = int(base)
+                except Exception:       # a watcher must never fail a point
+                    shadow["mon"] = None
 
             res = None
             outcome = "done"
@@ -457,6 +488,7 @@ def _profile_task(job):
                     # run, and nothing to save either.
                     outcome = "capped"
                 else:
+                    start_shadow(nm_state["nfev"])
                     interval = float(job.get("state_interval_s",
                                              POINT_STATE_INTERVAL_S))
                     last_save = [0.0]
@@ -490,6 +522,8 @@ def _profile_task(job):
                 if nfev_used >= max_fev or nit_used >= max_it:
                     outcome = "capped"
                 else:
+                    start_shadow(nfev_used)
+
                     def guarded(x_nuisance, fixed_val):
                         v = nuisance_objective(x_nuisance, fixed_val)
                         if time_is_up():
@@ -549,6 +583,20 @@ def _profile_task(job):
                 out["nm_simplex"] = np.asarray(nm_state["sim"],
                                                dtype=float).tolist()
 
+            # Why this job's optimization ended, for reading a finished run:
+            # `converged` alone cannot tell a point that met its tolerance from
+            # one that spent its cap and happened to be at the minimum, and at
+            # a 1500 cap most points are the second kind.
+            if outcome == "interrupted":
+                out["stop_reason"] = "interrupted"
+            elif res is None or not np.isfinite(getattr(res, "fun", np.inf)):
+                out["stop_reason"] = "budget-spent"
+            elif outcome == "capped" or not getattr(res, "success", True):
+                out["stop_reason"] = ("maxiter" if getattr(res, "status", None) == 2
+                                      else "maxfev")
+            else:
+                out["stop_reason"] = "tolerance"
+
         if nm_state is not None:
             nfev_total, nit_total = nm_state["nfev"], nm_state["nit"]
         else:
@@ -565,6 +613,11 @@ def _profile_task(job):
             "nit_total": nit_total,
             "status": "ok" if np.isfinite(nll) and nll < FAILURE_VALUE else "sentinel",
         })
+        if shadow["mon"] is not None:
+            try:
+                out.update(shadow["mon"].finish(nfev_total, best["f"]))
+            except Exception:
+                pass
     except Exception as exc:
         out.update({"status": f"error: {type(exc).__name__}: {exc}",
                     "nll": FAILURE_VALUE, "interrupted": False})

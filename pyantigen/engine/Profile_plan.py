@@ -21,9 +21,14 @@ What it reads, per side of each parameter, in the optimizer's own space:
 * a side whose points are all below the threshold is extended outward by the
   curve-fitted step (``_extension_growth``), capped at ``max_step_decades`` per
   step so a flat curve cannot launch a jump of several decades;
-* a side that has crossed only on a point that did not converge has that point
-  re-run warm from its inner neighbour, because an unconverged dNLL is an upper
-  bound and a crossing read from one is not a crossing;
+* a side that has crossed only on points that did not converge is narrowed, not
+  repeated: an unconverged dNLL is an upper bound, so a crossing read from one
+  is not a crossing, and re-running the same far point from the same start
+  reproduces it exactly. The probe goes between the innermost converged point
+  below the threshold and the innermost unconverged one above it (sqrt(dNLL)
+  interpolation), warm from the former, and waits while anything is still
+  running inside that bracket. Only once the bracket is tight is the outer
+  point itself re-run;
 * a bracketed side is narrowed by sqrt(dNLL) interpolation until the bracket is
   tight, then filled in toward ``n_grid`` points so the curve has a shape.
 
@@ -300,21 +305,57 @@ def plan_next_points(n_free, *, param_names, completed, in_flight, res_x,
                 continue
 
             if above_t:
-                # Crossed only on points that did not converge. Re-run the
-                # innermost of them warm from its inner neighbour.
+                # Crossed only on points that did not converge. Each is an
+                # upper bound, so the crossing lies somewhere inside the
+                # bracket (nearest converged-below point, innermost of them).
                 tgt = above_t[0]
-                key = (name, ProfileCheckpointKey(tgt["x_fixed"]))
-                d_t = _ext_distance(p_opt, tgt["x_fixed"], is_log)
+                x_t = tgt["x_fixed"]
+                d_t = _ext_distance(p_opt, x_t, is_log)
                 inner_c = [r for r in below
                            if _ext_distance(p_opt, r["x_fixed"], is_log) < d_t]
-                if key not in attempted and not any(
-                        _near(tgt["x_fixed"], f, abs(tgt["x_fixed"] - p_opt))
-                        for f in fl):
-                    cands.append({"i": i, "name": name,
-                                  "x": float(tgt["x_fixed"]),
-                                  "seed": inner_c[-1] if inner_c else None,
-                                  "phase": 3, "kind": "rerun", "tier": 1,
-                                  "sign": sign, "attempt_key": key})
+                inner = inner_c[-1] if inner_c else None
+                x_in = inner["x_fixed"] if inner else p_opt
+                # Anything still running between the optimum and the failed
+                # point is about to become a better inner neighbour, or to
+                # replace the point we would plan. Planning now would seed from
+                # whatever has landed so far -- often nothing -- and a cold
+                # restart of a deterministic optimizer from the same start
+                # reproduces the failed point to the last digit.
+                if any(_ext_distance(p_opt, f, is_log) < d_t for f in fl):
+                    continue
+                tight = _bracket_is_tight(x_in, x_t, p_opt, is_log,
+                                          bracket_rtol)
+                if not tight:
+                    # Narrow the bracket toward the threshold instead of
+                    # repeating the far point: a probe between the inner
+                    # neighbour and the failed point is a short, warm
+                    # continuation and so can converge where the long one
+                    # could not. dnll at the failed point is too high, which
+                    # puts the probe on the near side of the crossing; the
+                    # next round narrows from there.
+                    d_in_nll = dn(inner) if inner else 0.0
+                    r_in, r_out = np.sqrt(max(d_in_nll, 0.0)), np.sqrt(dn(tgt))
+                    frac = ((np.sqrt(thr) - r_in) / (r_out - r_in)
+                            if r_out > r_in + 1e-12 else 0.5)
+                    frac = float(min(max(frac, 0.05), 0.95))
+                    x = x_in + frac * (x_t - x_in)
+                    if free(x, abs(x_t - p_opt)) and \
+                            ProfileCheckpointKey(x) not in completed.get(name, {}):
+                        cands.append({"i": i, "name": name, "x": float(x),
+                                      "seed": inner, "phase": 1,
+                                      "kind": "narrow", "tier": 1,
+                                      "sign": sign})
+                    continue
+                # The bracket is tight and the outer end still has not
+                # converged: give it one more go, warm from the inner point.
+                # With no inner point and a cold original this would be the
+                # same computation again, so it is not planned.
+                key = (name, ProfileCheckpointKey(x_t))
+                if key not in attempted and (
+                        inner is not None or tgt.get("warm_seeded")):
+                    cands.append({"i": i, "name": name, "x": float(x_t),
+                                  "seed": inner, "phase": 3, "kind": "rerun",
+                                  "tier": 1, "sign": sign, "attempt_key": key})
                 continue
 
             # ── below the threshold everywhere so far: step outward ────────

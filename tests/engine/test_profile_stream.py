@@ -150,17 +150,57 @@ check("by no more than max_step_decades",
       up[0]["x"] - 0.4 <= 0.7 + 1e-9, up[0]["x"])
 check("warm-started from its outer point", up[0]["seed"]["x_fixed"] == 0.4)
 
-print("crossed only on an unconverged point: re-run it once, warm")
+print("crossed only on an unconverged point: narrow the bracket, warm")
 pts = {"a": [rec(0.3, 0.8), rec(0.9, 4.0, converged=False)]}
+out = plan(completed=pts, n_free=4)
+nr = [c for c in out if c["kind"] == "narrow" and c["sign"] > 0]
+check("a narrowing probe is planned, not a repeat of the far point",
+      len(nr) == 1 and not any(c["kind"] == "rerun" and c["sign"] > 0
+                               for c in out), [(c["kind"], c["x"]) for c in out])
+check("it lies strictly inside the bracket", nr and 0.3 < nr[0]["x"] < 0.9, nr)
+check("seeded from the inner point", nr and nr[0]["seed"]["x_fixed"] == 0.3)
+check("and it is not a duplicate of an existing point",
+      nr and all(abs(nr[0]["x"] - r["x_fixed"]) > 1e-9 for r in pts["a"]))
+
+print("an unconverged outer point is narrowed from the optimum if nothing is inner")
+pts = {"a": [rec(0.9, 4.0, converged=False)]}
+out = plan(completed=pts, n_free=4)
+nr = [c for c in out if c["kind"] == "narrow" and c["sign"] > 0]
+check("a cold narrowing probe lies between the optimum and the failed point",
+      len(nr) == 1 and 0.0 < nr[0]["x"] < 0.9 and nr[0]["seed"] is None, nr)
+
+print("the Hyak case: a far cold point failed while the near rung still runs")
+# k_plus upper: 0.035 decades unconverged at dNLL 7.6, the 0.0012 rung in flight.
+pts = {"a": [rec(0.035, 7.6, converged=False), rec(1.0, 830.0, converged=False)]}
+fl = [{"param_idx": 0, "x_fixed": 0.0012}]
+out = plan(completed=pts, in_flight=fl, n_free=4)
+check("nothing is planned on the upper side while the inner rung is running",
+      not any(c["sign"] > 0 for c in out), [(c["kind"], c["x"]) for c in out])
+pts["a"].append(rec(0.0012, 0.007))
+out = plan(completed=pts, n_free=4)
+up = [c for c in out if c["sign"] > 0]
+check("once it lands, the probe goes between it and the failed point, seeded from it",
+      len(up) == 1 and up[0]["kind"] == "narrow"
+      and 0.0012 < up[0]["x"] < 0.035 and up[0]["seed"]["x_fixed"] == 0.0012,
+      [(c["kind"], c["x"]) for c in up])
+check("never a re-run of an unseeded point",
+      not any(c["kind"] == "rerun" and c["seed"] is None for c in out))
+
+print("a tight bracket whose outer end is unconverged: re-run it once, warm")
+pts = {"a": [rec(0.90, 1.5), rec(0.92, 2.5, converged=False)]}
 att = set()
 out = plan(completed=pts, attempted=att, n_free=4)
 rr = [c for c in out if c["kind"] == "rerun" and c["sign"] > 0]
-check("a re-run is planned", len(rr) == 1)
-check("seeded from the inner point", rr and rr[0]["seed"]["x_fixed"] == 0.3)
+check("a re-run is planned", len(rr) == 1, [(c["kind"], c["x"]) for c in out])
+check("seeded from the inner point", rr and rr[0]["seed"]["x_fixed"] == 0.90)
 att.add(rr[0]["attempt_key"])
 out = plan(completed=pts, attempted=att, n_free=4)
 check("and not planned twice",
       not any(c["kind"] == "rerun" and c["sign"] > 0 for c in out))
+out = plan(completed={"a": [rec(1e-4, 2.5, converged=False)]}, n_free=4)
+check("a cold original with no inner neighbour is not repeated from the same start",
+      not any(c["kind"] == "rerun" for c in out),
+      [(c["kind"], c["x"]) for c in out])
 
 print("bracketed: narrow it, then fill, then stop")
 wide = {"a": [rec(0.3, 0.8), rec(1.2, 6.0)]}
@@ -351,6 +391,56 @@ for n in ("p0", "p1", "p2"):
               and any(r["nll"] <= THR for r in side))
 check("the first wave was slice ladder probes",
       any("slice ladder" in r["pass_label"] for n in comp for r in comp[n]))
+
+print("far cold starts that do not converge: narrowed, never repeated from the same start")
+
+
+class FarColdFailsPool(SimPool):
+    """A cold start more than FAR from the optimum stalls high and unconverged,
+    as the SILK points a decade out did; a warm start (seeded from a neighbour)
+    or a near one converges. Deterministic, like the real optimizer."""
+
+    FAR = 0.3
+
+    def run(self, job):
+        out = super().run(job)
+        cold = not job.get("warm_seeded")
+        if cold and abs(job["x_fixed"]) > self.FAR:
+            out["nll"] = out["nll"] + 50.0
+            out["converged"] = False
+            out["nfev_total"] = 2000
+        return out
+
+
+pool = FarColdFailsPool(6)
+comp = {}
+starts = {}
+with tempfile.TemporaryDirectory() as root:
+    ck = ProfileCheckpoint(root, "f", "m", "s", enabled=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        run_parallel_profile(
+            pool.batch, np.zeros(K), 0.0, [f"p{i}" for i in range(K)],
+            [(-50.0, 50.0)] * K, ["lin"] * K, method="Nelder-Mead",
+            wald_se=None, n_grid=3, n_refine=2, bracket_rtol=0.05,
+            checkpoint=ck, adaptive_pass1=True, n_workers=6, screen=scr_e,
+            first_probe="slice_ladder", open_decades=1.0)
+    ck.close()
+    for n in ("p0", "p1", "p2"):
+        with open(ck.path_for(n), encoding="utf-8") as fh:
+            comp[n] = [json.loads(line) for line in fh if line.strip()]
+for n in ("p0", "p1", "p2"):
+    for sign, nm in ((-1, "lower"), (1, "upper")):
+        side = [r for r in comp[n] if r["x_fixed"] * sign > 0]
+        conv_above = [r for r in side if r["nll"] > THR and r["converged"]]
+        conv_below = [r for r in side if r["nll"] <= THR and r["converged"]]
+        check(f"{n} {nm}: a converged point on each side of the threshold",
+              bool(conv_above) and bool(conv_below),
+              (len(conv_above), len(conv_below)))
+        check(f"{n} {nm}: narrowing probes were used",
+              any(r["pass_label"].endswith("narrow") for r in side))
+dups = [(n, r["x_fixed"]) for n in comp for r in comp[n]
+        if r["pass_label"].endswith("rerun") and not r.get("warm_seeded")]
+check("no unseeded re-run of a point", not dups, dups)
 
 print("the grid pass still works when the stream is off")
 pool = SimPool(6)
