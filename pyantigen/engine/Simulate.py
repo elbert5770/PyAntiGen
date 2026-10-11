@@ -483,13 +483,25 @@ def effective_tolerances(solver_settings):
     return atol, rtol
 
 
-def _simulate_search(r, start, end, points, observed_species):
+def _run(r, start, end, points, times, observed_species):
+    """One ``r.simulate`` call: a uniform grid, or exactly the *times* asked for.
+
+    *times* (ascending, first entry the start) is what an event-free segment
+    needs: output on the caller's grid inside an interval that was cut at a
+    switch. It requires fixed-step output, which the segment runner sets.
+    """
+    if times is not None:
+        return r.simulate(times=times, selections=observed_species)
+    return r.simulate(start, end, points, observed_species)
+
+
+def _simulate_search(r, start, end, points, observed_species, times=None):
     """One capped attempt. Raises on failure; leaves the step allowance as found."""
     original = r.integrator.maximum_num_steps
     # Never raise a model's own, lower limit: the cap is a ceiling.
     r.integrator.maximum_num_steps = int(min(original, _SEARCH_MAX_STEPS))
     try:
-        res = r.simulate(start, end, points, observed_species)
+        res = _run(r, start, end, points, times, observed_species)
     finally:
         r.integrator.maximum_num_steps = original
     return res, {"start": start, "end": end, "attempts": 1, "subdivided": False,
@@ -509,13 +521,22 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
         points = solver_settings.get("eval_points")
     variable_step_size = solver_settings.get("variable_step_size", True)
 
+    # An explicit output grid (see _run). It fixes start, end and the number of
+    # points, so the three values above are not needed in that case.
+    times = solver_settings.get("times")
+    if times is not None:
+        times = [float(t) for t in times]
+        if len(times) < 2:
+            raise ValueError("'times' needs at least a start and an end")
+        start, end, points = times[0], times[-1], len(times)
+
     # Ensure proper types
     start = float(start)
     end = float(end)
     points = int(points)
 
     if _SEARCH_MAX_STEPS is not None:
-        return _simulate_search(r, start, end, points, observed_species)
+        return _simulate_search(r, start, end, points, observed_species, times=times)
 
     # Save original state before any simulation is attempted.
     # This is critical because if the fast path fails, it leaves the model in a
@@ -524,7 +545,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
 
     # Fast path: try once with whatever settings the model already has.
     try:
-        res = r.simulate(start, end, points, observed_species)
+        res = _run(r, start, end, points, times, observed_species)
         return res, {
             "start": start, "end": end,
             "variable_step_size": variable_step_size,
@@ -604,7 +625,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
         try:
             print(f"      [safe_simulate]{label_prefix} (Depth {depth}) Attempt {attempt}/{max_attempts}: Simulating [{start:.4g} to {end:.4g}] "
                   f"points={points} with abs_tol={cur_abs_tol:.2e}, rel_tol={cur_rel_tol:.2e}, max_steps={cur_max_steps}")
-            res = r.simulate(start, end, points, observed_species)
+            res = _run(r, start, end, points, times, observed_species)
 
             # Restore original integrator settings on success
             r.integrator.absolute_tolerance = orig_abs_tol
@@ -641,6 +662,13 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
         mid = (start + end) / 2.0
         p1 = max(2, points // 2)
         p2 = max(2, points - p1)
+        if times is not None:
+            # Split the grid itself: the halves share one point, and a two-point
+            # interval gets a midpoint so there is something to split at.
+            if len(times) == 2:
+                times = [times[0], mid, times[1]]
+            cut = len(times) // 2
+            mid = times[cut]
         print(f"      [safe_simulate]{label_prefix} (Depth {depth}) ALL solver adjustment attempts failed. Subdividing [{start:.4g}, {end:.4g}] "
               f"into [{start:.4g}, {mid:.4g}] (points={p1}) and [{mid:.4g}, {end:.4g}] (points={p2})")
         
@@ -654,6 +682,8 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
             "n_points": p1,
             "variable_step_size": variable_step_size
         }
+        if times is not None:
+            block1["times"] = times[:cut + 1]
         res1, meta1 = safe_simulate(r, block1, observed_species, depth=depth+1, label=label)
         
         # Simulate second half starting from current state (which is at mid)
@@ -663,6 +693,8 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
             "n_points": p2,
             "variable_step_size": variable_step_size
         }
+        if times is not None:
+            block2["times"] = times[cut:]
         res2, meta2 = safe_simulate(r, block2, observed_species, depth=depth+1, label=label)
         
         # Stack results
@@ -782,7 +814,13 @@ def simulate(r, solver_settings, observed_species, label=None):
         _model_cache.put(r, "_available_symbols", _available)
     observed_species = [s for s in observed_species if s in _available]
 
-    all_results = None
+    # An InputSchedule replaces the model's events: the runner applies each step
+    # at its switch time and integrates the stretches between them.
+    runner = None
+    schedule = solver_settings.get("schedule")
+    if schedule is not None:
+        from pyantigen.engine.Segmented import SegmentRunner
+        runner = SegmentRunner(r, schedule)
 
     # Find index of the last tracked block so we can skip trailing untracked ones.
     last_tracked_idx = -1
@@ -790,6 +828,16 @@ def simulate(r, solver_settings, observed_species, label=None):
         if blk.get('tracked', True):
             last_tracked_idx = i
 
+    try:
+        return _run_blocks(r, block_list, last_tracked_idx, observed_species,
+                           label, runner)
+    finally:
+        if runner is not None:
+            runner.close()
+
+
+def _run_blocks(r, block_list, last_tracked_idx, observed_species, label, runner):
+    all_results = None
     for i, block in enumerate(block_list):
         if i > last_tracked_idx:
             break
@@ -805,7 +853,10 @@ def simulate(r, solver_settings, observed_species, label=None):
         floor_tolerance_vector(r)
 
         try:
-            res, _ = safe_simulate(r, block, observed_species, label=label)
+            if runner is not None:
+                res = runner.run_block(block, observed_species, label=label)
+            else:
+                res, _ = safe_simulate(r, block, observed_species, label=label)
         except Exception as exc:
             raise RuntimeError(
                 f"Integration failed in block {i} "

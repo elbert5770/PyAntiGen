@@ -128,6 +128,15 @@ class PreequilCache:
         if block is None:
             return solver_settings
 
+        # The cached block is integrated on its own, without the schedule's
+        # steps (see Segmented). A schedule that switches inside it cannot be
+        # replayed from a cached end state.
+        schedule = solver_settings.get("schedule")
+        if schedule is not None:
+            from pyantigen.engine.Segmented import switches_before
+            if switches_before(r, schedule, float(block["end"])):
+                return solver_settings
+
         configure_integrator(r, solver_settings)
         key = _digest(save_model_state(r), block, solver_settings)
 

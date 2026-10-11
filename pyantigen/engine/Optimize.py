@@ -5483,6 +5483,14 @@ def run_parallel_profile(
         key = ProfileCheckpointKey(res["x_fixed"])
         prev = completed.get(name, {}).get(key)
         keep = res
+        # A planner restart (see Profile_plan) that ran to its end is counted on
+        # the point, so a relaunch does not restart it again: the planner reads
+        # the count to decide whether a value past the threshold can be trusted.
+        finished_rerun = (str(res.get("pass_label", "")).endswith("rerun")
+                          and res.get("status") == "ok"
+                          and not res.get("interrupted"))
+        if prev is not None and finished_rerun:
+            res["reruns_tried"] = int(prev.get("reruns_tried") or 0) + 1
         # Two evaluations at the same fixed value are both upper bounds on the
         # profile, so the lower one is the better estimate. Nothing in passes 1,
         # 2 or 4 re-visits a point, but keeping the rule here means the store
@@ -5494,8 +5502,17 @@ def run_parallel_profile(
             # Dropping it would resume the point forever against a budget that
             # never moves.
             if not (prev.get("interrupted") and res.get("status") == "ok"):
-                return
-            keep = _carry_resume_state(dict(prev), res)
+                if not finished_rerun:
+                    return
+                # A restart that did not lower the point: the value stands, but
+                # the point has had its restart. Written as a tie, which the
+                # store resolves to the later record.
+                keep = dict(prev)
+                keep["reruns_tried"] = res["reruns_tried"]
+            else:
+                keep = _carry_resume_state(dict(prev), res)
+                if finished_rerun:
+                    keep["reruns_tried"] = res["reruns_tried"]
         if checkpoint is not None and keep.get("status") == "ok":
             checkpoint.append(keep)
         completed.setdefault(name, {})[key] = keep
@@ -5972,6 +5989,8 @@ def _run_warm_passes(nll_batch_profile, completed, param_names, res_x, meta,
                 # probe) and is counted by the refinement budget, so it must
                 # survive a warm re-run regardless of which value won.
                 keep["phase"] = prev.get("phase", res.get("phase", 1))
+                if prev.get("reruns_tried"):
+                    keep["reruns_tried"] = prev["reruns_tried"]
             keep["warm_refined"] = int(
                 (prev or {}).get("warm_refined", 0)) + 1
             # How much re-running this point warm actually lowered it. This is

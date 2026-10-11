@@ -21,16 +21,22 @@ What it reads, per side of each parameter, in the optimizer's own space:
 * a side whose points are all below the threshold is extended outward by the
   curve-fitted step (``_extension_growth``), capped at ``max_step_decades`` per
   step so a flat curve cannot launch a jump of several decades;
-* a side that has crossed only on points that did not converge is narrowed, not
-  repeated: an unconverged dNLL is an upper bound, so a crossing read from one
-  is not a crossing, and re-running the same far point from the same start
-  reproduces it exactly. The probe goes between the innermost converged point
-  below the threshold and the innermost unconverged one above it (sqrt(dNLL)
-  interpolation), warm from the former, and waits while anything is still
-  running inside that bracket. Only once the bracket is tight is the outer
-  point itself re-run;
+* the innermost point past the threshold is the bracket's outer end only if it
+  is firm: it converged from a warm start, or it has been restarted once. Any
+  other value is an upper bound with an unknown excess -- a warm restart from a
+  nearer neighbour only lowers it, and the crossing may then lie beyond it -- so
+  it is restarted at once (the nearest two such points), alongside the probes
+  that narrow the bracket, not after them. The optimizer is deterministic, so a
+  restart is planned only from a start the point did not have: a nearer inner
+  neighbour, or its own end state if it did not converge. The probe goes between
+  the innermost point at or below the threshold and the outer end (sqrt(dNLL)
+  interpolation), warm from the former;
 * a bracketed side is narrowed by sqrt(dNLL) interpolation until the bracket is
-  tight, then filled in toward ``n_grid`` points so the curve has a shape.
+  tight, then filled in toward ``n_grid`` points so the curve has a shape;
+* workers left over once every side has its one probe are given extra probes
+  inside open brackets (see ``_SPEC_STEP``) and extra rungs beyond the next one
+  on a side still below the threshold (``_SPEC_MAX_EXT``), so a side advancing
+  one point per round does not hold the pool at a handful of cores.
 
 Below-threshold points count whether or not they converged: an upper bound at or
 under the threshold is still under it.
@@ -55,9 +61,72 @@ FIRST_PROBE_MODES = ("max", "slice", "slice_ladder")
 # termination independent of them.
 _SIDE_CEILING_EXTRA = 4
 
+# Extra probes inside an open bracket, for workers that would otherwise idle. A
+# bracket is narrowed by one probe per round, and a round is hours, so a side
+# with one open bracket holds a single worker for as long as it takes; the rest
+# of the pool drains as the other sides finish. The extras are spaced
+# ``_SPEC_STEP`` of the bracket apart around the interpolated guess, nearest the
+# guess first, and are only ever planned after every side has had its own
+# primary probe (tier ``3 + j`` for the j-th extra), so they use cores that
+# nothing else wanted.
+_SPEC_STEP = 0.15
+_SPEC_MAX = 4
+# The same for a side still below the threshold: rungs beyond the next one.
+_SPEC_MAX_EXT = 3
+# Provisional points past the threshold restarted at once, beyond the nearest.
+_SPEC_RERUN = 1
+
+
+def _bracket_fracs(frac, n_extra=_SPEC_MAX, step=_SPEC_STEP):
+    """Fractions of a bracket to probe: the guess, then alternately either side."""
+    out = [float(frac)]
+    for k in range(1, n_extra + 1):
+        off = step * ((k + 1) // 2) * (1 if k % 2 else -1)
+        f = float(min(max(frac + off, 0.05), 0.95))
+        if all(abs(f - g) > 1e-9 for g in out):
+            out.append(f)
+    return out
+
 
 def _converged(rec):
     return bool(rec.get("converged")) and not rec.get("interrupted")
+
+
+def _rerun_count(rec):
+    """How many warm restarts this point has had (the planner's, not the grid's)."""
+    n = rec.get("reruns_tried") or 0
+    if str(rec.get("pass_label", "")).endswith("rerun"):
+        n = max(int(n), 1)
+    return int(n)
+
+
+def _is_firm(rec):
+    """Whether a point past the threshold can be trusted as a bracket end.
+
+    A value is firm once it has been through a warm start: it converged from a
+    neighbour's solution, or it has been restarted once and is accepted as it
+    stands. A cold or unconverged value is only an upper bound with an unknown
+    excess, so the crossing is not read from it until it has been restarted.
+    """
+    return _rerun_count(rec) >= 1 or (_converged(rec) and bool(rec.get("warm_seeded")))
+
+
+def _rerun_seed(rec, inner):
+    """Where to restart *rec* from, or None if that would repeat it exactly.
+
+    The optimizer is deterministic, so a restart from the start the point
+    already had reproduces it to the last digit. From a nearer inner neighbour
+    it is new information; failing that, an unconverged point is carried on from
+    where it stopped.
+    """
+    if inner is not None:
+        xs, nx = rec.get("x_start"), inner.get("nuisance_x")
+        if (xs is None or nx is None or len(xs) != len(nx)
+                or not np.allclose(xs, nx, rtol=0.0, atol=1e-9)):
+            return inner
+    if not _converged(rec) and rec.get("nuisance_x"):
+        return rec
+    return None
 
 
 def _near(a, b, d_ref, rel=0.02):
@@ -148,7 +217,8 @@ def plan_next_points(n_free, *, param_names, completed, in_flight, res_x,
     "tier"}``: the parameter index, the fixed value in optimizer space, the
     record to warm-start from (or None for a cold start from the optimum), the
     phase number the job should carry, why it was chosen, and its priority
-    (0 first probe, 1 stepping or re-running, 2 filling a bracket, 3 spare).
+    (0 first probe, 1 stepping or re-running, 2 filling a bracket, 3 spare
+    ladder rung, 4 and up extra probes inside an open bracket).
 
     *in_flight* is the list of job dicts currently running. Their positions
     count as occupied: nothing is planned on top of one, and a side with a first
@@ -194,6 +264,26 @@ def plan_next_points(n_free, *, param_names, completed, in_flight, res_x,
 
             def free(x, d_ref):
                 return not any(_near(x, o, d_ref) for o in occupied)
+
+            def probe_bracket(x_in, x_out, frac, seed, kind, d_ref):
+                """The guess inside (x_in, x_out), then spare-core extras.
+
+                A guess that lands on a point already measured means the
+                crossing is located by that point, so nothing is added: the
+                extras are for a side still being narrowed, not a licence to
+                keep probing one that has an answer.
+                """
+                if any(_near(x_in + frac * (x_out - x_in),
+                             float(r["x_fixed"]), d_ref) for r in pts):
+                    return
+                for j, fr in enumerate(_bracket_fracs(frac)):
+                    x = x_in + fr * (x_out - x_in)
+                    if free(x, d_ref) and \
+                            ProfileCheckpointKey(x) not in completed.get(name, {}):
+                        cands.append({"i": i, "name": name, "x": float(x),
+                                      "seed": seed, "phase": 1, "kind": kind,
+                                      "tier": 1 if j == 0 else 3 + j,
+                                      "sign": sign})
 
             ceiling = n_grid + max_extend + _SIDE_CEILING_EXTRA
             if len(pts) + len(fl) >= ceiling:
@@ -249,46 +339,79 @@ def plan_next_points(n_free, *, param_names, completed, in_flight, res_x,
                 continue
 
             below = [r for r in pts if dn(r) <= thr]
-            above_c = [r for r in pts if dn(r) > thr and _converged(r)]
-            above_t = [r for r in pts if dn(r) > thr and not _converged(r)]
+            above = [r for r in pts if dn(r) > thr]
             outer_pt = pts[-1]
 
-            if above_c:
-                out = above_c[0]
-                d_out = _ext_distance(p_opt, out["x_fixed"], is_log)
-                inner_c = [r for r in below
-                           if _ext_distance(p_opt, r["x_fixed"], is_log) < d_out]
-                inner = inner_c[-1] if inner_c else None
+            if above:
+                # The innermost point past the threshold is the outer end of the
+                # bracket -- but only if it is a real measurement. A cold or
+                # unconverged value is an upper bound with an unknown excess
+                # (observed: 0.05, 0.3 and 3.8 nats), and a warm restart from a
+                # nearer neighbour only ever lowers it, so the crossing may lie
+                # beyond it and every probe planned inside the bracket would
+                # read "below". Such a point is provisional: it is restarted
+                # warm at once, alongside the probes, instead of last.
+                tgt = above[0]
+                x_t = tgt["x_fixed"]
+                d_t = _ext_distance(p_opt, x_t, is_log)
+
+                def inner_of(t):
+                    d_k = _ext_distance(p_opt, t["x_fixed"], is_log)
+                    c = [r for r in below
+                         if _ext_distance(p_opt, r["x_fixed"], is_log) < d_k]
+                    return c[-1] if c else None
+
+                inner = inner_of(tgt)
                 x_in = inner["x_fixed"] if inner else p_opt
-                d_in_nll = dn(inner) if inner else 0.0
-                tight = _bracket_is_tight(x_in, out["x_fixed"], p_opt, is_log,
-                                          bracket_rtol)
+
+                # Only points before the first firm one can move the crossing;
+                # anything past a firm end is in the tail.
+                prov = []
+                for r in above:
+                    if _is_firm(r):
+                        break
+                    prov.append(r)
+                prov = prov[:1 + _SPEC_RERUN]
+                for rank, t in enumerate(prov):
+                    key = (name, ProfileCheckpointKey(t["x_fixed"]))
+                    d_r = _ext_distance(p_opt, t["x_fixed"], is_log)
+                    if key in attempted or _rerun_count(t) >= 1:
+                        continue
+                    if any(_near(f, t["x_fixed"], d_r) for f in fl):
+                        continue
+                    seed = _rerun_seed(t, inner_of(t))
+                    if seed is None:
+                        continue
+                    cands.append({"i": i, "name": name, "x": float(t["x_fixed"]),
+                                  "seed": seed, "phase": 3, "kind": "rerun",
+                                  "tier": 1 if rank == 0 else 3 + rank,
+                                  "sign": sign, "attempt_key": key})
+
+                tight = _bracket_is_tight(x_in, x_t, p_opt, is_log, bracket_rtol)
                 if not tight:
-                    r_in, r_out = np.sqrt(max(d_in_nll, 0.0)), np.sqrt(dn(out))
+                    d_in_nll = dn(inner) if inner else 0.0
+                    r_in, r_out = np.sqrt(max(d_in_nll, 0.0)), np.sqrt(dn(tgt))
                     frac = ((np.sqrt(thr) - r_in) / (r_out - r_in)
                             if r_out > r_in + 1e-12 else 0.5)
                     frac = float(min(max(frac, 0.05), 0.95))
-                    x = x_in + frac * (out["x_fixed"] - x_in)
-                    if free(x, abs(out["x_fixed"] - p_opt)) and \
-                            ProfileCheckpointKey(x) not in completed.get(name, {}):
-                        cands.append({"i": i, "name": name, "x": float(x),
-                                      "seed": inner, "phase": 1,
-                                      "kind": "bracket", "tier": 1,
-                                      "sign": sign})
+                    probe_bracket(x_in, x_t, frac, inner,
+                                  "bracket" if _is_firm(tgt) else "narrow",
+                                  abs(x_t - p_opt))
                     continue
-                if len(pts) + len(fl) < n_grid:
+                if _is_firm(tgt) and len(pts) + len(fl) < n_grid:
                     # Fill the curve's shape: halve the widest relative gap
                     # between the optimum and the crossing.
                     ds = sorted({0.0} | {
                         _ext_distance(p_opt, r["x_fixed"], is_log)
                         for r in pts if _ext_distance(
-                            p_opt, r["x_fixed"], is_log) <= d_out})
+                            p_opt, r["x_fixed"], is_log) <= d_t})
                     gaps = []
-                    for a, b in zip(ds[:-1], ds[1:]):
-                        gaps.append((b / a if a > 0 else float("inf"), a, b))
+                    for g_a, g_b in zip(ds[:-1], ds[1:]):
+                        gaps.append((g_b / g_a if g_a > 0 else float("inf"),
+                                     g_a, g_b))
                     if gaps:
-                        _, a, b = max(gaps, key=lambda g: g[0])
-                        d_new = b / 2.0 if a == 0 else float(np.sqrt(a * b))
+                        _, g_a, g_b = max(gaps, key=lambda g: g[0])
+                        d_new = g_b / 2.0 if g_a == 0 else float(np.sqrt(g_a * g_b))
                         x = (p_opt + sign * d_new if (is_log or p_opt <= 0)
                              else p_opt * 10.0 ** (sign * d_new))
                         ref = min((r for r in pts
@@ -297,71 +420,27 @@ def plan_next_points(n_free, *, param_names, completed, in_flight, res_x,
                                   key=lambda r: -_ext_distance(
                                       p_opt, r["x_fixed"], is_log),
                                   default=None)
-                        if free(x, abs(out["x_fixed"] - p_opt)):
+                        if free(x, abs(x_t - p_opt)):
                             cands.append({"i": i, "name": name, "x": float(x),
                                           "seed": ref, "phase": 1,
                                           "kind": "fill", "tier": 2,
                                           "sign": sign})
                 continue
 
-            if above_t:
-                # Crossed only on points that did not converge. Each is an
-                # upper bound, so the crossing lies somewhere inside the
-                # bracket (nearest converged-below point, innermost of them).
-                tgt = above_t[0]
-                x_t = tgt["x_fixed"]
-                d_t = _ext_distance(p_opt, x_t, is_log)
-                inner_c = [r for r in below
-                           if _ext_distance(p_opt, r["x_fixed"], is_log) < d_t]
-                inner = inner_c[-1] if inner_c else None
-                x_in = inner["x_fixed"] if inner else p_opt
-                # Anything still running between the optimum and the failed
-                # point is about to become a better inner neighbour, or to
-                # replace the point we would plan. Planning now would seed from
-                # whatever has landed so far -- often nothing -- and a cold
-                # restart of a deterministic optimizer from the same start
-                # reproduces the failed point to the last digit.
-                if any(_ext_distance(p_opt, f, is_log) < d_t for f in fl):
-                    continue
-                tight = _bracket_is_tight(x_in, x_t, p_opt, is_log,
-                                          bracket_rtol)
-                if not tight:
-                    # Narrow the bracket toward the threshold instead of
-                    # repeating the far point: a probe between the inner
-                    # neighbour and the failed point is a short, warm
-                    # continuation and so can converge where the long one
-                    # could not. dnll at the failed point is too high, which
-                    # puts the probe on the near side of the crossing; the
-                    # next round narrows from there.
-                    d_in_nll = dn(inner) if inner else 0.0
-                    r_in, r_out = np.sqrt(max(d_in_nll, 0.0)), np.sqrt(dn(tgt))
-                    frac = ((np.sqrt(thr) - r_in) / (r_out - r_in)
-                            if r_out > r_in + 1e-12 else 0.5)
-                    frac = float(min(max(frac, 0.05), 0.95))
-                    x = x_in + frac * (x_t - x_in)
-                    if free(x, abs(x_t - p_opt)) and \
-                            ProfileCheckpointKey(x) not in completed.get(name, {}):
-                        cands.append({"i": i, "name": name, "x": float(x),
-                                      "seed": inner, "phase": 1,
-                                      "kind": "narrow", "tier": 1,
-                                      "sign": sign})
-                    continue
-                # The bracket is tight and the outer end still has not
-                # converged: give it one more go, warm from the inner point.
-                # With no inner point and a cold original this would be the
-                # same computation again, so it is not planned.
-                key = (name, ProfileCheckpointKey(x_t))
-                if key not in attempted and (
-                        inner is not None or tgt.get("warm_seeded")):
-                    cands.append({"i": i, "name": name, "x": float(x_t),
-                                  "seed": inner, "phase": 3, "kind": "rerun",
-                                  "tier": 1, "sign": sign, "attempt_key": key})
-                continue
 
             # ── below the threshold everywhere so far: step outward ────────
+            # One rung per round would hold a single worker for as long as the
+            # side stays open, and an open side says nothing about its tail
+            # (a nonlinear profile can flatten and then climb), so it is not
+            # assumed to be flat. Instead the next rungs go out together:
+            # up to ``_SPEC_MAX_EXT`` beyond the first, each stepping on from
+            # the farthest rung already running or planned, so a relaunch or a
+            # rung landing continues the ladder instead of restarting it.
             far_fl = [f for f in fl
                       if abs(f - p_opt) > abs(outer_pt["x_fixed"] - p_opt)]
-            if far_fl:
+            need = min(1 + _SPEC_MAX_EXT - len(far_fl),
+                       ceiling - len(pts) - len(fl))
+            if need <= 0:
                 continue
             d_out = _ext_distance(p_opt, outer_pt["x_fixed"], is_log)
             growth = float(extend_growth)
@@ -370,15 +449,24 @@ def plan_next_points(n_free, *, param_names, completed, in_flight, res_x,
             growth = max(growth, 1.05)
             g = _extension_growth(pts, p_opt, is_log, thr, anchor, growth)
             g = float(min(max(g, 1.05), growth))
-            x = _next_extension_value(p_opt, outer_pt["x_fixed"], lb, ub,
-                                      sign, is_log, g)
-            if x is None:
-                continue
-            if free(x, abs(outer_pt["x_fixed"] - p_opt)) and \
-                    ProfileCheckpointKey(x) not in completed.get(name, {}):
-                cands.append({"i": i, "name": name, "x": float(x),
-                              "seed": outer_pt, "phase": 1, "kind": "extend",
-                              "tier": 1, "sign": sign})
+            x_ref = (max(far_fl) if sign > 0 else min(far_fl)) if far_fl \
+                else outer_pt["x_fixed"]
+            for j in range(need):
+                d_ref = _ext_distance(p_opt, x_ref, is_log)
+                g_j = g
+                if d_ref > 0 and max_step_decades:
+                    g_j = min(g, max(1.0 + float(max_step_decades) / d_ref, 1.05))
+                x = _next_extension_value(p_opt, x_ref, lb, ub, sign, is_log, g_j)
+                if x is None:
+                    break
+                x_ref = x
+                if free(x, abs(outer_pt["x_fixed"] - p_opt)) and \
+                        ProfileCheckpointKey(x) not in completed.get(name, {}):
+                    cands.append({"i": i, "name": name, "x": float(x),
+                                  "seed": outer_pt, "phase": 1, "kind": "extend",
+                                  "tier": 1 if (j == 0 and not far_fl)
+                                  else 3 + j + (1 if far_fl else 0),
+                                  "sign": sign})
 
     cands.sort(key=lambda c: (c["tier"], c["i"], c["sign"]))
     return cands[:n_free]

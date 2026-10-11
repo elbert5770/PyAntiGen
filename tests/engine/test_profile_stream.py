@@ -40,9 +40,12 @@ def check(name, cond, detail=""):
 
 # ---------------------------------------------------------------- planner ---
 
-def rec(x, dnll, converged=True, nuis=None):
-    return {"x_fixed": x, "dnll": dnll, "converged": converged,
-            "interrupted": False, "nuisance_x": nuis or [0.0, 0.0]}
+def rec(x, dnll, converged=True, nuis=None, warm=True, **extra):
+    r = {"x_fixed": x, "dnll": dnll, "converged": converged,
+         "interrupted": False, "nuisance_x": nuis or [0.0, 0.0],
+         "warm_seeded": warm}
+    r.update(extra)
+    return r
 
 
 def plan(completed=None, in_flight=None, n_free=8, names=("a",), res_x=(0.0,),
@@ -145,18 +148,51 @@ print("below the threshold everywhere: step out, capped per step")
 pts = {"a": [rec(0.2, 0.05), rec(0.4, 0.2)]}
 out = plan(completed=pts, n_free=4)
 up = [c for c in out if c["sign"] > 0]
-check("the upper side extends", len(up) == 1 and up[0]["kind"] == "extend", up)
+check("the upper side extends", up and up[0]["kind"] == "extend", up)
 check("by no more than max_step_decades",
       up[0]["x"] - 0.4 <= 0.7 + 1e-9, up[0]["x"])
 check("warm-started from its outer point", up[0]["seed"]["x_fixed"] == 0.4)
+out = plan(completed=pts, n_free=2)
+check("with no spare worker the side gets one rung",
+      len([c for c in out if c["sign"] > 0 and c["tier"] == 1]) == 1)
+
+print("an open side sends several rungs out together when workers are idle")
+many = sorted([c for c in plan(completed=pts, n_free=12) if c["sign"] > 0],
+              key=lambda c: c["x"])
+xs = [0.4] + [c["x"] for c in many]
+check("the next rung and three beyond it", len(many) == 4, xs)
+check("each rung is further out than the last, none more than max_step beyond",
+      all(b > a and b - a <= 0.7 + 1e-9 for a, b in zip(xs, xs[1:])), xs)
+check("the nearest is the primary and the rest rank below every primary",
+      many[0]["tier"] == 1 and all(c["tier"] >= 4 for c in many[1:]))
+check("all seeded from the outer measured point",
+      all(c["seed"]["x_fixed"] == 0.4 for c in many))
+fl = [{"param_idx": 0, "x_fixed": many[0]["x"]},
+      {"param_idx": 0, "x_fixed": many[1]["x"]}]
+more = sorted([c for c in plan(completed=pts, in_flight=fl, n_free=12)
+               if c["sign"] > 0], key=lambda c: c["x"])
+check("rungs already running count toward the four, and the ladder goes on "
+      "beyond the farthest of them",
+      len(more) == 2 and more[0]["x"] > many[1]["x"], [c["x"] for c in more])
+fl = [{"param_idx": 0, "x_fixed": c["x"]} for c in many]
+check("a full ladder in flight plans nothing more on that side",
+      not [c for c in plan(completed=pts, in_flight=fl, n_free=12)
+           if c["sign"] > 0])
+near_bound = plan(completed={"a": [rec(0.2, 0.05), rec(5.5, 0.2)]}, n_free=12,
+                  bounds=((-6.0, 6.0),))
+check("the ladder stops at the parameter's bound",
+      all(c["x"] <= 6.0 + 1e-9 for c in near_bound if c["sign"] > 0)
+      and len([c for c in near_bound if c["sign"] > 0]) <= 1,
+      [c["x"] for c in near_bound if c["sign"] > 0])
 
 print("crossed only on an unconverged point: narrow the bracket, warm")
 pts = {"a": [rec(0.3, 0.8), rec(0.9, 4.0, converged=False)]}
 out = plan(completed=pts, n_free=4)
 nr = [c for c in out if c["kind"] == "narrow" and c["sign"] > 0]
-check("a narrowing probe is planned, not a repeat of the far point",
-      len(nr) == 1 and not any(c["kind"] == "rerun" and c["sign"] > 0
-                               for c in out), [(c["kind"], c["x"]) for c in out])
+check("a narrowing probe is planned, and any restart of the far point is seeded",
+      len(nr) == 1 and all(c["seed"] is not None for c in out
+                           if c["kind"] == "rerun" and c["sign"] > 0),
+      [(c["kind"], c["x"]) for c in out])
 check("it lies strictly inside the bracket", nr and 0.3 < nr[0]["x"] < 0.9, nr)
 check("seeded from the inner point", nr and nr[0]["seed"]["x_fixed"] == 0.3)
 check("and it is not a duplicate of an existing point",
@@ -174,15 +210,22 @@ print("the Hyak case: a far cold point failed while the near rung still runs")
 pts = {"a": [rec(0.035, 7.6, converged=False), rec(1.0, 830.0, converged=False)]}
 fl = [{"param_idx": 0, "x_fixed": 0.0012}]
 out = plan(completed=pts, in_flight=fl, n_free=4)
-check("nothing is planned on the upper side while the inner rung is running",
-      not any(c["sign"] > 0 for c in out), [(c["kind"], c["x"]) for c in out])
+up = [c for c in out if c["sign"] > 0]
+check("the bracket is narrowed without waiting for the inner rung",
+      any(c["kind"] == "narrow" and c["tier"] == 1 for c in up),
+      [(c["kind"], c["x"]) for c in out])
 pts["a"].append(rec(0.0012, 0.007))
 out = plan(completed=pts, n_free=4)
 up = [c for c in out if c["sign"] > 0]
+nr = [c for c in up if c["kind"] == "narrow"]
 check("once it lands, the probe goes between it and the failed point, seeded from it",
-      len(up) == 1 and up[0]["kind"] == "narrow"
-      and 0.0012 < up[0]["x"] < 0.035 and up[0]["seed"]["x_fixed"] == 0.0012,
+      nr and nr[0]["tier"] == 1
+      and 0.0012 < nr[0]["x"] < 0.035 and nr[0]["seed"]["x_fixed"] == 0.0012,
       [(c["kind"], c["x"]) for c in up])
+rr = [c for c in up if c["kind"] == "rerun"]
+check("and the failed point is restarted from it, at once, not last",
+      len(rr) == 1 and rr[0]["x"] == 0.035 and rr[0]["tier"] == 1
+      and rr[0]["seed"]["x_fixed"] == 0.0012, rr)
 check("never a re-run of an unseeded point",
       not any(c["kind"] == "rerun" and c["seed"] is None for c in out))
 
@@ -198,9 +241,11 @@ out = plan(completed=pts, attempted=att, n_free=4)
 check("and not planned twice",
       not any(c["kind"] == "rerun" and c["sign"] > 0 for c in out))
 out = plan(completed={"a": [rec(1e-4, 2.5, converged=False)]}, n_free=4)
-check("a cold original with no inner neighbour is not repeated from the same start",
-      not any(c["kind"] == "rerun" for c in out),
-      [(c["kind"], c["x"]) for c in out])
+rr = [c for c in out if c["kind"] == "rerun"]
+check("a cold original with no inner neighbour is carried on from its own end "
+      "state, never restarted from the same start",
+      len(rr) == 1 and rr[0]["seed"] is not None
+      and rr[0]["seed"]["x_fixed"] == 1e-4, [(c["kind"], c["x"]) for c in out])
 
 print("bracketed: narrow it, then fill, then stop")
 wide = {"a": [rec(0.3, 0.8), rec(1.2, 6.0)]}
@@ -217,6 +262,95 @@ out = plan(completed=sparse, n_free=4)
 check("a tight bracket short of n_grid is filled",
       any(c["kind"] == "fill" and c["sign"] > 0 for c in out))
 
+
+print("idle workers get extra probes inside an open bracket")
+wide = {"a": [rec(0.3, 0.8), rec(1.2, 6.0)]}
+one = [c for c in plan(completed=wide, n_free=2) if c["sign"] > 0]
+many = [c for c in plan(completed=wide, n_free=12) if c["sign"] > 0]
+check("with no spare worker the side gets the interpolated guess only",
+      len(one) == 1 and one[0]["tier"] == 1, one)
+check("spare workers get several probes in the same bracket",
+      len(many) >= 4 and all(0.3 < c["x"] < 1.2 for c in many),
+      [(c["kind"], round(c["x"], 3), c["tier"]) for c in many])
+check("the guess comes first and the extras rank below every primary",
+      many[0]["tier"] == 1 and all(c["tier"] >= 4 for c in many[1:]))
+check("the extras are distinct and all seeded from the inner point",
+      len({round(c["x"], 9) for c in many}) == len(many)
+      and all(c["seed"]["x_fixed"] == 0.3 for c in many))
+two = {"a": [rec(0.3, 0.8), rec(1.2, 6.0)], "b": [rec(0.3, 0.8), rec(1.2, 6.0)]}
+mixed = plan(completed=two, names=("a", "b"), res_x=(0.0, 0.0), se=(0.3, 0.3),
+             bounds=((-6.0, 6.0), (-6.0, 6.0)), scales=("log10", "log10"),
+             n_free=4)
+ups = [c for c in mixed if c["sign"] > 0]
+check("every side gets its own guess before any side gets a second probe",
+      sorted(c["name"] for c in ups if c["tier"] == 1) == ["a", "b"], ups)
+fl = [{"param_idx": 0, "x_fixed": float(c["x"])} for c in many]
+again = [c for c in plan(completed=wide, in_flight=fl, n_free=12) if c["sign"] > 0]
+check("running probes are not planned again, and the rest of the bracket is not "
+      "re-planned on top of them",
+      not any(abs(c["x"] - f["x_fixed"]) < 1e-9 for c in again for f in fl), again)
+located = {"a": [rec(0.3, 0.8), rec(0.90, 1.92), rec(1.2, 6.0)]}
+out = plan(completed=located, n_free=12)
+check("a crossing already located by a measured point gets no extras",
+      not any(c["kind"] in ("bracket", "narrow") and c["sign"] > 0 for c in out),
+      [(c["kind"], c["x"]) for c in out if c["sign"] > 0])
+unconv = {"a": [rec(0.3, 0.8), rec(1.2, 6.0, converged=False)]}
+many = [c for c in plan(completed=unconv, n_free=12) if c["sign"] > 0]
+many = [c for c in many if c["kind"] == "narrow"]
+check("an unconverged outer end is narrowed with spares too",
+      len(many) >= 4 and many[0]["tier"] == 1, many)
+
+print("a point past the threshold is provisional until it has been warm-restarted")
+base = [rec(0.3, 0.8)]
+def planned(pts_, **kw):
+    return plan(completed={"a": pts_}, n_free=12, **kw)
+def reruns(out):
+    return [c for c in out if c["kind"] == "rerun" and c["sign"] > 0]
+out = planned(base + [rec(1.2, 6.0, converged=False)])
+rr = reruns(out)
+check("an unconverged nearest-above point is restarted at once, from the inner point",
+      len(rr) == 1 and rr[0]["tier"] == 1 and rr[0]["seed"]["x_fixed"] == 0.3, rr)
+check("the narrowing probes are planned in the same round",
+      any(c["kind"] == "narrow" and c["sign"] > 0 for c in out))
+out = planned(base + [rec(1.2, 6.0, warm=False)])
+check("a converged but cold point is provisional too", len(reruns(out)) == 1,
+      [(c["kind"], c["x"]) for c in out])
+out = planned(base + [rec(1.2, 6.0)])
+check("a converged warm point is firm: no restart", not reruns(out))
+out = planned(base + [rec(1.2, 6.0, converged=False, pass_label="pass1-adaptive:rerun")])
+check("a restarted point is firm even unconverged: no second restart, and it "
+      "ends the bracket", not reruns(out)
+      and any(c["kind"] == "bracket" and c["sign"] > 0 for c in out),
+      [(c["kind"], c["x"]) for c in out])
+out = planned(base + [rec(1.2, 6.0, converged=False, reruns_tried=1)])
+check("a restart that failed to lower the point is remembered in the record",
+      not reruns(out))
+out = planned(base + [rec(0.9, 3.0), rec(1.5, 40.0, warm=False)])
+check("a provisional point beyond a firm end cannot move the crossing: left alone",
+      not reruns(out), reruns(out))
+out = planned(base + [rec(0.8, 2.5, converged=False), rec(1.2, 40.0, warm=False)])
+rr = sorted(reruns(out), key=lambda c: c["x"])
+check("the nearest two provisional points are restarted, the nearer first",
+      [c["x"] for c in rr] == [0.8, 1.2] and rr[0]["tier"] == 1
+      and rr[1]["tier"] > 1, [(c["x"], c["tier"]) for c in rr])
+out = plan(completed={"a": base + [rec(1.2, 6.0, converged=False)]},
+           in_flight=[{"param_idx": 0, "x_fixed": 1.2}], n_free=12)
+check("a restart already running is not planned again", not reruns(out))
+unc_same = base + [rec(1.2, 6.0, converged=False, x_start=[0.0, 0.0])]
+rr = reruns(planned(unc_same))
+check("an unconverged point whose start matches the inner point's is carried on "
+      "from its own end state", len(rr) == 1 and rr[0]["seed"]["x_fixed"] == 1.2, rr)
+conv_same = base + [rec(1.2, 6.0, warm=False, x_start=[0.0, 0.0])]
+check("a converged one with the same start has nothing new to try",
+      not reruns(planned(conv_same)))
+
+print("a re-run is not repeated by a relaunch that forgot it")
+rr = rec(0.92, 2.5, converged=False)
+rr["pass_label"] = "pass1-adaptive:rerun"
+out = plan(completed={"a": [rec(0.90, 1.5), rr]}, attempted=set(), n_free=4)
+check("a point that is itself a re-run is not re-run again",
+      not any(c["kind"] == "rerun" and c["sign"] > 0 for c in out),
+      [(c["kind"], c["x"]) for c in out])
 
 # ------------------------------------------------------------------ stream ---
 
@@ -441,6 +575,84 @@ for n in ("p0", "p1", "p2"):
 dups = [(n, r["x_fixed"]) for n in comp for r in comp[n]
         if r["pass_label"].endswith("rerun") and not r.get("warm_seeded")]
 check("no unseeded re-run of a point", not dups, dups)
+
+print("a warm restart that lowers a point past the threshold, and one that cannot")
+
+
+class ExcessPool(SimPool):
+    """Every first run farther out than FAR comes back inflated and unconverged
+    (an upper bound with excess). A restart returns the true value if
+    ``restart_helps``, otherwise the same inflated one."""
+
+    FAR = 0.3
+
+    def __init__(self, n, restart_helps):
+        super().__init__(n)
+        self.restart_helps = restart_helps
+        self.restarts = []
+
+    def run(self, job):
+        out = super().run(job)
+        is_restart = str(job.get("pass_label", "")).endswith("rerun")
+        if is_restart:
+            self.restarts.append((job["param_name"], job["x_fixed"]))
+        if abs(job["x_fixed"]) > self.FAR and not (is_restart and self.restart_helps):
+            out["nll"] = out["nll"] + 0.6
+            out["converged"] = False
+            out["nfev_total"] = 1500
+        return out
+
+
+def launch(pool, root, n_refine=0):
+    ck = ProfileCheckpoint(root, "f", "m", "s", enabled=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        run_parallel_profile(
+            pool.batch, np.zeros(K), 0.0, [f"p{i}" for i in range(K)],
+            [(-50.0, 50.0)] * K, ["lin"] * K, method="Nelder-Mead",
+            wald_se=None, n_grid=3, n_refine=n_refine, bracket_rtol=0.05,
+            checkpoint=ck, adaptive_pass1=True, n_workers=6, screen=scr_e,
+            first_probe="slice_ladder", open_decades=1.0, warm_passes=0)
+    ck.close()
+    recs = {}
+    for n in ("p0", "p1", "p2"):
+        with open(ck.path_for(n), encoding="utf-8") as fh:
+            recs[n] = [json.loads(line) for line in fh if line.strip()]
+    return recs
+
+
+with tempfile.TemporaryDirectory() as root:
+    pool = ExcessPool(6, restart_helps=True)
+    recs = launch(pool, root)
+    check("restarts happened", len(pool.restarts) > 0)
+    check("no point is restarted twice in one run",
+          len(pool.restarts) == len(set(pool.restarts)), pool.restarts)
+    ends = []
+    for n in recs:
+        best = {}
+        for r in recs[n]:
+            if r["x_fixed"] not in best or r["nll"] <= best[r["x_fixed"]]["nll"]:
+                best[r["x_fixed"]] = r
+        for sign in (-1, 1):
+            side = sorted([r for r in best.values() if r["x_fixed"] * sign > 0],
+                          key=lambda r: abs(r["x_fixed"]))
+            first_above = next((r for r in side if r["nll"] > THR), None)
+            ends.append(first_above is not None and (
+                first_above["converged"] or first_above.get("reruns_tried")))
+    check("every side's first point past the threshold is firm: converged, or "
+          "restarted", all(ends), ends)
+
+with tempfile.TemporaryDirectory() as root:
+    pool = ExcessPool(6, restart_helps=False)
+    recs = launch(pool, root)
+    done = [r for n in recs for r in recs[n] if r.get("reruns_tried")]
+    check("a restart that did not lower a point is recorded on it",
+          len(done) > 0 and all(r["reruns_tried"] == 1 for r in done),
+          [(r["x_fixed"], r.get("reruns_tried")) for r in done])
+    pool2 = ExcessPool(6, restart_helps=False)
+    launch(pool2, root)
+    check("a relaunch over the same checkpoint restarts none of them again",
+          not set(pool2.restarts) & set(pool.restarts),
+          sorted(set(pool2.restarts) & set(pool.restarts)))
 
 print("the grid pass still works when the stream is off")
 pool = SimPool(6)
