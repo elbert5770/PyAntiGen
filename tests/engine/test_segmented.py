@@ -190,3 +190,37 @@ def test_a_schedule_that_switches_inside_the_cached_block_is_not_cached():
     ss = settings(sched=schedule(q))                     # block ends at 0: caching is fine
     rest = cache.apply(r, ss, OBSERVED)
     assert list(rest["simulation_blocks"]) == ["run"] and cache.stats()["misses"] == 1
+
+
+# --- the state snapshot safe_simulate takes before every call ----------------------------
+
+def _selection_snapshot(r, keys):
+    prev = r.selections
+    r.selections = keys
+    values = list(r.getSelectedValues())
+    r.selections = prev
+    return values
+
+
+def test_the_vector_snapshot_equals_the_selection_one():
+    r = without_events(PARAMS["Q_CSF"])
+    run(r, sched=schedule())                    # leave the model somewhere other than t = 0
+    snap = sim.save_model_state(r)
+    assert sim._state_values(r, snap["keys"]) == snap["values"]
+    np.testing.assert_array_equal(snap["values"], _selection_snapshot(r, snap["keys"]))
+
+
+def test_the_snapshot_falls_back_when_the_vectors_do_not_line_up(monkeypatch):
+    r = without_events(PARAMS["Q_CSF"])
+    want = _selection_snapshot(r, sim.save_model_state(r)["keys"])
+    monkeypatch.setattr(sim, "_state_values", lambda rr, keys: None)
+    np.testing.assert_array_equal(sim.save_model_state(r)["values"], want)
+
+
+def test_restoring_a_snapshot_puts_the_model_back():
+    r = without_events(PARAMS["Q_CSF"])
+    snap = sim.save_model_state(r)
+    r.simulate(0, 2, 5)
+    assert sim.save_model_state(r)["values"] != snap["values"]
+    sim.restore_model_state(r, snap)
+    assert sim.save_model_state(r)["values"] == snap["values"]

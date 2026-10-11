@@ -31,7 +31,15 @@ depends on a tolerance. From the one description the schedule can
   included (``segments``), which is what an event-free backend integrates;
 * write the equivalent Antimony ``at (time >= ...)`` events (``to_antimony``),
   with simultaneous switches merged into one event, so the existing RoadRunner
-  path keeps working from the same numbers.
+  path keeps working from the same numbers;
+* read the events a generator already wrote (``from_antimony_events``), so a
+  project can use the segment runner without rewriting its event code;
+* hand an integrator everything it needs per segment (``plan``): the end points
+  with their exact gradients, the values of the inputs the step sets and their
+  gradients, the straight line the measured curve follows, and -- for a step
+  that assigns a *state* (a bolus) -- the right-hand side to evaluate on the live
+  state (``PlanSegment.evaluate_jump``), which carries the state's sensitivities
+  through the jump by the chain rule.
 
 Only switches that depend on the clock and on parameters are covered. A trigger
 that depends on a *state* (``at (S < 1e-6)``) has no place here.
@@ -47,7 +55,10 @@ the other way, so :meth:`InputSchedule.validate` reports every such read, and
 two assignments to the same variable at one switch time are refused.
 """
 import ast
+import bisect
+import functools
 import math
+import re
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -159,8 +170,13 @@ _BINOPS = {
 }
 
 
+@functools.lru_cache(maxsize=None)
 def _parse_expression(text):
-    """Parse *text* and refuse anything that is not plain arithmetic."""
+    """Parse *text* and refuse anything that is not plain arithmetic.
+
+    Cached: a periodic schedule repeats a few dozen strings hundreds of times, and
+    the trees are only ever read.
+    """
     try:
         tree = ast.parse(str(text), mode="eval")
     except SyntaxError as exc:
@@ -266,6 +282,53 @@ class Segment:
     def duration(self):
         """``end - start`` as a Breakpoint (its value and gradient are the duration's)."""
         return self.end - self.start
+
+
+class PlanSegment:
+    """One segment of :meth:`InputSchedule.plan`, with everything on it constant or linear.
+
+    ``t0``/``t1`` are the segment's end points in hours and ``dt0``/``dt1`` their
+    derivatives with respect to the plan's ``wrt`` parameters (tuples in that order).
+    ``values[v]`` is the value of each assigned variable ``v`` while the segment
+    runs and ``grads[v]`` its derivatives, carried through every earlier
+    assignment. ``curves[name] = (value, slope, mid)``: on the segment the measured
+    input is ``value + slope*(t - mid)`` exactly. ``observed`` says whether the
+    segment ends at an observation time; ``start``/``end`` are the Breakpoints.
+
+    ``jumps`` maps each *state* the switch at the segment's start assigns (a bolus)
+    to its right-hand side text. The state's value is not known until the run gets
+    there, so the runner passes it to :meth:`evaluate_jump` together with its
+    sensitivities and gets the new value and the new sensitivities back.
+    """
+    __slots__ = ("index", "start", "end", "t0", "t1", "dt0", "dt1",
+                 "values", "grads", "curves", "observed", "step",
+                 "jumps", "pre_values", "pre_grads", "params", "wrt")
+
+    def evaluate_jump(self, text, state):
+        """Value and derivatives of one state assignment's right-hand side.
+
+        *state* maps a state's name to ``(value, derivatives)``, the derivatives a
+        tuple over ``wrt``. The right-hand side may read states, parameters and the
+        assigned inputs as they were *before* the switch, and the derivatives come
+        out by the chain rule: for a bolus ``A = A + dose`` the new sensitivity of
+        A is its old one plus ``d dose / d p``, and for ``A = 0.5*A`` it is half.
+        Returns ``(value, derivatives tuple)``.
+        """
+        wrt = self.wrt
+
+        def look(name):
+            if name in state:
+                v, g = state[name]
+                return _Dual(v, {n: float(d) for n, d in zip(wrt, g)})
+            if name in self.pre_values:
+                return _Dual(self.pre_values[name],
+                             {n: float(d) for n, d in zip(wrt, self.pre_grads[name])})
+            if name in self.params:
+                return _Dual(self.params[name], {name: 1.0} if name in wrt else {})
+            raise ScheduleError(f"no value for {name!r} in the assignment {text!r}")
+
+        d = _eval_dual(_parse_expression(text), look)
+        return d.v, tuple(float(d.g.get(n, 0.0)) for n in wrt)
 
 
 class InputSchedule:
@@ -581,6 +644,228 @@ class InputSchedule:
         self._check_gaps(timed, {bp for bp, _a in self.events()}, 1e-9)
         bps = [bp for _t, bp in timed]
         return [Segment(i, a, b) for i, (a, b) in enumerate(zip(bps, bps[1:]))]
+
+    # -- saving and loading ----------------------------------------------------
+
+    def to_dict(self):
+        """A JSON-serialisable description that :meth:`from_dict` rebuilds exactly.
+
+        Breakpoint anchors and coefficients are written as the strings of their
+        exact fractions, so nothing is rounded on the way.
+        """
+        return {
+            "params": dict(self.params),
+            "moving": self.moving_quantities(),
+            "steps": [{"anchor": str(bp.anchor),
+                       "terms": {n: str(c) for n, c in bp.terms},
+                       "assign": dict(a)} for bp, a in self._steps],
+            "inputs": [{"name": n, "times": t, "values": v, "before": b, "after": a}
+                       for n, t, v, b, a in self._inputs],
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        s = cls(d["params"])
+        for name, text in d["moving"].items():
+            s.moving(name, text)
+        for st in d["steps"]:
+            bp = Breakpoint(Fraction(st["anchor"]), {n: Fraction(c) for n, c in st["terms"].items()})
+            s.step(bp, st["assign"])
+        for i in d["inputs"]:
+            s.linear_input(i["name"], i["times"], i["values"], i["before"], i["after"])
+        return s
+
+    # -- reading the events a generator already writes ---------------------------
+
+    _EVENT_LINE = re.compile(
+        r"^\s*(?:\w+\s*:\s*)?at\s*\(\s*time\s*(?:>=|>)\s*(?P<when>.*)\)\s*:\s*(?P<body>.*?)\s*$")
+
+    @classmethod
+    def from_antimony_events(cls, text, params, ignore_other=False):
+        """A schedule from Antimony event lines ``[name:] at (time >= when): v = expr, w = expr``.
+
+        This is what lets an existing generator (a dosing event, a trial arm, the
+        SILK draws) drive the segment runner without being rewritten. *when* and
+        the right-hand sides must be arithmetic (numbers, the names in *params*,
+        ``+ - * / **``). In *when*, the numeric terms add up to the fixed part of the
+        switch time and every symbolic term becomes a moving quantity, so
+        ``20 + V_LP/Q_CSF`` moves with V_LP and Q_CSF while ``30*24`` does not.
+        Lines at the same instant merge into one switch; ``>`` is read as ``>=``.
+
+        A line that is not such an event raises ScheduleError (a state trigger such
+        as ``at (S < 1e-6)`` has no clock time to schedule), unless *ignore_other*
+        is set, in which case it is left out and listed in ``schedule.unparsed``.
+        """
+        s = cls(params)
+        s.unparsed = []
+        moving = {}
+        for raw in str(text).splitlines():
+            line = raw.split("//")[0].strip()
+            if not line or line.startswith("#"):
+                continue
+            m = cls._EVENT_LINE.match(line)
+            if m is None:
+                if ignore_other:
+                    s.unparsed.append(raw)
+                    continue
+                raise ScheduleError(
+                    f"cannot read the event line {raw.strip()!r}: only "
+                    "'at (time >= <expression>): name = expression, ...' is understood")
+            when = Breakpoint(0)
+            anchor = Fraction(0)
+            for sign, node in cls._additive_terms(_parse_expression(m.group("when").strip()), 1):
+                if not _symbols(node):
+                    anchor += sign * _frac(_eval_dual(node, lambda n: None).v)
+                    continue
+                key = ast.unparse(node)
+                if key not in moving:
+                    moving[key] = s.moving(f"m{len(moving) + 1}", key)
+                when = when + moving[key] * sign if sign == 1 else when - moving[key]
+            when = when + anchor
+            body = {}
+            for part in cls._split_top_level(m.group("body")):
+                lhs, eq, rhs = part.partition("=")
+                if not eq or not lhs.strip().isidentifier() or not rhs.strip():
+                    raise ScheduleError(f"cannot read the assignment {part.strip()!r} in {raw.strip()!r}")
+                body[lhs.strip()] = rhs.strip()
+            if not body:
+                raise ScheduleError(f"the event {raw.strip()!r} assigns nothing")
+            s.step(when, body)
+        return s
+
+    @staticmethod
+    def _additive_terms(node, sign):
+        if isinstance(node, ast.Expression):
+            return InputSchedule._additive_terms(node.body, sign)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return (InputSchedule._additive_terms(node.left, sign)
+                    + InputSchedule._additive_terms(node.right, sign))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+            return (InputSchedule._additive_terms(node.left, sign)
+                    + InputSchedule._additive_terms(node.right, -sign))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return InputSchedule._additive_terms(node.operand, -sign)
+        return [(sign, node)]
+
+    @staticmethod
+    def _split_top_level(body):
+        parts, depth, cur = [], 0, ""
+        for ch in body:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            parts.append(cur)
+        return parts
+
+    # -- what an emitter or a reference integrator needs ---------------------
+
+    def moving_quantities(self):
+        """``{name: expression text}`` of every quantity declared with :meth:`moving`."""
+        return {n: t for n, (t, _tree) in self._moving.items()}
+
+    def inputs(self):
+        """The measured curves: ``[(name, times, values, default_before, default_after), ...]``."""
+        return [(n, list(t), list(v), b, a) for n, t, v, b, a in self._inputs]
+
+    def assigned_variables(self):
+        """Every variable some step assigns, sorted."""
+        return sorted({v for _bp, a in self.events() for v in a})
+
+    def _curve_piece(self, spec, t):
+        _name, ts, vs, before, after = spec
+        after = vs[-1] if after is None else after
+        if t < ts[0]:
+            return float(before), 0.0
+        if t > ts[-1]:
+            return float(after), 0.0
+        i = min(max(bisect.bisect_left(ts, t), 1), len(ts) - 1)
+        slope = (vs[i] - vs[i - 1]) / (ts[i] - ts[i - 1])
+        return vs[i - 1] + slope * (t - ts[i - 1]), slope
+
+    def plan(self, t_start, t_end, observation_times=(), params=None, wrt=None, initial=None,
+             states=()):
+        """The segments of [t_start, t_end] with exact derivatives, ready to integrate.
+
+        *wrt* lists the parameters to differentiate with respect to (default: every
+        parameter of the schedule, sorted). *initial* gives what the assigned
+        variables hold before their first assignment (default 0): a number, or an
+        expression in the parameters whose derivatives are carried along (the
+        model's initial assignment ``Q_SN = Q_CSF*f_SN``). Each step's
+        assignments are evaluated together on the values from before the step, as
+        the engine applies them, and their derivatives are carried through.
+
+        *states* names the variables that are model states (a species, a variable
+        with a rate rule). A step that assigns one is a bolus: it appears in the
+        segment's ``jumps`` as text for the runner to evaluate on the live state
+        (see :meth:`PlanSegment.evaluate_jump`). Everything else a step assigns is
+        an input, worked out here; an input may not read a state.
+        """
+        params = self.params if params is None else {k: float(v) for k, v in params.items()}
+        state_set = set(states)
+        wrt = sorted(self.params) if wrt is None else list(wrt)
+        missing = [n for n in wrt if n not in params]
+        if missing:
+            raise ScheduleError(f"no value for parameter(s) {missing}")
+        initial = initial or {}
+        obs = {Breakpoint(t) for t in observation_times}
+        steps = dict(self.events())
+
+        def parameter(name):
+            if name not in params:
+                raise ScheduleError(f"no value for parameter {name!r}")
+            return _Dual(params[name], {name: 1.0} if name in wrt else {})
+
+        def start(v):
+            x = initial.get(v, 0.0)
+            if isinstance(x, str):
+                return _eval_dual(_parse_expression(x), parameter)
+            return _Dual(float(x))
+
+        held = {v: start(v) for v in self.assigned_variables() if v not in state_set}
+
+        def look(name):
+            if name in held:
+                return held[name]
+            if name in state_set:
+                raise ScheduleError(
+                    f"{name!r} is a state: only an assignment to a state may read one "
+                    "(an input that depends on a state cannot be worked out in advance)")
+            return parameter(name)
+
+        def vec(g):
+            return tuple(float(g.get(n, 0.0)) for n in wrt)
+
+        out = []
+        for sg in self.segments(t_start, t_end, observation_times, params=params):
+            applied, jumps = None, {}
+            seg = PlanSegment()
+            seg.pre_values = {v: d.v for v, d in held.items()}
+            seg.pre_grads = {v: vec(d.g) for v, d in held.items()}
+            if sg.start in steps:
+                assigns = steps[sg.start]
+                jumps = {v: t for v, t in assigns.items() if v in state_set}
+                applied = {v: _eval_dual(_parse_expression(t), look)
+                           for v, t in assigns.items() if v not in state_set}
+                held.update(applied)
+            seg.jumps, seg.params, seg.wrt = jumps, params, wrt
+            seg.index, seg.start, seg.end, seg.observed = sg.index, sg.start, sg.end, sg.end in obs
+            seg.step = None if sg.start not in steps else sorted(steps[sg.start])
+            seg.t0, seg.t1 = self.time(sg.start, params), self.time(sg.end, params)
+            seg.dt0 = vec(self.gradient(sg.start, params, wrt=wrt))
+            seg.dt1 = vec(self.gradient(sg.end, params, wrt=wrt))
+            seg.values = {v: d.v for v, d in held.items()}
+            seg.grads = {v: vec(d.g) for v, d in held.items()}
+            mid = 0.5 * (seg.t0 + seg.t1)
+            seg.curves = {spec[0]: (*self._curve_piece(spec, mid), mid) for spec in self._inputs}
+            out.append(seg)
+        return out
 
     # -- Antimony ----------------------------------------------------------
 

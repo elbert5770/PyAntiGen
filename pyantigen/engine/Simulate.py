@@ -266,15 +266,56 @@ def save_model_state(r):
         keys += [s for s in r.getGlobalParameterIds() if s not in assignment_rules]
         _model_cache.put(r, "_cached_state_keys", keys)
 
-    prev_selections = r.selections
-    r.selections = keys
-    values = list(r.getSelectedValues())
-    r.selections = prev_selections
-    
+    values = _state_values(r, keys)
+    if values is None:
+        prev_selections = r.selections
+        r.selections = keys
+        values = list(r.getSelectedValues())
+        r.selections = prev_selections
+
     return {
         "keys": keys,
         "values": values
     }
+
+
+def _state_values(r, keys):
+    """The values of *keys* read through the model's vector getters, or None.
+
+    Reassigning ``r.selections`` recompiles every id on each call (twice per
+    snapshot), which cost more than the integration of a short segment. The
+    vectors need no selection. Which positions of them the keys occupy is worked
+    out once per model; if a vector does not line up with its ids (a model with
+    conserved moieties, say) the layout is cached as unusable and the caller
+    falls back to the selection route.
+    """
+    layout = _model_cache.get(r, "_cached_state_layout")
+    if layout is None:
+        layout = False
+        try:
+            m = r.model
+            sources = (("fl", r.getFloatingSpeciesIds(), m.getFloatingSpeciesAmounts),
+                       ("bd", r.getBoundarySpeciesIds(), m.getBoundarySpeciesAmounts),
+                       ("gp", r.getGlobalParameterIds(), m.getGlobalParameterValues))
+            where, ok = {}, True
+            for tag, ids, getter in sources:
+                ids = list(ids)
+                if len(getter()) != len(ids):
+                    ok = False
+                    break
+                where.update({i: (tag, n) for n, i in enumerate(ids)})
+            if ok and all(k == "time" or k in where for k in keys):
+                layout = tuple(None if k == "time" else where[k] for k in keys)
+        except Exception:
+            layout = False
+        _model_cache.put(r, "_cached_state_layout", layout)
+    if layout is False:
+        return None
+    m = r.model
+    vec = {"fl": m.getFloatingSpeciesAmounts(), "bd": m.getBoundarySpeciesAmounts(),
+           "gp": m.getGlobalParameterValues()}
+    time_now = float(m.getTime())
+    return [time_now if w is None else float(vec[w[0]][w[1]]) for w in layout]
 
 def restore_model_state(r, state):
     r.setValues(state["keys"], state["values"])

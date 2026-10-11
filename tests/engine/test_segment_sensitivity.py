@@ -28,8 +28,7 @@ import numpy as np
 import pytest
 from scipy.integrate import solve_ivp
 
-from pyantigen.generate.input_schedule import (
-    Breakpoint, InputSchedule, ScheduleError, _Dual, _eval_dual, _parse_expression)
+from pyantigen.generate.input_schedule import InputSchedule, ScheduleError
 
 THETA = ["Q_CSF", "V_LP", "t_CSFdraw", "f_SN", "k_y"]
 NOMINAL = {"Q_CSF": 17.39500698, "V_LP": 6.0, "t_CSFdraw": 0.1, "f_SN": 0.1, "k_y": 0.3}
@@ -101,56 +100,22 @@ def f_jac(x, u, k):
 
 # --- the schedule, flattened into segments with exact derivatives -------------------
 
-def _curve(sched, name, t):
-    """Value and slope at *t* of the linear piece (or constant) the clock is on."""
-    _n, ts, vs, before, after = next(i for i in sched._inputs if i[0] == name)
-    after = vs[-1] if after is None else after
-    if t < ts[0]:
-        return before, 0.0
-    if t > ts[-1]:
-        return after, 0.0
-    i = int(np.searchsorted(ts, t))
-    i = min(max(i, 1), len(ts) - 1)
-    slope = (vs[i] - vs[i - 1]) / (ts[i] - ts[i - 1])
-    return float(np.interp(t, ts, vs)), slope
-
-
 class Seg:
-    """One stretch of the clock with everything constant on it."""
-    pass
+    """One stretch of the clock with everything constant on it (arrays over THETA / INPUTS)."""
 
 
 def build_plan(sched, theta, obs=OBS, t_start=0.0, t_end=8.0):
     """Segments in time order, each with its inputs and the derivatives of all of it."""
-    segments = sched.segments(t_start, t_end, obs, params=theta)
-    steps = dict(sched.events())
-    obs_bps = {Breakpoint(t) for t in obs}
-    held = {v: _Dual(0.0) for v in INPUTS}
-
-    def look(name):
-        return held[name] if name in held else _Dual(theta[name], {name: 1.0})
-
-    def vec(g):
-        return np.array([g.get(n, 0.0) for n in THETA])
-
-    plan = []
-    for sg in segments:
-        if sg.start in steps:                       # all right-hand sides see the old values
-            new = {v: _eval_dual(_parse_expression(text), look) for v, text in steps[sg.start].items()}
-            held.update(new)
+    out = []
+    for p in sched.plan(t_start, t_end, obs, params=theta, wrt=THETA):
         s = Seg()
-        s.t0, s.t1 = sched.time(sg.start, theta), sched.time(sg.end, theta)
-        g0 = sched.gradient(sg.start, theta, wrt=THETA)
-        g1 = sched.gradient(sg.end, theta, wrt=THETA)
-        s.dt0, s.dt1 = vec(g0), vec(g1)
-        s.u = np.array([held[v].v for v in INPUTS])
-        s.du = np.array([vec(held[v].g) for v in INPUTS])
-        s.mid = 0.5 * (s.t0 + s.t1)
-        s.fl, s.slope = _curve(sched, "f_L", s.mid)
-        s.observed = sg.end in obs_bps
-        s.moving_start = sg.start in steps and not sg.start.fixed
-        plan.append(s)
-    return plan
+        s.t0, s.t1, s.observed = p.t0, p.t1, p.observed
+        s.dt0, s.dt1 = np.array(p.dt0), np.array(p.dt1)
+        s.u = np.array([p.values[v] for v in INPUTS])
+        s.du = np.array([p.grads[v] for v in INPUTS])
+        s.fl, s.slope, s.mid = p.curves["f_L"]
+        out.append(s)
+    return out
 
 
 def _curve_at(s, t):

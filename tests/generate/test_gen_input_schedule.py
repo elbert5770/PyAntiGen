@@ -301,3 +301,90 @@ def test_schedule_times_equal_the_times_the_engine_reads_from_the_model():
     s = silk_like()
     r, _ = _integrals(PARAMS["Q_CSF"], s.to_antimony())
     assert build_event_time_table(r).times() == s.times()
+
+
+# --- saving, and initial values given as expressions --------------------------------------
+
+def test_a_schedule_survives_a_json_round_trip_exactly():
+    import json
+    s = silk_like()
+    s.linear_input("f_L", [0, 1, 2.5], [0.1, 0.2, 0.15], default_before=0, default_after=None)
+    again = InputSchedule.from_dict(json.loads(json.dumps(s.to_dict())))
+    p = dict(PARAMS, Q_CSF=13.7)
+    assert again.times(p) == s.times(p)
+    assert again.ordered_events(p) == s.ordered_events(p)
+    assert again.to_antimony() == s.to_antimony()
+    assert again.inputs() == s.inputs()
+
+
+def test_an_initial_value_may_be_an_expression_and_carries_its_derivatives():
+    s = silk_like()
+    seg = s.plan(-5, 3, params=PARAMS, wrt=["Q_CSF", "f_SN"],
+                 initial={"Q_SN": "Q_CSF*f_SN", "Q_Leak": 2.5})[0]
+    assert seg.t1 <= 0 and seg.values["Q_Leak"] == 2.5
+    assert seg.values["Q_SN"] == pytest.approx(PARAMS["Q_CSF"] * PARAMS["f_SN"])
+    assert seg.grads["Q_SN"] == pytest.approx((PARAMS["f_SN"], PARAMS["Q_CSF"]))
+    assert seg.grads["Q_Leak"] == (0.0, 0.0)
+    with pytest.raises(ScheduleError):
+        s.plan(-5, 3, params=PARAMS, initial={"Q_SN": "no_such_parameter"})
+
+
+# --- reading the events a generator already writes ----------------------------------------
+
+def test_event_text_becomes_a_schedule_with_fixed_and_moving_times():
+    txt = ("at (time >= 0): A = A + dose, Q_LP = Q_CSF\n"
+           "at (time > 1 + V_LP/Q_CSF): Q_LP = 0\n"
+           "ev1: at (time >= 30*24 + 2): A = 0.5*A\n"
+           "at (time >= 3 - t_CSFdraw): B = 1\n")
+    p = dict(PARAMS, dose=5.0)
+    s = InputSchedule.from_antimony_events(txt, p)
+    assert s.moving_quantities() == {"m1": "V_LP / Q_CSF", "m2": "t_CSFdraw"}
+    got = s.ordered_events(p)
+    assert [t for t, _ in got] == pytest.approx([0.0, 1 + 6.0 / PARAMS["Q_CSF"], 2.9, 722.0])
+    assert got[0][1] == {"A": "A + dose", "Q_LP": "Q_CSF"}
+    assert got[3][1] == {"A": "0.5*A"}
+
+
+def test_event_lines_at_the_same_instant_merge_and_a_moving_time_follows_its_parameters():
+    s = InputSchedule.from_antimony_events(
+        "at (time >= 5): a = 1\nat (time > 5.0): b = 2\nat (time >= 2 + V_LP/Q_CSF): c = 3\n", PARAMS)
+    assert [a for _, a in s.ordered_events()][-1] == {"a": "1", "b": "2"}
+    assert s.time(s.order()[0], dict(PARAMS, Q_CSF=12.0)) == 2.5
+
+
+def test_a_schedule_survives_being_written_as_events_and_read_back():
+    s = silk_like()
+    again = InputSchedule.from_antimony_events(s.to_antimony(events=True), PARAMS)
+    for q in (17.39500698, 12.0, 25.0):
+        p = dict(PARAMS, Q_CSF=q)
+        a, b = s.ordered_events(p), again.ordered_events(p)
+        assert [t for t, _ in a] == pytest.approx([t for t, _ in b], abs=1e-12)
+        assert [x for _, x in a] == [x for _, x in b]
+
+
+@pytest.mark.parametrize("text", [
+    "at (time >= 5): A_Comp1 = 10",                                  # Example project
+    "at (time > 0): Antibody_Plasma = 21000.5\nat (time > 0): Gadobutrol_CSF = 1000",   # Bloomingdale
+    "at (time >=     0.01  ): Antibody_Plasma = 300000",               # Lin
+])
+def test_the_other_projects_event_generators_are_read(text):
+    s = InputSchedule.from_antimony_events(text, {})
+    assert s.events() and all(bp.fixed for bp, _ in s.events())
+    s.validate()
+
+
+@pytest.mark.parametrize("text", [
+    "at (S < 1e-6): x = 1",                    # a state trigger has no clock time
+    "at (time >= 5, t0 = false): x = 1",       # trigger options
+    "at (time >= unknown_symbol): x = 1",      # a name the schedule has no value for
+    "at (time >= 5): x",                       # no assignment
+    "at (time >= 2^3): x = 1",                 # not plain arithmetic
+])
+def test_event_lines_it_cannot_read_are_refused(text):
+    with pytest.raises(ScheduleError):
+        InputSchedule.from_antimony_events(text, PARAMS)
+
+
+def test_other_lines_can_be_left_for_the_caller():
+    s = InputSchedule.from_antimony_events("V_SP3' = Q_refill\nat (time >= 1): a = 1\n", {}, ignore_other=True)
+    assert s.unparsed == ["V_SP3' = Q_refill"] and len(s.events()) == 1

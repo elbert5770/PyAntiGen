@@ -26,8 +26,12 @@ which is what the events this replaces carry. An assignment may use numbers,
 parameter names and ``+ - * / **``; anything else is refused by
 ``InputSchedule.evaluate`` rather than guessed at.
 
-The variables the schedule assigns are put back to the values they had when the
-run began, so a second simulation does not start from the last switch of the
+A step may assign a state as well as an input (a bolus ``A = A + dose``): that is
+an ordinary assignment here, and the state is left where the run ends. A species
+must be amount-valued (``substanceOnly``): assigning a concentration is refused.
+
+The input variables the schedule assigns are put back to the values they had when
+the run began, so a second simulation does not start from the last switch of the
 first. (The optimizer also restores parameter baselines; this keeps the runner
 correct on its own.)
 
@@ -41,6 +45,7 @@ caches separately must not contain a switch: ``switches_before`` says whether it
 import numpy as np
 
 from pyantigen.engine.Simulate import StackedResult, floor_tolerance_vector, safe_simulate
+from pyantigen.generate.input_schedule import ScheduleError
 
 
 def _eps(t):
@@ -81,6 +86,9 @@ class SegmentRunner:
         self._next = 0
         self._before = {}
         self._variable_step_size = r.integrator.variable_step_size
+        # a state a step assigns (a bolus) is not put back afterwards: only inputs are
+        self._states = set(r.getFloatingSpeciesIds()) | set(r.getRateRuleIds())
+        self._check_species_units(r, schedule)
 
     # -- applying the steps -------------------------------------------------
 
@@ -96,10 +104,26 @@ class SegmentRunner:
                 r[name] = value
             self._next += 1
 
+    @staticmethod
+    def _check_species_units(r, schedule):
+        """Refuse to assign a species whose events would set a concentration, not an amount."""
+        species = set(r.getFloatingSpeciesIds()) & set(schedule.assigned_variables())
+        if not species:
+            return
+        import libsbml
+        model = libsbml.readSBMLFromString(r.getCurrentSBML()).getModel()
+        for name in sorted(species):
+            sp = model.getSpecies(name)
+            if sp is not None and not sp.getHasOnlySubstanceUnits():
+                raise ScheduleError(
+                    f"{name!r} is a species in concentration units: assigning it sets a concentration, "
+                    "but the runner sets amounts (declare it substanceOnly)")
+
     def close(self):
-        """Undo what the run changed: the assigned variables and the output mode."""
+        """Undo what the run changed: the assigned inputs and the output mode."""
         for name, value in self._before.items():
-            self.r[name] = value
+            if name not in self._states:
+                self.r[name] = value
         self._before.clear()
         self._next = 0
         self.r.integrator.variable_step_size = self._variable_step_size
