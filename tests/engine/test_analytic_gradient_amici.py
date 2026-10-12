@@ -293,7 +293,7 @@ def test_without_freezing_the_gradient_is_that_of_a_different_model(schedule_pro
     # the negative control: leave Q_g = Q_CSF in the AMICI model and the gradient with respect to Q_CSF
     # gains a term (d Q_g/d Q_CSF) the engine's objective does not have
     import pyantigen.engine.Analytic_gradient as ag
-    monkeypatch.setattr(ag, "freeze_stale_assignments", lambda sbml, r, protected=(), varying=(): (sbml, []))
+    monkeypatch.setattr(ag, "freeze_stale_assignments", lambda sbml, r, protected=(), varying=(), everything=False: (sbml, []))
     models, reps, text = schedule_problem
     loose = build_gradient({"analytic_gradient": {"cache_dir": str(tmp_path), "verbose": False}},
                            models=models, replicates=reps, groups=GROUPS, param_names=NAMES, scales=SCALES,

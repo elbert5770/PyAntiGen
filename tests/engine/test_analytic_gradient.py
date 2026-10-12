@@ -333,3 +333,66 @@ def test_the_multistart_stage_hands_the_provider_to_its_local_fits_and_builds_no
     assert report["gradient"]["scheme"] == "analytic"
     assert all(r["gradient"]["scheme"] == "analytic" and r["gradient"]["n_fallback"] == 0 for r in records)
     np.testing.assert_allclose(start, [1.0, 1.0], atol=1e-4)
+
+
+# ---- freezing initial assignments ------------------------------------------------------------------
+
+FREEZE_MODEL = """
+model freeze
+  species S in C; C = 1; S = 1;
+  J: S -> ; k_decay*S;
+  k_decay = 0.5;
+  k_fit = 3;
+  k_const = 9.56e-7*70;
+  V_base = 2; V = V_base;
+  Q_in = 4; Q_g = Q_in*0.5;
+end
+"""
+
+
+def _freeze_inputs():
+    import libsbml
+    import tellurium as te
+    from pyantigen.engine.Analytic_gradient import freeze_stale_assignments
+    r = te.loada(FREEZE_MODEL)
+    r["k_const"] = 0.25           # what a project's Update_parameters does to such a parameter
+    sbml = r.getSBML()
+    return libsbml, freeze_stale_assignments, r, sbml
+
+
+def _initial_assigned(libsbml, sbml):
+    model = libsbml.readSBMLFromString(sbml).getModel()
+    return {model.getInitialAssignment(i).getSymbol() for i in range(model.getNumInitialAssignments())}
+
+
+def test_freezing_everything_makes_every_initial_assigned_parameter_plain_at_the_engines_value():
+    libsbml, freeze, r, sbml = _freeze_inputs()
+    before = _initial_assigned(libsbml, sbml)
+    assert {"k_const", "V", "Q_g"} <= before
+    out, frozen = freeze(sbml, r, everything=True)
+    assert set(frozen) >= {"k_const", "V", "Q_g"}
+    assert not _initial_assigned(libsbml, out) & {"k_const", "V", "Q_g"}
+    model = libsbml.readSBMLFromString(out).getModel()
+    assert model.getParameter("k_const").getValue() == pytest.approx(0.25), "the value RoadRunner holds, not the SBML's"
+    assert model.getParameter("V").getValue() == pytest.approx(2.0)
+
+
+def test_without_everything_only_the_parameters_that_read_a_varying_one_are_frozen():
+    libsbml, freeze, r, sbml = _freeze_inputs()
+    out, frozen = freeze(sbml, r, varying=["Q_in"])
+    assert frozen == ["Q_g"]
+    assert {"k_const", "V"} <= _initial_assigned(libsbml, out)
+
+
+def test_a_protected_variable_and_what_it_is_built_from_are_never_frozen():
+    libsbml, freeze, r, sbml = _freeze_inputs()
+    out, frozen = freeze(sbml, r, protected=["Q_g"], everything=True)
+    assert "Q_g" not in frozen and "Q_g" in _initial_assigned(libsbml, out)
+
+
+def test_the_seed_setting_is_accepted_and_defaults_to_none():
+    got = AmiciGradient.resolve({"analytic_gradient": {"seed": {"AB40_BrainISF": 1e-12}}})
+    assert got["seed"] == {"AB40_BrainISF": 1e-12}
+    assert AmiciGradient.resolve({"analytic_gradient": True})["seed"] is None
+    with pytest.raises(ValueError, match="unknown analytic_gradient key"):
+        AmiciGradient.resolve({"analytic_gradient": {"seeds": {}}})

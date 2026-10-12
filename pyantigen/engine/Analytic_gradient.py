@@ -292,7 +292,7 @@ def _data_times(groups, replicates, models, sim, t_lo, t_hi):
     return times
 
 
-def freeze_stale_assignments(sbml, r, protected=(), varying=()):
+def freeze_stale_assignments(sbml, r, protected=(), varying=(), everything=False):
     """The SBML with the parameters RoadRunner leaves stale made plain, at the values RoadRunner holds.
 
     A parameter with an initial assignment that (through other symbols) reads one of *varying* -- the
@@ -303,6 +303,12 @@ def freeze_stale_assignments(sbml, r, protected=(), varying=()):
 
     *protected*: the variables the schedule assigns, and whatever their initial values are built from, are
     left alone (:meth:`AmiciGradient`'s inputs handle those). Returns ``(sbml, [frozen names])``.
+
+    *everything*: freeze every parameter that has an initial assignment (not only those that read a
+    varying one). A model whose parameters are written as expressions of constants (``k = 9.56e-7*70``,
+    ``V = V_base``) has them as initial assignments, and a project's ``Update_parameters`` or hooks may
+    overwrite them on the RoadRunner model; AMICI would otherwise integrate the SBML's value, not the
+    engine's. Frozen, each is a plain parameter at the value RoadRunner holds.
     """
     import libsbml
     doc = libsbml.readSBMLFromString(sbml)
@@ -334,7 +340,7 @@ def freeze_stale_assignments(sbml, r, protected=(), varying=()):
         p = model.getParameter(sym)
         if p is None or model.getRuleByVariable(sym) is not None:
             continue
-        if tokens(sym, set()) & set(varying):
+        if everything or tokens(sym, set()) & set(varying):
             model.removeInitialAssignment(sym)
             p.setValue(float(r[sym]))
             p.setConstant(True)
@@ -346,7 +352,7 @@ class _SimGradient:
     """AMICI's view of one simulation: the compiled event-free model, the schedule, the parameter replay."""
 
     def __init__(self, name, replicate, model, models, groups, replicates, param_names, probes, *,
-                 model_text, paths, cache_dir, rtol, atol, max_steps, verbose):
+                 model_text, paths, cache_dir, rtol, atol, max_steps, verbose, seed=None):
         from pyantigen.engine.Optimize import OptRoadRunnerProxy, remember_parameter_baseline
         from pyantigen.engine.Scaled_amici import (AmiciSegmentRunner, _plain_parameters,
                                                    compile_model, concentration_outputs)
@@ -373,7 +379,7 @@ class _SimGradient:
             _v, J0 = ParameterReplay(r, replicate, param_names, plain0).jacobian(point)
             varying |= {p for p, hit in zip(plain0, np.abs(J0).max(axis=1) > 0) if hit}
         sbml, self.frozen = freeze_stale_assignments(
-            sbml, r, protected=schedule.assigned_variables(), varying=varying)
+            sbml, r, protected=schedule.assigned_variables(), varying=varying, everything=True)
         plain = _plain_parameters(sbml)
         self.replay = ParameterReplay(r, replicate, param_names, plain)
 
@@ -421,6 +427,7 @@ class _SimGradient:
         self.runner = AmiciSegmentRunner(scaled, schedule, module, states=[], rtol=rtol, atol=atol,
                                          max_steps=max_steps)
         self.t_start, self.t_first, self.t_last = _tracked_window(settings)
+        self.seed = {str(k): float(v) for k, v in (seed or {}).items()}
 
     @staticmethod
     def _usable_columns(r, sbml, columns):
@@ -467,7 +474,7 @@ class _SimGradient:
         T = np.array(sorted(times | {self.t_first, self.t_last}))
         wrt = self.free
         Y, SY = self.runner.run_outputs(theta, self.t_start, self.t_last, list(T), wrt=wrt,
-                                        initial=direct or None, initial_inputs=inputs)
+                                        initial={**self.seed, **(direct or {})} or None, initial_inputs=inputs)
         # d(output)/d(fitted) = d(output)/d(model parameter) . d(model parameter)/d(fitted)
         Jfree = J[[self.replay.plain.index(p) for p in wrt], :]
         data = np.zeros((len(T), len(self.columns)))
@@ -508,11 +515,12 @@ class AmiciGradient:
     ``param_names``, ``scales`` ("log10" or linear, per parameter), and ``x0_lin`` / ``bounds_lin`` (the
     points at which the parameter reach is probed). *settings* is the ``analytic_gradient`` dict of the
     spec's ``optimizer_kwargs``: ``rtol``, ``atol``, ``max_steps`` (AMICI), ``rel_step`` (the loss
-    differentiation), ``cache_dir`` (compiled models).
+    differentiation), ``cache_dir`` (compiled models), ``seed`` (``{state: amount}`` given to AMICI at the
+    start of every run on top of the model's own initial state; see the module's docs).
     """
 
     DEFAULTS = {"provider": "amici", "rtol": 1e-10, "atol": 1e-12, "max_steps": 2_000_000,
-                "rel_step": 1e-5, "cache_dir": None, "verbose": True}
+                "rel_step": 1e-5, "cache_dir": None, "verbose": True, "seed": None}
 
     @classmethod
     def resolve(cls, optimizer_kwargs):
@@ -545,7 +553,8 @@ class AmiciGradient:
             self.sims[name] = _SimGradient(
                 name, rep, models[name], models, groups, replicates, param_names, probes,
                 model_text=model_text, paths=paths, cache_dir=cache_dir, rtol=settings["rtol"],
-                atol=settings["atol"], max_steps=settings["max_steps"], verbose=settings["verbose"])
+                atol=settings["atol"], max_steps=settings["max_steps"], verbose=settings["verbose"],
+                seed=settings["seed"])
         self.n_calls = 0
 
     @staticmethod

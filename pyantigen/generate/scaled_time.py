@@ -42,6 +42,7 @@ to the next segment.
 Not covered: models with events (use the schedule for them), algebraic rules,
 and a ``time`` that appears inside a function definition.
 """
+import re
 import ast
 from dataclasses import dataclass, field
 
@@ -108,16 +109,28 @@ def _parse(text):
     return node
 
 
-def _replace_time(node):
-    """Rewrite ``time`` as the segment clock, in place. Returns how many were replaced."""
-    n = 0
-    if node.getType() == libsbml.AST_NAME_TIME:
-        node.setType(libsbml.AST_NAME)
-        node.setName(CLOCK)
-        n += 1
-    for i in range(node.getNumChildren()):
-        n += _replace_time(node.getChild(i))
-    return n
+_TIME_TOKEN = re.compile(r"(?<![A-Za-z0-9_.])time(?![A-Za-z0-9_])")
+
+
+def _reads_time(node):
+    # isName()/getName(), not getType() == AST_NAME_TIME: see Event_times._is_time
+    if node.isName() and node.getName() == "time":
+        return True
+    return any(_reads_time(node.getChild(i)) for i in range(node.getNumChildren()))
+
+
+def _with_clock(node):
+    """*node*'s mathematics with ``time`` rewritten as the segment clock, as a new tree; None if it reads no time.
+
+    Done on the formula text, not by editing the node. Once AMICI has been imported in a process, python-libsbml
+    hands out nodes wrapped by libsedml (AMICI's own copy of the SWIG types) and ``node.setType(libsbml.AST_NAME)``
+    raises TypeError, while comparing ``getType()`` with a constant is simply False for every node, which would
+    leave the rule reading ``time``. The text route needs neither, and drops the ``definitionURL`` of the time
+    symbol that AMICI's importer refuses on a plain <ci>. Numbers are printed to 15 significant digits.
+    """
+    if not _reads_time(node):
+        return None
+    return _parse(_TIME_TOKEN.sub(CLOCK, libsbml.formulaToL3String(node)))
 
 
 def _expand_initial(model, text, depth=0):
@@ -184,13 +197,20 @@ def scale_model(sbml, schedule):
 
     # 1. the clock inside the model's own mathematics
     for i in range(model.getNumRules()):
-        _replace_time(model.getRule(i).getMath())
+        rule = model.getRule(i)
+        new = _with_clock(rule.getMath())
+        if new is not None:
+            rule.setMath(new)
     for i in range(model.getNumReactions()):
         kl = model.getReaction(i).getKineticLaw()
-        if kl is not None and kl.isSetMath():
-            _replace_time(kl.getMath())
+        new = _with_clock(kl.getMath()) if kl is not None and kl.isSetMath() else None
+        if new is not None:
+            kl.setMath(new)
     for i in range(model.getNumInitialAssignments()):
-        _replace_time(model.getInitialAssignment(i).getMath())
+        assignment = model.getInitialAssignment(i)
+        new = _with_clock(assignment.getMath())
+        if new is not None:
+            assignment.setMath(new)
 
     # 2. measured curves become straight lines of the clock, constants per segment
     for c in sorted(curves):

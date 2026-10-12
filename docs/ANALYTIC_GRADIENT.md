@@ -48,6 +48,7 @@ A problem it cannot handle stops the run before any fit (`Multistart.GradientSet
 | `max_steps` | 2 000 000 | AMICI step cap; the 10 000 h pre-equilibration of SILK needs it |
 | `rel_step` | 1e-5 | step of the loss differentiation (below) |
 | `cache_dir` | `<plot_path>/amici_models` | compiled models; one directory per distinct model |
+| `seed` | none | `{state: amount}` given to AMICI at the start of every run, on top of the model's own initial state (see "A model that starts at zero") |
 
 ### What it computes
 
@@ -82,8 +83,34 @@ Where the two differ, the gradient follows the engine:
   (`freeze_stale_assignments`); a schedule input among them keeps its stale starting value when it
   differs from the formula. The stale value is a property of the in-place simulation, and the gradient
   matches it.
+* **Every parameter with an initial assignment is frozen**, not only those that read a fitted one. A model
+  whose constants are written as expressions (`k = 9.56e-7*70`, `V = V_base`) has them as initial
+  assignments, and a project's `Update_parameters` or hooks may overwrite them on the RoadRunner model.
+  Each becomes a plain parameter at the value RoadRunner holds, so AMICI integrates what the engine
+  integrates, and a hook that moves it is seen by the replay. (Before, only those reading a fitted parameter
+  were frozen; the others stayed NaN placeholders that reached AMICI's parameter vector, and a value a hook
+  had overwritten was not the one AMICI used.) Variables the schedule assigns, and what their initial values
+  are built from, are left alone.
 * A species a hook sets directly is handed to AMICI as an initial value (without sensitivities; a hook
   whose value depends on the fitted parameters is refused).
+
+### A model that starts at zero
+
+AMICI differentiates the right-hand side symbolically and evaluates it at the first instant. A rate law
+with a fractional power of an amount that is exactly zero there, `(Total/V)^0.8`, has an infinite derivative
+at 0, and `0 * inf` is NaN: the run fails at t = 0 with status -42 ("NaN value for sxdot"). RoadRunner does
+not differentiate, so the same model integrates without complaint. Give the states in question a negligible
+amount, in AMICI only:
+
+```python
+optimizer_kwargs = {"analytic_gradient": {"seed": {"AB40_BrainISF": 1e-12, "AB42_BrainISF": 1e-12}}}
+```
+
+Read the AMICI log for the names: it lists the first states and rates that were NaN. The effect on the
+trajectory is of the order of the seed, forgotten within the first steps of a stable system; check it for
+yours by comparing the AMICI values with the engine's, as `Checks/wsl/` does. Unguarded ratios of two
+zero amounts (`A / B` as an output) also print a NaN warning at t = 0 but do not stop the run unless the
+dynamics read them.
 
 ### Limits
 

@@ -197,7 +197,10 @@ class AmiciSegmentRunner:
                 raise KeyError(f"cannot differentiate with respect to {name!r}: not a free parameter "
                                f"of the compiled model ({self.free_ids})")
         # every name an initial expression may mention, with the model's own value unless given
-        theta = {**self.scaled.parameter_values, **{k: v for k, v in theta.items()}}
+        # a parameter the SBML gives no value (it has an initial assignment) is NaN in parameter_values:
+        # leave it to AMICI, which evaluates the assignment, rather than overwrite it with NaN
+        theta = {**{k: v for k, v in self.scaled.parameter_values.items() if np.isfinite(v)},
+                 **{k: v for k, v in theta.items()}}
         values = list(model.get_free_parameters())
         for name, v in theta.items():
             if name in self.free_ids:

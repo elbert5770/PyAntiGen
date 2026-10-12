@@ -163,3 +163,17 @@ def test_initial_assignment_chains_are_followed_to_the_parameters():
     assert sm.initial_inputs["Q_SN"].replace(" ", "") == "Q_CSF*f_SN"
     assert sm.initial_inputs["Q_Leak"] == 0.0
     assert sm.parameter_values["Q_CSF"] == NOMINAL["Q_CSF"]
+
+
+def test_time_in_a_rule_becomes_the_clock_without_the_time_symbols_url():
+    """A rule that reads ``time`` (a drug curve written as a function of time) is rewritten in terms of
+    the segment clock. The renamed node must be a plain <ci>: left carrying definitionURL=".../time" it is
+    refused by AMICI's importer ("Unhandled <ci> attributes")."""
+    import re
+    sched = schedule()
+    drug = "\ndrug := piecewise(0, time < 2, 3*exp(-0.1*(time - 2)))\n"
+    sbml = te.antimonyToSBML(MODEL.format(**NOMINAL) + drug + sched.to_antimony(events=False))
+    sm = scale_model(sbml, sched)
+    assert not re.search(r"<ci[^>]*definitionURL", sm.sbml)
+    rule = re.search(r'<assignmentRule variable="drug">.*?</assignmentRule>', sm.sbml, re.S).group(0)
+    assert CLOCK in rule and "time" not in re.sub(r"</?[a-z]+[^>]*>", " ", rule).split()
