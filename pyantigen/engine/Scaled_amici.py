@@ -16,7 +16,12 @@ points of ``s``.
 AMICI is optional and, on Windows, needs WSL (no wheel, no compiler); this
 module imports it only when a runner is built.
 """
+import json
+import os
+
 import numpy as np
+
+_OUTPUT_PREFIX = "out_"
 
 
 def _amici():
@@ -40,7 +45,32 @@ def _plain_parameters(sbml):
             and model.getInitialAssignmentBySymbol(p.getId()) is None]
 
 
-def compile_model(scaled, name, output_dir, free=None, verbose=False):
+def concentration_outputs(sbml, columns):
+    """``{column: formula}`` for the result columns of a RoadRunner run, to compile as AMICI outputs.
+
+    ``[S]`` is the concentration of species S: ``S / compartment`` when the species is
+    in amount units (``hasOnlySubstanceUnits``, which is what AMICI's state holds),
+    ``S`` otherwise. Any other column (an assigned variable, a parameter, a state)
+    is its own formula. ``time`` is not an output; it is the observation time.
+    """
+    import libsbml
+    model = libsbml.readSBMLFromString(sbml).getModel()
+    out = {}
+    for col in columns:
+        if col == "time":
+            continue
+        if col.startswith("[") and col.endswith("]"):
+            sp = model.getSpecies(col[1:-1])
+            if sp is None:
+                raise KeyError(f"{col}: not a species of the model")
+            out[col] = (f"{sp.getId()} / {sp.getCompartment()}" if sp.getHasOnlySubstanceUnits()
+                        else sp.getId())
+        else:
+            out[col] = col
+    return out
+
+
+def compile_model(scaled, name, output_dir, free=None, outputs=None, verbose=False):
     """Compile *scaled* (a ScaledModel) with AMICI and return the model module.
 
     Conservation laws are switched off so the state vector is the model's own;
@@ -48,6 +78,11 @@ def compile_model(scaled, name, output_dir, free=None, verbose=False):
     parameters to differentiate with respect to: every other plain parameter is
     compiled as a fixed one, which keeps the generated sensitivity code (and the
     compile time) small for a large model. Default: all of them stay free.
+
+    *outputs* is ``{name: formula}``: quantities AMICI evaluates, and differentiates
+    itself, at the end of every segment (see :func:`concentration_outputs`). A
+    runner returns them from :meth:`AmiciSegmentRunner.run_outputs`; their names
+    are written beside the model (``outputs.json``) so the runner knows the order.
     """
     amici, _sundials, SbmlImporter = _amici()
     fixed = list(scaled.constants)
@@ -57,11 +92,16 @@ def compile_model(scaled, name, output_dir, free=None, verbose=False):
         if unknown:
             raise KeyError(f"not parameters of the model: {sorted(unknown)}")
         fixed += [p for p in _plain_parameters(scaled.sbml) if p not in free and p not in fixed]
+    outputs = dict(outputs or {})
+    channels = [amici.MeasurementChannel(id_="o_clock", formula="sched_clock")]
+    channels += [amici.MeasurementChannel(id_=f"{_OUTPUT_PREFIX}{i}", formula=f)
+                 for i, f in enumerate(outputs.values())]
     importer = SbmlImporter(scaled.sbml, from_file=False)
     importer.sbml2amici(
         name, str(output_dir), fixed_parameters=fixed,
-        compute_conservation_laws=False, verbose=verbose,
-        observation_model=[amici.MeasurementChannel(id_="o_clock", formula="sched_clock")])
+        compute_conservation_laws=False, verbose=verbose, observation_model=channels)
+    with open(os.path.join(str(output_dir), "outputs.json"), "w") as fh:
+        json.dump(list(outputs), fh)
     return amici.import_model_module(name, str(output_dir))
 
 
@@ -99,6 +139,19 @@ class AmiciSegmentRunner:
         # every state by the name the schedule's expressions use (AMICI renames y -> amici_y)
         self._named = {(n[len("amici_"):] if n.startswith("amici_") and n[len("amici_"):] not in self.state_ids
                         else n): i for i, n in enumerate(self.state_ids)}
+        # the outputs the model was compiled with (compile_model(outputs=...)), in order
+        self.output_names = self._read_output_names(module)
+        observables = list(self.model.get_observable_ids())
+        self._output_index = [observables.index(f"{_OUTPUT_PREFIX}{i}") for i in range(len(self.output_names))]
+
+    @staticmethod
+    def _read_output_names(module):
+        directory = os.path.dirname(os.path.dirname(os.path.abspath(module.__file__)))
+        try:
+            with open(os.path.join(directory, "outputs.json")) as fh:
+                return list(json.load(fh))
+        except OSError:
+            return []
 
     def _state_index(self, name):
         for candidate in (name, "amici_" + name):
@@ -118,6 +171,25 @@ class AmiciSegmentRunner:
         Returns ``(X, S)``: X[k, i] the i-th requested state at the k-th
         observation time, S[k, i, j] its derivative with respect to ``wrt[j]``.
         """
+        x, s, _y, _sy = self._run(theta, t_start, t_end, observation_times, wrt, initial, initial_inputs,
+                                  outputs=False)
+        return x, s
+
+    def run_outputs(self, theta, t_start, t_end, observation_times, wrt=None, initial=None,
+                    initial_inputs=None):
+        """The compiled outputs (``compile_model(outputs=...)``) and their derivatives at the observation times.
+
+        Same arguments as :meth:`run`. Returns ``(Y, SY)``: Y[k, i] the i-th output
+        (``self.output_names[i]``) at the k-th observation time, SY[k, i, j] its
+        derivative with respect to ``wrt[j]``, which AMICI takes through the output's own formula.
+        """
+        if not self.output_names:
+            raise ValueError("the model was compiled without outputs (compile_model(outputs=...))")
+        _x, _s, y, sy = self._run(theta, t_start, t_end, observation_times, wrt, initial, initial_inputs,
+                                  outputs=True)
+        return y, sy
+
+    def _run(self, theta, t_start, t_end, observation_times, wrt, initial, initial_inputs, outputs):
         wrt = sorted(self.schedule.params) if wrt is None else list(wrt)
         model, solver = self.model, self.solver
         for name in wrt:
@@ -151,7 +223,7 @@ class AmiciSegmentRunner:
 
         model.set_t0(0.0)
         model.set_timepoints([1.0])
-        out_x, out_s = [], []
+        out_x, out_s, out_y, out_sy = [], [], [], []
         if initial_inputs is None:
             initial_inputs = self.scaled.initial_inputs
         plan = self.schedule.plan(t_start, t_end, observation_times, params=theta, wrt=wrt,
@@ -187,4 +259,8 @@ class AmiciSegmentRunner:
                 cols = [self._index[n] for n in self.states]
                 out_x.append(x[cols])
                 out_s.append(sx[:, cols].T)
-        return np.array(out_x), np.array(out_s)
+                if outputs:
+                    out_y.append(np.array(rdata.y)[-1][self._output_index])
+                    out_sy.append(np.array(rdata.sy)[-1].reshape(npar, -1)[:, self._output_index].T
+                                  if npar else np.zeros((len(self._output_index), 0)))
+        return np.array(out_x), np.array(out_s), np.array(out_y), np.array(out_sy)

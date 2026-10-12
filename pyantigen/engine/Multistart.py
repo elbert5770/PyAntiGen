@@ -233,6 +233,71 @@ class FDObjective:
         return f0, g
 
 
+class GradientSetupError(RuntimeError):
+    """A gradient provider cannot be built for this problem. Never papered over by a finite difference."""
+
+
+class AnalyticObjective:
+    """``x -> (f, gradient)`` for scipy's ``jac=True``, with the gradient from a provider.
+
+    ``objective(x)`` is the engine's own objective, so the value, the best-so-far
+    bookkeeping and the failure handling are exactly what they were. ``gradient(x)``
+    returns d(objective)/dx in the same (optimizer) space -- for the concentrated NLL,
+    ``pyantigen.engine.Analytic_gradient.AmiciGradient``.
+
+    Failure follows ``FDObjective``: if f(x) fails the call returns *penalty* (or the
+    failure value) and a zero gradient, the plateau semantics of the failure wall. If
+    the provider fails at a point that evaluated (AMICI's solver gave up, a
+    sensitivity is not finite) that one gradient is taken by forward differences of the
+    objective instead, and counted in ``n_fallback``; a zero gradient there would read as
+    convergence. A :class:`GradientSetupError` is not a failure of one point and is raised.
+    """
+
+    def __init__(self, objective, gradient, bounds, scales, *, failure_value=1e10, penalty=None,
+                 fd_step=1e-3):
+        self.objective, self.gradient = objective, gradient
+        self.bounds, self.scales = bounds, list(scales)
+        self.k = len(self.scales)
+        self.failure_value, self.penalty, self.fd_step = failure_value, penalty, fd_step
+        self.last_f = float("nan")
+        self.n_calls = 0           # gradients taken
+        self.n_evals = 0           # objective evaluations, all of them
+        self.n_retried = 0
+        self.n_zeroed = 0
+        self.n_fallback = 0        # gradients taken by finite differences because the provider failed
+        self.last_error = None
+
+    def _ok(self, v):
+        return bool(np.isfinite(v)) and v < self.failure_value
+
+    def __call__(self, x):
+        x = np.asarray(x, dtype=float)
+        f0 = float(self.objective(x))
+        self.n_evals += 1
+        if not self._ok(f0):
+            fail = self.penalty if self.penalty is not None else (f0 if np.isfinite(f0) else self.failure_value)
+            return float(fail), np.zeros(self.k)
+        self.last_f = f0
+        try:
+            g = np.asarray(self.gradient(x), dtype=float)
+            if g.shape != (self.k,) or not np.all(np.isfinite(g)):
+                raise ValueError(f"gradient {g.shape} is not a finite vector of length {self.k}")
+        except GradientSetupError:
+            raise
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self.n_fallback += 1
+            fd = FDObjective(lambda pts: [self.objective(p) for p in pts], self.bounds, self.scales,
+                             step=self.fd_step, scheme="forward", failure_value=self.failure_value,
+                             penalty=self.penalty)
+            _f, g = fd(x)
+            self.n_evals += fd.n_evals
+            self.n_retried += fd.n_retried
+            self.n_zeroed += fd.n_zeroed
+        self.n_calls += 1
+        return f0, g
+
+
 def json_safe(obj):
     """*obj* as plain JSON data: numpy scalars and arrays become Python ones, a
     non-finite float becomes None, tuples become lists. The result snapshot is

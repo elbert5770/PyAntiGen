@@ -2266,6 +2266,10 @@ _ENGINE_ONLY_OPTIMIZER_KEYS = (
     "multistart_limits",
     "multistart_triage",
     "multistart_gradient",
+    # The fit's gradient from AMICI sensitivities: see pyantigen.engine.Analytic_gradient.
+    "analytic_gradient",
+    # What to do when the bounds reach parameters a schedule cannot be integrated at.
+    "schedule_bounds",
 )
 
 
@@ -2621,7 +2625,7 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
                     failure_dnll=None, penalty_reference=None,
                     cluster_radius=0.15, report_dnll=1.0, summary=None,
                     resume=None, on_fit=None, stop_check=None,
-                    fd=None, grad_batch=None, gradient_where="serial"):
+                    fd=None, grad_batch=None, gradient_where="serial", analytic=None):
     """Fit from every start, keep the best, and report the spread.
 
     Gradient methods (see ``Multistart.GRADIENT_METHODS``) take their gradient
@@ -2630,6 +2634,10 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     by ``grad_batch(points) -> values`` (the worker pool) or, without one, in this
     process. Each record then says how the gradient was taken, and its ``nfev`` is
     the number of objective evaluations rather than scipy's call count.
+
+    *analytic*, a callable ``x -> d objective / dx`` (opt space), replaces the finite
+    differences altogether for a gradient method: ``Multistart.AnalyticObjective``
+    takes the value from the objective and the gradient from it.
 
     Resumable, for a stage that can be killed between fits: ``resume`` is a list
     aligned with *starts* holding each fit's record from an earlier launch (or
@@ -2661,7 +2669,7 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
     """
     from scipy.optimize import minimize
 
-    from pyantigen.engine.Multistart import GRADIENT_METHODS, FDObjective
+    from pyantigen.engine.Multistart import GRADIENT_METHODS, AnalyticObjective, FDObjective
 
     starts = [np.asarray(s, dtype=float) for s in starts]
 
@@ -2755,16 +2763,21 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
             stop_check(len(starts) - i)
         fdo, gradient_info = None, None
         try:
-            if (fd is not None and fd.get("scheme") != "scipy"
+            if ((analytic is not None or (fd is not None and fd.get("scheme") != "scipy"))
                     and str(method).lower() in GRADIENT_METHODS):
                 import time as _time
-                batch = grad_batch if grad_batch is not None else (
-                    lambda pts: [_eval(p) for p in pts])
-                fdo = FDObjective(batch, bounds, scales, step=fd["step"],
-                                  scheme=fd["scheme"], failure_value=failure_value,
-                                  penalty=penalty)
-                gradient_info = {"scheme": fd["scheme"], "step": fd["step"],
-                                 "where": gradient_where}
+                if analytic is not None:
+                    fdo = AnalyticObjective(fit_objective, analytic, bounds, scales,
+                                            failure_value=failure_value, penalty=penalty)
+                    gradient_info = {"scheme": "analytic", "step": None, "where": "serial"}
+                else:
+                    batch = grad_batch if grad_batch is not None else (
+                        lambda pts: [_eval(p) for p in pts])
+                    fdo = FDObjective(batch, bounds, scales, step=fd["step"],
+                                      scheme=fd["scheme"], failure_value=failure_value,
+                                      penalty=penalty)
+                    gradient_info = {"scheme": fd["scheme"], "step": fd["step"],
+                                     "where": gradient_where}
                 t_fit0, n_iter = _time.time(), [0]
 
                 def _progress_line(_xk, _fdo=fdo, _t0=t_fit0, _n=n_iter):
@@ -2803,6 +2816,9 @@ def _run_multistart(objective, starts, method, bounds, opt_kw, scales,
             records[-1]["gradient"] = {**gradient_info, "n_gradients": fdo.n_calls,
                                        "n_retried": fdo.n_retried,
                                        "n_zeroed_components": fdo.n_zeroed}
+            if analytic is not None:
+                records[-1]["gradient"]["n_fallback"] = fdo.n_fallback
+                records[-1]["gradient"]["last_error"] = fdo.last_error
         if on_fit is not None:
             on_fit(i, records[-1])
         if r is not None and np.isfinite(fun) and (best is None or fun < best.fun):
@@ -2890,7 +2906,7 @@ def _now():
     return time.time()
 
 
-def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient=None):
+def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient=None, analytic=False):
     """Identity of what a stage checkpoint holds scores for.
 
     The fit cache's own key already covers the spec, so a checkpoint cannot
@@ -2907,6 +2923,7 @@ def _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient
         "limits": limits, "method": str(ms_method), "kw": ms_kw, "n_fits": int(n_fits),
         "gradient": ({k: gradient[k] for k in sorted(gradient) if k != "parallel"}
                      if gradient else None),
+        **({"analytic_gradient": True} if analytic else {}),
     }, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -2947,7 +2964,7 @@ class _PoolHolder:
 def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
                           ms_kw_raw, tri, limits, *, n_fits, method, fast=False,
                           verbose=True, pool_builder=None, n_workers_hint=None,
-                          fit_cache=None, budget=None, gradient=None):
+                          fit_cache=None, budget=None, gradient=None, analytic=None):
     """The multi-start stage; see :func:`_run_multistart_stage_body`.
 
     This wrapper owns the worker pool's lifetime: whatever the body does, the pool
@@ -2959,7 +2976,7 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
             objective, candidates, x0, bounds, scales, ms_method, ms_kw_raw, tri, limits,
             n_fits=n_fits, method=method, fast=fast, verbose=verbose, holder=holder,
             n_workers_hint=n_workers_hint, fit_cache=fit_cache, budget=budget,
-            gradient=gradient)
+            gradient=gradient, analytic=analytic)
     finally:
         holder.close()
 
@@ -2967,7 +2984,7 @@ def _run_multistart_stage(objective, candidates, x0, bounds, scales, ms_method,
 def _run_multistart_stage_body(objective, candidates, x0, bounds, scales, ms_method,
                                ms_kw_raw, tri, limits, *, n_fits, method, fast=False,
                                verbose=True, holder=None, n_workers_hint=None,
-                               fit_cache=None, budget=None, gradient=None):
+                               fit_cache=None, budget=None, gradient=None, analytic=None):
     """The multi-start stage: triage the candidates, then fit from the survivors.
 
     *candidates* are opt-space points, row 0 the spec's x0 (see
@@ -3024,7 +3041,8 @@ def _run_multistart_stage_body(objective, candidates, x0, bounds, scales, ms_met
         return v if np.isfinite(v) and v < 1e10 else np.inf
 
     # -- the checkpoint -------------------------------------------------------
-    sig = _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient)
+    sig = _stage_signature(candidates, tri, limits, ms_method, ms_kw, n_fits, gradient,
+                           analytic=analytic is not None)
     st = None
     if fit_cache is not None:
         saved = fit_cache.load_stage()
@@ -3217,9 +3235,10 @@ def _run_multistart_stage_body(objective, candidates, x0, bounds, scales, ms_met
     # worth the pool is a different question from the fast pass's, because the
     # batch is only k + 1 wide and the iterations are sequential.
     from pyantigen.engine.Multistart import GRADIENT_METHODS, prefer_pool_gradient
-    use_fd = (gradient is not None and gradient["scheme"] != "scipy"
+    use_fd = (gradient is not None and gradient["scheme"] != "scipy" and analytic is None
               and str(ms_method).lower() in GRADIENT_METHODS)
-    gdecision = {"scheme": (gradient or {}).get("scheme", "scipy" if gradient is None else None),
+    gdecision = {"scheme": ("analytic" if analytic is not None
+                            else (gradient or {}).get("scheme", "scipy" if gradient is None else None)),
                  "step": (gradient or {}).get("step"), "used_pool": False}
     grad_batch, gradient_where = None, "serial"
     fits_left = [i for i in fit_idx if str(i) not in st["fits"]]
@@ -3295,7 +3314,7 @@ def _run_multistart_stage_body(objective, candidates, x0, bounds, scales, ms_met
             resume=[st["fits"].get(str(i)) for i in fit_idx], on_fit=_on_fit,
             stop_check=lambda n_left: _stop(n_left, "multi-start fits"),
             fd=(gradient if use_fd else None), grad_batch=grad_batch,
-            gradient_where=gradient_where)
+            gradient_where=gradient_where, analytic=analytic)
     _tick()
 
     for rec, idx in zip(records, fit_idx):
@@ -3493,6 +3512,89 @@ def _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol):
             kwargs["options"] = opts
             
     return kwargs
+
+
+SCHEDULE_BOUNDS_MODES = ("warn", "error", "clip", "ignore")
+
+
+def _apply_schedule_bounds(active_replicates, models, param_names, x0_lin, bounds_lin, mode="warn"):
+    """Check the fit's box against the InputSchedule of every simulation that has one.
+
+    A schedule can only be integrated while its switches keep their order (see
+    ``InputSchedule.validate``); a point outside that region is a failed evaluation, which a
+    gradient method reads as a cliff. This tells the author, before the first evaluation, whether
+    the bounds reach such points, and where.
+
+    mode : "warn" (the default) prints what it found; "error" raises ``ScheduleError``; "clip" cuts the
+        bounds of the parameters that move a switch time toward x0 until the box is feasible
+        (``InputSchedule.shrink_box``) and returns the cut bounds; "ignore" does nothing. A starting
+        point x0 that is itself infeasible raises in every mode but "ignore": no fit can start there.
+
+    Only simulations whose solver settings carry a ``schedule`` are checked. The fitted names are
+    taken as the schedule's parameters; a parameter a hook derives from them is not followed.
+    """
+    mode = str(mode or "warn").lower()
+    if mode not in SCHEDULE_BOUNDS_MODES:
+        raise ValueError(f"optimizer_kwargs['schedule_bounds'] must be one of {SCHEDULE_BOUNDS_MODES}")
+    if mode == "ignore" or not bounds_lin:
+        return bounds_lin
+    from pyantigen.generate.input_schedule import ScheduleError
+    new = [None if b is None else tuple(b) for b in bounds_lin]
+    x0 = dict(zip(param_names, [float(v) for v in x0_lin]))
+    for sim, rep in active_replicates.items():
+        sched = rep["Solver_settings"](rep).get("schedule")
+        if sched is None:
+            continue
+        r = models[sim]["r"]
+        base = {p: float(r[p]) for p in sched.params}
+        base.update({n: v for n, v in x0.items() if n in sched.params})
+        box = {n: new[i] for i, n in enumerate(param_names)
+               if n in sched.switch_parameters() and new[i] is not None}
+        try:
+            report = sched.check_box(box, params=base)
+        except ScheduleError as exc:
+            raise ScheduleError(f"{sim}: the starting point is outside the region the schedule can be "
+                                f"integrated in: {exc}") from exc
+        if report["feasible"]:
+            continue
+        shown = "; ".join(f"{ {k: round(v, 6) for k, v in pt.items()} }" for pt, _m in report["failures"])
+        text = (f"{sim}: the bounds of {sorted(box)} reach parameter sets where the schedule's switches change "
+                f"order, e.g. {shown}. Those evaluations fail. Tighten the bounds, or set "
+                f"optimizer_kwargs['schedule_bounds']='clip'.")
+        if mode == "error":
+            raise ScheduleError(text)
+        if mode == "clip":
+            cut, alpha = sched.shrink_box(box, params=base)
+            for n, b in cut.items():
+                new[param_names.index(n)] = tuple(b)
+            print(f"[opt] {sim}: the bounds of {sorted(box)} were cut to {alpha:.1%} of the way from x0 to "
+                  f"stay where the schedule can be integrated: "
+                  f"{ {n: tuple(round(v, 6) for v in cut[n]) for n in cut} }", flush=True)
+        else:
+            print(f"[opt] WARNING {text}", flush=True)
+    return new
+
+
+def _local_minimize(objective, x_start, method, bounds, opt_kw, analytic, scales):
+    """``scipy.optimize.minimize``, taking the gradient from *analytic* when there is one.
+
+    A gradient method with a provider gets ``Multistart.AnalyticObjective`` (value from the
+    objective, gradient from the provider) and ``jac=True``; the result's ``nfev`` is the
+    number of objective evaluations. Anything else is the plain scipy call it always was.
+    """
+    from scipy.optimize import minimize
+    from pyantigen.engine.Multistart import GRADIENT_METHODS, AnalyticObjective
+    if analytic is None or str(method).lower() not in GRADIENT_METHODS:
+        return minimize(objective, x_start, method=method, bounds=bounds or None, **opt_kw)
+    ao = AnalyticObjective(objective, analytic, bounds, scales)
+    res = minimize(ao, x_start, jac=True, method=method, bounds=bounds or None, **opt_kw)
+    res.nfev = ao.n_evals
+    res.gradient = {"scheme": "analytic", "n_gradients": ao.n_calls, "n_fallback": ao.n_fallback,
+                    "last_error": ao.last_error}
+    if ao.n_fallback:
+        print(f"  [opt] the analytic gradient failed {ao.n_fallback} time(s) and was replaced by "
+              f"finite differences there (last: {ao.last_error}).", flush=True)
+    return res
 
 
 def _run_global_optimization(objective, x0, bounds, method, kwargs):
@@ -7217,6 +7319,15 @@ def run_optimization_from_groups(
             name: rep for name, rep in replicates.items() if name in active_sim_names
         }
 
+        # Where the fit's box leaves the region a schedule can be integrated in (see
+        # _apply_schedule_bounds). Before the fingerprint and the pool, which see the bounds.
+        _checked = _apply_schedule_bounds(
+            active_replicates, models, param_names, x0_lin, bounds_lin,
+            (optimizer_kwargs or {}).get("schedule_bounds", "warn"))
+        if _checked != bounds_lin:
+            bounds_lin = _checked
+            bounds = _bounds_to_opt_space(bounds_lin, scales)
+
         preequil_ok = _enable_preequil_cache(
             models, active_replicates, param_names, x0_lin, bounds_lin,
             enabled=preequil_cache and not _events_dynamic,
@@ -7391,6 +7502,23 @@ def run_optimization_from_groups(
             return total_loss
 
         opt_kw = _prepare_optimizer_kwargs(method, optimizer_kwargs, fast, maxiter, tol)
+
+        # The gradient from AMICI's forward sensitivities, when the spec asks for it
+        # (optimizer_kwargs["analytic_gradient"]) and a fit is going to run. Built here, up front,
+        # so that a problem it cannot handle stops the run before any fit rather than inside one.
+        _analytic = None
+        if (fit_mode != "evaluate_x0"
+                and (fit_cache is None or fit_cache.load_complete() is None)):
+            from pyantigen.engine.Analytic_gradient import build_gradient
+            from pyantigen.engine.Multistart import GRADIENT_METHODS
+            _ms_method, _ = _resolve_multistart_stage(method, optimizer_kwargs)
+            if str(method).lower() in GRADIENT_METHODS or str(_ms_method or "").lower() in GRADIENT_METHODS:
+                _analytic = build_gradient(
+                    optimizer_kwargs, models=models, replicates=active_replicates,
+                    groups=optimization_spec.groups, param_names=param_names, scales=scales,
+                    x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
+            elif (optimizer_kwargs or {}).get("analytic_gradient"):
+                print(f"[opt] analytic_gradient ignored: {method} does not use a gradient.")
         start_records = None
         multistart_report = None
         # Where the optimum came from when it was not fitted here: the path of
@@ -7543,7 +7671,7 @@ def run_optimization_from_groups(
                             pool_builder=(_triage_pool if _pool_wanted else None),
                             n_workers_hint=n_workers,
                             fit_cache=fit_cache, budget=_stage_budget,
-                            gradient=_gradient)
+                            gradient=_gradient, analytic=_analytic)
                     except DeadlineReached as exc:
                         # Like the standard fit: nothing finished to hand the rest
                         # of the pipeline, so stop the run cleanly. The stage's
@@ -7628,20 +7756,20 @@ def run_optimization_from_groups(
                         import sys
                         sys.exit(0)
                 else:
-                    res = minimize(objective, x_start, method=method,
-                                   bounds=bounds or None, **opt_kw)
+                    res = _local_minimize(objective, x_start, method, bounds, opt_kw,
+                                          _analytic, scales)
             else:
                 _summary = {}
                 res, start_records, _best_start = _run_multistart(
                     objective, starts, method, bounds, opt_kw, scales,
-                    summary=_summary,
+                    summary=_summary, analytic=_analytic,
                 )
                 multistart_report = {"mode": "all-starts", **_summary}
                 if res is None:
                     print("[opt] every multi-start fit failed; falling back to "
                           "a single fit from the spec's x0.")
-                    res = minimize(objective, x0, method=method,
-                                   bounds=bounds or None, **opt_kw)
+                    res = _local_minimize(objective, x0, method, bounds, opt_kw,
+                                          _analytic, scales)
 
         if _debug_calls[0] > 3:
             elapsed = time.time() - _progress["t0"]

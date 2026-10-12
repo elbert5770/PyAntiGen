@@ -58,6 +58,7 @@ import ast
 import bisect
 import functools
 import math
+import random
 import re
 from dataclasses import dataclass
 from fractions import Fraction
@@ -590,6 +591,111 @@ class InputSchedule:
                 f"(first differences: {moved}); parameters are outside the feasible region")
         self._check_gaps(timed, steps, min_gap)
         return self._read_after_write_warnings()
+
+    def switch_parameters(self):
+        """Names of the model parameters that move a switch time (the ones the order of the switches depends on)."""
+        names = set()
+        for _text, tree in self._moving.values():
+            names |= _symbols(tree)
+        return names & set(self.params)
+
+    def check_box(self, bounds, params=None, interior=64, seed=0, min_gap=1e-9):
+        """Which parts of a box of parameter values the schedule can be integrated in.
+
+        *bounds* is ``{name: (lo, hi)}`` (a ``None`` end is unbounded and not tested); *params* are the
+        values of every other parameter (default: the nominal ones). ``validate`` is called at the box's
+        corners, at the nominal point and at *interior* quasi-random points of the box (half uniform, half
+        log-uniform), over the parameters that move a switch time. Only those matter: the order of the
+        switches does not depend on the others.
+
+        Returns a dict:
+
+        ``feasible``  True if every tested point validates.
+        ``failures``  up to three ``(point, message)`` that did not.
+        ``intervals`` per parameter, ``(lo, hi)``: the widest part of its bounds, around the nominal
+                      value and with the others held there, in which the schedule validates.
+        ``tested``    how many points were tried.
+
+        The box is a rectangle and the feasible region is not: ``intervals`` are what each bound
+        can be cut to on its own, and a box inside them can still hold infeasible corners
+        (``feasible`` says so). An optimizer treats an infeasible point as a failed evaluation; this
+        is the check that tells the author before the first one.
+        """
+        import itertools
+        base = dict(self.params if params is None else params)
+        active = sorted(n for n in bounds if n in self.switch_parameters()
+                        and bounds[n] is not None and bounds[n][0] is not None and bounds[n][1] is not None)
+        self.validate(base, min_gap=min_gap)            # the nominal point itself must be feasible
+        lo = {n: float(bounds[n][0]) for n in active}
+        hi = {n: float(bounds[n][1]) for n in active}
+        for n in active:
+            if not lo[n] <= hi[n]:
+                raise ScheduleError(f"bounds of {n} are reversed: {bounds[n]}")
+        points = [dict(zip(active, v)) for v in itertools.product(*[(lo[n], hi[n]) for n in active])]
+        rng = random.Random(seed)
+        for i in range(int(interior) if active else 0):
+            pt = {}
+            for n in active:
+                u = rng.random()
+                logspace = i % 2 == 1 and lo[n] > 0
+                pt[n] = (lo[n] * (hi[n] / lo[n]) ** u) if logspace else lo[n] + u * (hi[n] - lo[n])
+            points.append(pt)
+        failures = []
+        for pt in points:
+            try:
+                self.validate({**base, **pt}, min_gap=min_gap)
+            except ScheduleError as exc:
+                if len(failures) < 3:
+                    failures.append((pt, str(exc)))
+        intervals = {}
+        for n in active:
+            def ok(v, n=n):
+                try:
+                    self.validate({**base, n: v}, min_gap=min_gap)
+                    return True
+                except ScheduleError:
+                    return False
+
+            def reach(good, bad):
+                if ok(bad):
+                    return bad
+                for _ in range(60):
+                    mid = 0.5 * (good + bad)
+                    good, bad = (mid, bad) if ok(mid) else (good, mid)
+                return good
+            x0 = min(max(base[n], lo[n]), hi[n])
+            intervals[n] = (reach(x0, lo[n]) if lo[n] < x0 else x0, reach(x0, hi[n]) if hi[n] > x0 else x0)
+        return {"feasible": not failures, "failures": failures, "intervals": intervals, "tested": len(points)}
+
+    def shrink_box(self, bounds, params=None, interior=16, seed=0, min_gap=1e-9, iterations=24):
+        """The largest box of the shape ``nominal + alpha*(bound - nominal)`` the schedule can be integrated in.
+
+        Only the parameters that move a switch time are cut; the rest keep their bounds. Returns
+        ``(bounds, alpha)`` with alpha in [0, 1] (1: nothing had to be cut). The cut is found by bisection
+        on ``check_box``, so it is as reliable as that test is.
+        """
+        base = dict(self.params if params is None else params)
+        active = [n for n in bounds if n in self.switch_parameters() and bounds[n] is not None
+                  and None not in tuple(bounds[n])]
+
+        def cut(alpha):
+            out = dict(bounds)
+            for n in active:
+                lo, hi = bounds[n]
+                x0 = min(max(base[n], lo), hi)
+                out[n] = (x0 + alpha * (lo - x0), x0 + alpha * (hi - x0))
+            return out
+
+        if self.check_box(cut(1.0), base, interior, seed, min_gap)["feasible"]:
+            return dict(bounds), 1.0
+        good, bad = 0.0, 1.0
+        for _ in range(int(iterations)):
+            mid = 0.5 * (good + bad)
+            if self.check_box(cut(mid), base, interior, seed, min_gap)["feasible"]:
+                good = mid
+            else:
+                bad = mid
+        return cut(good), good
 
     @staticmethod
     def _check_gaps(timed, steps, min_gap):
