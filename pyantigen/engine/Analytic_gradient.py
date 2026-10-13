@@ -352,7 +352,7 @@ class _SimGradient:
     """AMICI's view of one simulation: the compiled event-free model, the schedule, the parameter replay."""
 
     def __init__(self, name, replicate, model, models, groups, replicates, param_names, probes, *,
-                 model_text, paths, cache_dir, rtol, atol, max_steps, verbose, seed=None):
+                 model_text, paths, cache_dir, rtol, atol, max_steps, verbose, seed=None, extra_times=()):
         from pyantigen.engine.Optimize import OptRoadRunnerProxy, remember_parameter_baseline
         from pyantigen.engine.Scaled_amici import (AmiciSegmentRunner, _plain_parameters,
                                                    compile_model, concentration_outputs)
@@ -360,6 +360,7 @@ class _SimGradient:
         from pyantigen.generate.TelluriumGen import TelluriumGen
 
         self.name, self.replicate = name, replicate
+        self.extra_times = [float(t) for t in extra_times]
         settings = replicate["Solver_settings"](replicate)
         schedule = settings.get("schedule")
         r = model["r"]
@@ -471,7 +472,16 @@ class _SimGradient:
         theta = dict(values)
         inputs = self._engine_initial_inputs(theta)
         times = _data_times(groups, replicates, models, self.name, self.t_first, self.t_last)
-        T = np.array(sorted(times | {self.t_first, self.t_last}))
+        # the plan reads outputs at the end of a segment, so the window's own start is never a row:
+        # t_first only anchors the table when it lies after t_start (a pre-equilibration block)
+        if any(t <= self.t_start for t in times):
+            raise AnalyticGradientError(
+                f"{self.name}: the loss reads a data time at or before the start of the simulation "
+                f"({self.t_start:g} h); AMICI reports the end of each segment, so that row is not available")
+        anchors = {self.t_last} | ({self.t_first} if self.t_first > self.t_start else set())
+        # rows the loss reads that are not data times (a pre-dose baseline), asked for in the settings
+        anchors |= {t for t in self.extra_times if self.t_start < t <= self.t_last}
+        T = np.array(sorted(times | anchors))
         wrt = self.free
         Y, SY = self.runner.run_outputs(theta, self.t_start, self.t_last, list(T), wrt=wrt,
                                         initial={**self.seed, **(direct or {})} or None, initial_inputs=inputs)
@@ -516,11 +526,14 @@ class AmiciGradient:
     points at which the parameter reach is probed). *settings* is the ``analytic_gradient`` dict of the
     spec's ``optimizer_kwargs``: ``rtol``, ``atol``, ``max_steps`` (AMICI), ``rel_step`` (the loss
     differentiation), ``cache_dir`` (compiled models), ``seed`` (``{state: amount}`` given to AMICI at the
-    start of every run on top of the model's own initial state; see the module's docs).
+    start of every run on top of the model's own initial state; see the module's docs), ``extra_times``
+    (``{simulation: [t, ...]}``: output rows the loss reads that are not data times, such as a pre-dose
+    baseline; AMICI's table has rows only at data times and these).
     """
 
     DEFAULTS = {"provider": "amici", "rtol": 1e-10, "atol": 1e-12, "max_steps": 2_000_000,
-                "rel_step": 1e-5, "cache_dir": None, "verbose": True, "seed": None}
+                "rel_step": 1e-5, "cache_dir": None, "verbose": True, "seed": None,
+                "extra_times": None}
 
     @classmethod
     def resolve(cls, optimizer_kwargs):
@@ -554,7 +567,7 @@ class AmiciGradient:
                 name, rep, models[name], models, groups, replicates, param_names, probes,
                 model_text=model_text, paths=paths, cache_dir=cache_dir, rtol=settings["rtol"],
                 atol=settings["atol"], max_steps=settings["max_steps"], verbose=settings["verbose"],
-                seed=settings["seed"])
+                seed=settings["seed"], extra_times=(settings["extra_times"] or {}).get(name, ()))
         self.n_calls = 0
 
     @staticmethod

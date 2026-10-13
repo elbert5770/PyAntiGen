@@ -352,6 +352,65 @@ check("a point that is itself a re-run is not re-run again",
       not any(c["kind"] == "rerun" and c["sign"] > 0 for c in out),
       [(c["kind"], c["x"]) for c in out])
 
+print("a point over the threshold with one under it further out is not a crossing")
+# The k_oligo2 case: 2.90 between 0.41 and 0.62, and under the threshold beyond.
+stuck = [rec(0.10, 0.05, nuis=[0.1, 0.0]), rec(0.20, 0.41, nuis=[0.2, 0.0]),
+         rec(0.21, 2.90, x_start=[0.2, 0.0], nuis=[0.9, 0.9]),
+         rec(0.30, 0.62, nuis=[0.3, 0.0]), rec(0.50, 1.31, nuis=[0.5, 0.0]),
+         rec(0.80, 5.09, nuis=[0.8, 0.0])]
+out = plan(completed={"a": stuck}, n_free=12)
+up = [c for c in out if c["sign"] > 0]
+rr = [c for c in up if c["kind"] == "rerun"]
+check("the stuck point is restarted, from the neighbour it was not started from",
+      len(rr) == 1 and rr[0]["x"] == 0.21 and rr[0]["seed"]["x_fixed"] == 0.30, rr)
+br = [c for c in up if c["kind"] in ("bracket", "narrow")]
+check("and the bracket is sought beyond the furthest point that is under",
+      br and all(0.50 < c["x"] < 0.80 for c in br), [(c["kind"], c["x"]) for c in up])
+rr0 = dict(stuck[2], reruns_tried=1)
+out = plan(completed={"a": stuck[:2] + [rr0] + stuck[3:]}, n_free=12)
+check("a restart that did not lower it is not repeated",
+      not [c for c in out if c["kind"] == "rerun" and c["sign"] > 0])
+only_in = [rec(0.10, 0.05), rec(0.20, 2.90, x_start=[0.0, 0.0], nuis=[0.9, 0.9]),
+           rec(0.40, 6.0)]
+out = plan(completed={"a": only_in}, n_free=12)
+check("an over-threshold point with nothing under beyond it is still the bracket",
+      any(c["kind"] == "bracket" and 0.10 < c["x"] < 0.20 for c in out if c["sign"] > 0),
+      [(c["kind"], c["x"]) for c in out if c["sign"] > 0])
+check("and a side's under-threshold outer point leaves it open, not bracketed",
+      any(c["kind"] == "extend" for c in plan(
+          completed={"a": [rec(0.10, 0.05), rec(0.20, 2.90), rec(0.40, 0.8)]},
+          n_free=12) if c["sign"] > 0))
+
+print("spare-core extras do not use up a side's allowance")
+many_pts = [rec(0.05 * k, 0.1 * k) for k in range(1, 8)]
+spare = [rec(0.4 + 0.01 * k, 1.0 + 0.01 * k, plan_tier=5) for k in range(10)]
+kept = [rec(0.4 + 0.01 * k, 1.0 + 0.01 * k) for k in range(10)]
+out_spare = plan(completed={"a": many_pts + spare + [rec(2.0, 5.0)]}, n_free=12)
+out_kept = plan(completed={"a": many_pts + kept + [rec(2.0, 5.0)]}, n_free=12)
+check("a side full of extras is still worked on",
+      any(c["sign"] > 0 for c in out_spare), out_spare)
+check("the same points as primaries exhaust the allowance",
+      not any(c["sign"] > 0 for c in out_kept), out_kept)
+check("a hard cap at twice the allowance still ends a side",
+      not any(c["sign"] > 0 for c in plan(
+          completed={"a": many_pts + spare + [rec(2.0 + 0.01 * k, 5.0, plan_tier=5)
+                                             for k in range(20)]}, n_free=12)))
+
+print("two firm ends within the optimizer's scatter are a located crossing")
+wide_flat = {"a": [rec(0.30, 1.80), rec(0.50, 2.00)]}
+out = plan(completed=wide_flat, n_free=12)
+check("a bracket 0.2 decades wide but 0.2 nats high is not narrowed further",
+      not [c for c in out if c["kind"] in ("bracket", "narrow") and c["sign"] > 0],
+      [(c["kind"], c["x"]) for c in out if c["sign"] > 0])
+wide_steep = {"a": [rec(0.30, 1.0), rec(0.50, 4.0)]}
+check("the same width with a 3-nat rise is narrowed",
+      any(c["kind"] == "bracket" for c in plan(completed=wide_steep, n_free=12)
+          if c["sign"] > 0))
+loose = {"a": [rec(0.30, 1.80), rec(0.50, 2.00, converged=False)]}
+check("an unconverged end does not qualify",
+      any(c["kind"] == "narrow" for c in plan(completed=loose, n_free=12)
+          if c["sign"] > 0))
+
 # ------------------------------------------------------------------ stream ---
 
 K = 3

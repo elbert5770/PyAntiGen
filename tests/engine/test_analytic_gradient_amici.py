@@ -79,7 +79,12 @@ LOSS = {"observables": [
 GROUPS = {"fit": {"loss_elements": [{"simulation": "toy", "loss_config": lambda rep: LOSS, "weight": 1.0}]}}
 
 
-def make_problem(backend, data=None):
+PRE_RUN = {"pre": {"start": -5, "end": 0, "n_points": 51, "tracked": False},
+           "run": {"start": 0, "end": 8, "n_points": 801, "tracked": True}}
+RUN_ONLY = {"run": {"start": 0, "end": 8, "n_points": 801, "tracked": True}}
+
+
+def make_problem(backend, data=None, blocks=PRE_RUN):
     """(models, replicates) as the engine would build them for one replicate."""
     sched = schedule()
     replicate = {"Label": "toy", "Update_parameters": lambda r, rep: None, "Update_opt_parameters": _hook,
@@ -88,8 +93,7 @@ def make_problem(backend, data=None):
     def settings(rep):
         out = {"integrator": "cvode", "absolute_tolerance": 1e-12, "relative_tolerance": 1e-12,
                "stiff": True, "variable_step_size": True,
-               "simulation_blocks": {"pre": {"start": -5, "end": 0, "n_points": 51, "tracked": False},
-                                     "run": {"start": 0, "end": 8, "n_points": 801, "tracked": True}}}
+               "simulation_blocks": blocks}
         if rep.get("Schedule") is not None:
             out["schedule"] = rep["Schedule"]
         return out
@@ -302,3 +306,51 @@ def test_without_freezing_the_gradient_is_that_of_a_different_model(schedule_pro
     ref = richardson(engine_objective(models, reps), x)
     err = np.abs(loose(x) - ref) / np.abs(ref).max()
     assert err[0] > 1e-2                         # d/d log10 Q_CSF is wrong by percents, not 1e-4
+
+
+@pytest.fixture(scope="module")
+def run_only_problem(schedule_problem):
+    """The same problem with no pre-equilibration block: the first tracked row is the start of the simulation."""
+    return make_problem("schedule", schedule_problem[0]["toy"]["df_dict"]["toy"], blocks=RUN_ONLY)
+
+
+def _build(problem, tmp_path, **settings):
+    models, reps, text = problem
+    return build_gradient({"analytic_gradient": {"cache_dir": str(tmp_path), "verbose": False, **settings}},
+                          models=models, replicates=reps, groups=GROUPS, param_names=NAMES, scales=SCALES,
+                          x0_lin=TRUTH * np.array([1.2, 1.0, 1.0, 1.3, 1.1]), bounds_lin=BOX, model_text=text,
+                          paths={})
+
+
+def test_a_window_that_starts_at_the_first_tracked_row_matches_finite_differences(run_only_problem, tmp_path):
+    # AMICI reports the end of each segment, so the row at the start of the window cannot be read: the table
+    # must not ask for it (it used to, and the table and the outputs differed by one row)
+    models, reps, _ = run_only_problem
+    g = _build(run_only_problem, tmp_path)
+    x = to_opt(TRUTH * np.array([0.9, 1.0, 1.2, 0.8, 1.1]))
+    ref = richardson(engine_objective(models, reps), x)
+    assert np.abs(ref).max() > 1e-3
+    np.testing.assert_allclose(g(x), ref, rtol=2e-4, atol=2e-4 * np.abs(ref).max())
+
+
+def test_a_data_time_at_the_start_of_the_simulation_is_refused_with_a_message(run_only_problem, tmp_path):
+    from pyantigen.engine.Analytic_gradient import AnalyticGradientError
+    models, reps, text = run_only_problem
+    df = models["toy"]["df_dict"]["toy"]
+    at_start = pd.concat([pd.DataFrame({"time": [0.0], "ly": [0.0], "zz": [0.0]}), df], ignore_index=True)
+    problem = ({"toy": {**models["toy"], "df_dict": {"toy": at_start}}}, reps, text)
+    g = _build(problem, tmp_path)
+    with pytest.raises(AnalyticGradientError, match="at or before the start"):
+        g(to_opt(TRUTH))
+
+
+def test_extra_times_add_rows_the_loss_may_read_without_changing_the_gradient(
+        schedule_problem, provider, tmp_path):
+    g = _build(schedule_problem, tmp_path, extra_times={"toy": [2.1, 7.9, -9.0, 99.0]})
+    p_lin = TRUTH * np.array([1.2, 1.0, 1.0, 1.3, 1.1])
+    table, _D = g.sims["toy"].tables(p_lin, GROUPS, schedule_problem[1], schedule_problem[0])
+    t = table["time"]
+    assert 2.1 in t and 7.9 in t                       # asked for, inside the window
+    assert -9.0 not in t and 99.0 not in t            # outside (start, end]: ignored
+    x = to_opt(p_lin)
+    np.testing.assert_allclose(g(x), provider(x), rtol=1e-6, atol=1e-8)
