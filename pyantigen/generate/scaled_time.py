@@ -23,7 +23,8 @@ What this module does to the model
   from per-segment constants ``sched_a0/a1`` and ``sched_c0_<m>/c1_<m>`` (the
   anchors and coefficients of the segment's two end points). The solver sees
   ``D`` as a function of the parameters.
-* Every reaction rate and every rate rule is multiplied by ``sched_Delta``.
+* Every reaction rate and every rate rule is multiplied by ``sched_Delta``; a formula that reads a reaction id
+  (a rule that sums fluxes) reads ``id/sched_Delta``, the flux of the unscaled model.
 * A measured curve ``c`` (an assignment rule in the model) becomes
   ``sched_ci_c + sched_cs_c*sched_clock``: on one segment it is a straight line.
 * Each parameter the schedule assigns (``Q_Leak``, ...) becomes a state with rate
@@ -133,6 +134,32 @@ def _with_clock(node):
     return _parse(_TIME_TOKEN.sub(CLOCK, libsbml.formulaToL3String(node)))
 
 
+_TOKEN = re.compile(r"(?<![A-Za-z0-9_.])[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _reads_any(node, names):
+    if node.isName() and node.getName() in names:
+        return True
+    return any(_reads_any(node.getChild(i), names) for i in range(node.getNumChildren()))
+
+
+def _with_true_fluxes(node, reaction_ids):
+    """*node*'s mathematics with each reaction id read as the flux of the original time, as a new tree; None if it reads none.
+
+    A reaction id in a formula means the reaction's rate. Step 3 of :func:`scale_model` multiplies every rate law by
+    ``sched_Delta``, so a rule that sums fluxes (``BBB_transport := BBBTransport_AB42 + ...``) would read
+    ``Delta`` times the flux, and an output or a rate rule built on it would be wrong by the length of the segment.
+    Reading ``(R/sched_Delta)`` instead gives the rule the flux it has in the unscaled model, and the solver
+    differentiates the quotient, ``dDelta/dp`` included. Done on the formula text, for the reason given in
+    :func:`_with_clock`.
+    """
+    if not _reads_any(node, reaction_ids):
+        return None
+    text = _TOKEN.sub(lambda m: f"({m.group(0)}/{DELTA})" if m.group(0) in reaction_ids else m.group(0),
+                      libsbml.formulaToL3String(node))
+    return _parse(text)
+
+
 def _expand_initial(model, text, depth=0):
     """*text* with every parameter that has an initial assignment replaced by that assignment.
 
@@ -220,6 +247,25 @@ def scale_model(sbml, schedule):
         _add_parameter(model, f"{PREFIX}ci_{c}")
         _add_parameter(model, f"{PREFIX}cs_{c}")
         rule.setMath(_parse(f"{PREFIX}ci_{c} + {PREFIX}cs_{c}*{CLOCK}"))
+
+    # 3a. a formula that reads a reaction id reads that reaction's rate: keep it the unscaled one
+    reaction_ids = {model.getReaction(i).getId() for i in range(model.getNumReactions())}
+    if reaction_ids:
+        for i in range(model.getNumRules()):
+            rule = model.getRule(i)
+            new = _with_true_fluxes(rule.getMath(), reaction_ids)
+            if new is not None:
+                rule.setMath(new)
+        for i in range(model.getNumReactions()):
+            kl = model.getReaction(i).getKineticLaw()
+            new = _with_true_fluxes(kl.getMath(), reaction_ids) if kl is not None and kl.isSetMath() else None
+            if new is not None:
+                kl.setMath(new)
+        for i in range(model.getNumInitialAssignments()):
+            assignment = model.getInitialAssignment(i)
+            new = _with_true_fluxes(assignment.getMath(), reaction_ids)
+            if new is not None:
+                assignment.setMath(new)
 
     # 3. rates times Delta (before the new rules, which must not be scaled)
     delta = lambda: _name_node(DELTA)  # noqa: E731
