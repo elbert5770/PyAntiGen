@@ -91,6 +91,8 @@ class LossGradient:
         self.param_names = list(param_names)
         self.rel_step = float(rel_step)
         self.explicit = self._explicit_parameters()
+        # {(block, observable): sigma}: the floored blocks' sigmas a profile point holds still (see freeze_sigmas)
+        self.frozen_sigmas = None
 
     # -- which parameters the loss reads by name ------------------------------------
     def _explicit_parameters(self):
@@ -123,7 +125,8 @@ class LossGradient:
         from pyantigen.engine.Optimize import collect_loss_blocks, concentrated_nll
         p_dict = dict(zip(self.param_names, np.asarray(p_lin, dtype=float).tolist()))
         blocks = collect_loss_blocks(items, self.groups, self.replicates, self.param_names,
-                                     np.asarray(p_lin, dtype=float), p_dict)
+                                     np.asarray(p_lin, dtype=float), p_dict,
+                                     frozen_sigmas=self.frozen_sigmas)
         if not blocks:
             raise AnalyticGradientError("the loss has no data to score")
         v = concentrated_nll(blocks)
@@ -580,6 +583,16 @@ class AmiciGradient:
             hi = np.array([x0[i] if b is None or b[1] is None else b[1] for i, b in enumerate(bounds_lin)], float)
             points += [p for p in (lo, hi) if np.all(np.isfinite(p)) and not np.array_equal(p, x0)]
         return points
+
+    def freeze_sigmas(self, sigmas):
+        """Differentiate the loss a profile point minimizes: floored blocks keep the sigma they had at the fit.
+
+        *sigmas* is what ``Optimize.block_sigmas`` returns for the fit (``{(block, observable): sigma_used}``),
+        the same dictionary the profile passes to ``evaluate_nll_fixed(frozen_sigmas=...)``. A frozen block is
+        scored with that sigma instead of ``min(sigma_hat, floor)`` at the current point, which changes its
+        derivative (the sigma no longer moves with the parameters). ``None`` releases them.
+        """
+        self.loss.frozen_sigmas = dict(sigmas) if sigmas else None
 
     def linear_gradient(self, p_lin):
         """``(nll, d nll / d p_lin)`` evaluated on AMICI's own simulation."""

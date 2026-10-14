@@ -132,6 +132,42 @@ def test_a_declared_sigma_and_pooled_blocks_across_two_simulations():
     check(loss, items)
 
 
+def test_frozen_sigmas_change_the_loss_and_its_gradient_the_way_a_profile_point_scores_it():
+    """A profile point pins every floored block's sigma (frozen_sigmas). The gradient of that loss is not the
+    gradient of the free one, and it matches differences of the frozen loss."""
+    from pyantigen.engine.Noise_floor import clear_cache
+    from pyantigen.engine.Optimize import block_sigmas, collect_loss_blocks
+    clear_cache()
+    try:
+        loss, items = problem([{"observed_variable": "pred", "sigma_floor_from_data": True}], sims=("s1", "s2"))
+        theta = TRUE * np.array([1.1, 0.9, 1.2, 1.0])
+        it, dirs = items(theta)
+        blocks = collect_loss_blocks(it, loss.groups, loss.replicates, loss.param_names, theta,
+                                     dict(zip(NAMES, theta.tolist())))
+        sigmas = {k: 0.5 * v for k, v in block_sigmas(blocks).items()}
+        assert sigmas and any(v[3] is not None for v in blocks.values()), "the blocks must be floored"
+        free = loss.gradient(it, dirs, theta)[1]
+
+        free_value = loss.value(it, theta)
+        loss.frozen_sigmas = sigmas
+        assert loss.value(it, theta) != pytest.approx(free_value)       # the frozen loss is a different loss
+        frozen = check(loss, items)                     # matches finite differences of the frozen loss
+        assert np.abs(frozen[:3] - free[:3]).max() > 1e-2 * np.abs(free[:3]).max()
+        loss.frozen_sigmas = None
+        np.testing.assert_allclose(loss.gradient(it, dirs, theta)[1], free)          # released: back to the free one
+    finally:
+        clear_cache()
+
+
+def test_amici_gradient_freezes_and_releases_sigmas_on_its_loss():
+    provider = AmiciGradient.__new__(AmiciGradient)
+    provider.loss = LossGradient({}, {}, NAMES)
+    provider.freeze_sigmas({("pool", "y"): 0.1})
+    assert provider.loss.frozen_sigmas == {("pool", "y"): 0.1}
+    provider.freeze_sigmas(None)
+    assert provider.loss.frozen_sigmas is None
+
+
 def test_a_callable_observable_makes_every_parameter_explicit():
     loss, items = problem([{"observed_variable": lambda res: np.asarray(res["pred"]) * 1.0}])
     assert loss.explicit == set(range(len(NAMES)))

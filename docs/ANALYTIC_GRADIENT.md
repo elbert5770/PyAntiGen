@@ -123,6 +123,9 @@ dynamics read them.
 * Columns that are not species, parameters or compartments (reaction rates) are not available to the
   loss; the gradient is then zero for anything that depends only on them.
 * The profile-likelihood stage keeps its own optimizers.
+  The gradient can differentiate what a profile point minimizes: `provider.freeze_sigmas(block_sigmas)` pins the floored blocks'
+  sigmas as `evaluate_nll_fixed(frozen_sigmas=...)` does (without it the gradient is off by 10 to 30% away from the fit);
+  `freeze_sigmas(None)` releases them. Nothing calls it yet.
 * Cost: the gradient costs one AMICI forward-sensitivity run, which grows with the number of
   parameters it differentiates. On SILK, 8 parameters: about 1.2 s a gradient against 9 objective
   evaluations (about 1.4 s) for forward differences; with all 48 parameters AMICI needs about 40 s a
