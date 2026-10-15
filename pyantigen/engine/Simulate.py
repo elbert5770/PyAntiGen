@@ -233,6 +233,150 @@ def floor_tolerance_vector(r, floor=_MIN_ABSOLUTE_TOLERANCE):
     return n
 
 
+# ---------------------------------------------------------------------------
+# Pinning the vector, not only flooring it
+# ---------------------------------------------------------------------------
+# floor_tolerance_vector raises what has fallen below the floor and leaves
+# everything else as RoadRunner has it. That is enough for a vector that has
+# drifted DOWN, which is what the floor was written for. It does nothing about
+# two other things:
+#
+#   * The retry ladder sets the scalar before every attempt, and setting the
+#     scalar re-derives the whole vector from the amounts the model holds
+#     *at that moment* -- the failing state, not the initial one. Measured on
+#     Aducanumab 60 mg/kg: between the segment-start vector and the vector of
+#     attempt 2, 176 entries were more than 10x larger and 62 more than 10x
+#     smaller (ratios 1.7e-11 .. 2.9e+07). The floor raised 3 of them. So the
+#     loosened retries do not run at "the same tolerances, looser"; they run at
+#     tolerances derived from wherever the integration died.
+#
+#   * RoadRunner's initial-derived scale is atol_i = scalar * amount_i, or
+#     scalar * volume_i for a species that starts at 0 (see the note above
+#     _MIN_ABSOLUTE_TOLERANCE). Every species that starts empty therefore gets
+#     one number, scalar * its compartment volume -- 6.7e-11 at scalar 1e-9 for
+#     the 0.067-volume endosome -- however small it later runs. After the FcRn
+#     saturation front of a 60 mg/kg dose the endosomal antibody species sit at
+#     1.6e-9 .. 1.3e-8, so that budget is 0.5-4% of their value, and CVODE fails
+#     (CV_ILL_INPUT / CV_TOO_MUCH_ACC) ~200 h after the dose. Lowering the scalar
+#     10x, pinning those five species at 1e-15, or capping every entry at 1e-12
+#     each took the displaced-parameter failures from 6/40 to 0/40.
+#
+# Pinning keeps ONE reference -- the per-state scale RoadRunner derives at
+# configure_integrator when the model is at its initial time -- and from it
+# sets every entry explicitly before each block, each segment and each ladder
+# attempt:
+#
+#     atol_i = clip( scalar * scale_i , floor , cap_ratio * scalar )
+#
+# *scalar* is the configured one, or the ladder's current (loosened) one, so a
+# retry scales the same vector instead of re-deriving it. The cap is relative
+# to the scalar for the same reason: an absolute cap would undo the ladder's
+# loosening. cap_ratio is optional; without it pinning only restores the
+# initial-derived vector.
+#
+# Opt in per replicate through the solver settings:
+#
+#     "tolerance_pinning": True,        # default TOLERANCE_PINNING (False)
+#     "tolerance_cap_ratio": 1e-3,      # default TOLERANCE_CAP_RATIO (None)
+#
+# Both are plain values in the settings dict, so Profile_checkpoint's solver
+# fingerprint already covers them: switching them on starts a new checkpoint
+# directory rather than mixing two objectives. Left off, apply_tolerance_vector
+# is floor_tolerance_vector and nothing changes.
+TOLERANCE_PINNING = False
+TOLERANCE_CAP_RATIO = None
+
+
+def tolerance_policy(solver_settings):
+    """``{"pin": bool, "cap_ratio": float | None}`` from *solver_settings*."""
+    pin = bool(solver_settings.get("tolerance_pinning", TOLERANCE_PINNING))
+    cap = solver_settings.get("tolerance_cap_ratio", TOLERANCE_CAP_RATIO)
+    if cap is not None:
+        cap = float(cap)
+        if not cap > 0:
+            raise ValueError(f"tolerance_cap_ratio must be positive, got {cap}")
+        if not pin:
+            raise ValueError("tolerance_cap_ratio needs tolerance_pinning: a cap is "
+                             "applied to the pinned vector")
+    return {"pin": pin, "cap_ratio": cap}
+
+
+def _remember_tolerance_policy(r, solver_settings, scalar):
+    """Cache the policy on *r* and, at the model's initial time, the reference scale.
+
+    Called by configure_integrator right after the scalar is set, when RoadRunner
+    has just derived the vector. The scale is only taken at time 0: a second
+    configure on a state restored from the pre-dose cache would derive it from
+    amounts that have already decayed, which is the drift this exists to undo.
+    """
+    policy = tolerance_policy(solver_settings)
+    if not policy["pin"]:
+        _model_cache.put(r, "_tolerance_policy", None)
+        return
+    try:
+        at_start = float(r.getCurrentTime()) == 0.0
+    except Exception:
+        at_start = False
+    if at_start:
+        try:
+            vec = np.asarray(r.integrator.getAbsoluteToleranceVector(), float)
+            ids = state_vector_ids(r)
+            n = min(len(ids), len(vec))
+            if float(scalar) > 0 and n:
+                _model_cache.put(r, "_atol_reference",
+                                 (list(ids[:n]), vec[:n] / float(scalar)))
+        except Exception:
+            pass
+    if _model_cache.get(r, "_atol_reference") is None:
+        # Never saw the initial state, so there is no initial scale to pin to.
+        import warnings
+        warnings.warn("tolerance_pinning requested but the model was first configured "
+                      "away from its initial time; falling back to the floor",
+                      RuntimeWarning, stacklevel=3)
+        _model_cache.put(r, "_tolerance_policy", None)
+        return
+    _model_cache.put(r, "_tolerance_policy", policy)
+
+
+def apply_tolerance_vector(r, scalar=None, floor=_MIN_ABSOLUTE_TOLERANCE):
+    """Set the per-state absolute tolerances for the next integration.
+
+    Pinning off (the default): exactly :func:`floor_tolerance_vector`. Pinning
+    on: every entry is set to ``clip(scalar * scale_i, floor, cap_ratio * scalar)``
+    from the reference scale. *scalar* defaults to the configured absolute
+    tolerance; the retry ladder passes its current, loosened one. Returns the
+    number of entries set.
+    """
+    policy = _model_cache.get(r, "_tolerance_policy")
+    ref = _model_cache.get(r, "_atol_reference") if policy else None
+    if ref is None:
+        return floor_tolerance_vector(r, floor)
+    if scalar is None:
+        scalar = _model_cache.get(r, "_scalar_abs_tol")
+    if scalar is None:
+        return floor_tolerance_vector(r, floor)
+    ids, scale = ref
+    try:
+        current = np.asarray(r.integrator.getAbsoluteToleranceVector(), float)
+    except Exception:
+        return 0
+    if len(current) < len(ids):
+        return floor_tolerance_vector(r, floor)
+    scalar = float(scalar)
+    want = scalar * scale
+    if policy["cap_ratio"] is not None:
+        want = np.minimum(want, policy["cap_ratio"] * scalar)
+    want = np.maximum(want, floor)
+    n = 0
+    for i in np.flatnonzero(~np.isclose(current[:len(ids)], want, rtol=1e-9, atol=0.0)):
+        try:
+            r.integrator.setIndividualTolerance(ids[i], float(want[i]))
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
 class StackedResult(np.ndarray):
     def __new__(cls, input_array, colnames):
         obj = np.asarray(input_array).view(cls)
@@ -653,7 +797,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
         # state and discards any individual settings, so the floor has to be
         # re-applied here or every retry would run without it -- including the
         # retries provoked by its absence.
-        floor_tolerance_vector(r)
+        apply_tolerance_vector(r, scalar=cur_abs_tol)
         if cur_initial_step is not None:
             try:
                 r.integrator.initial_time_step = cur_initial_step
@@ -822,6 +966,7 @@ def configure_integrator(r, solver_settings):
     r.integrator.variable_step_size = solver_settings["variable_step_size"]
     # r.integrator.setValue('initial_time_step', solver_settings["initial_time_step"])
     r.integrator.setValue('maximum_num_steps', solver_settings["maximum_num_steps"])
+    _remember_tolerance_policy(r, solver_settings, atol)
     return solver_settings
 
 
@@ -891,7 +1036,7 @@ def _run_blocks(r, block_list, last_tracked_idx, observed_species, label, runner
         # tolerance vector is derived from the current state, so it is healthy
         # here at t=0 and underflows as the trajectory decays. See
         # _MIN_ABSOLUTE_TOLERANCE.
-        floor_tolerance_vector(r)
+        apply_tolerance_vector(r)
 
         try:
             if runner is not None:

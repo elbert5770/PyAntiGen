@@ -44,7 +44,7 @@ caches separately must not contain a switch: ``switches_before`` says whether it
 """
 import numpy as np
 
-from pyantigen.engine.Simulate import StackedResult, floor_tolerance_vector, safe_simulate
+from pyantigen.engine.Simulate import StackedResult, apply_tolerance_vector, safe_simulate
 from pyantigen.generate.input_schedule import ScheduleError
 
 
@@ -154,7 +154,7 @@ class SegmentRunner:
             between = mine[(mine > u + eu) & (mine < v - ev)]
             times = [u] + between.tolist() + [v]
 
-            floor_tolerance_vector(self.r)
+            apply_tolerance_vector(self.r)
             res, _meta = safe_simulate(
                 self.r, {"times": times, "variable_step_size": False},
                 observed_species, label=label)
