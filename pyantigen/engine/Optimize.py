@@ -567,9 +567,57 @@ def _freeze_floor(known_sigma, sigma_floor, frozen_value):
     None``) is untouched either way, and a block with a true declared sigma
     (``known_sigma`` already set) is never overridden.
     """
+    if known_sigma is None and sigma_floor is not None and sigma_floor_mode() == "fixed":
+        # Fixed-sigma mode: a floored block is scored with the floor as a declared sigma, always. Its sigma then
+        # depends on neither the parameters nor the profile (frozen_value is ignored: there is nothing to freeze),
+        # so the fit, the profile and every diagnostic minimize one function. The floor itself is calibrated once
+        # (pyantigen.engine.Noise_floor, against the model's shape at the first point) and must be shared between
+        # processes with Noise_floor.export_cache / seed_cache.
+        return float(sigma_floor), None
     if frozen_value is not None and known_sigma is None and sigma_floor is not None:
         return float(frozen_value), None
     return known_sigma, sigma_floor
+
+
+def sigma_floor_mode():
+    """How a data-floored block's sigma is resolved: ``"cap"`` (default) or ``"fixed"``.
+
+    ``"cap"``: ``min(sigma_hat, floor)``, re-concentrated at every point (the floor only bounds it above).
+    ``"fixed"``: the floor itself, as a known sigma. Set with the environment variable ``PYANTIGEN_SIGMA_FLOOR``
+    (read at every call, so it reaches spawned workers too).
+    """
+    mode = os.environ.get("PYANTIGEN_SIGMA_FLOOR", "cap").strip().lower()
+    return mode if mode in ("cap", "fixed") else "cap"
+
+
+_SIGMA_FLOOR_MODES = ("cap", "fixed")
+
+
+def apply_sigma_floor_setting(optimizer_kwargs):
+    """Make the spec's ``optimizer_kwargs["sigma_floor"]`` ("cap" | "fixed") the mode of this process and its workers.
+
+    The spec is the source of truth: it is part of the fit's fingerprint and of the saved result. The mode itself
+    travels in ``PYANTIGEN_SIGMA_FLOOR`` because that is what reaches spawned evaluator workers. An absent key leaves
+    the environment as it is (so the variable alone still works, and the fingerprints see it either way); a key that
+    contradicts a variable already set is an error, not a silent winner.
+
+    "fixed" scores every data-floored block with its floor as a known sigma. The floor is calibrated once, against
+    the model's shape at the first point evaluated, and then does not move: calibrate at x0 (or seed the cache with
+    ``Noise_floor.seed_cache``) and the sigmas are those of x0. A different x0 is a different fit (x0 is in the fit
+    fingerprint) and recalibrates the floors.
+    """
+    want = (optimizer_kwargs or {}).get("sigma_floor")
+    if want is None:
+        return sigma_floor_mode()
+    want = str(want).strip().lower()
+    if want not in _SIGMA_FLOOR_MODES:
+        raise ValueError(f"optimizer_kwargs['sigma_floor'] must be one of {_SIGMA_FLOOR_MODES}, got {want!r}")
+    have = os.environ.get("PYANTIGEN_SIGMA_FLOOR")
+    if have is not None and have.strip().lower() in _SIGMA_FLOOR_MODES and have.strip().lower() != want:
+        raise ValueError(f"optimizer_kwargs['sigma_floor'] is {want!r} but PYANTIGEN_SIGMA_FLOOR is {have!r}; "
+                         "unset the variable or make them agree")
+    os.environ["PYANTIGEN_SIGMA_FLOOR"] = want
+    return want
 
 
 def _apply_n_eff_scale(weights, n_eff_scale):
@@ -619,6 +667,9 @@ def _apply_n_eff_scale(weights, n_eff_scale):
     return np.asarray(weights, dtype=float) * c
 
 
+_RESIDUAL_SINK = None      # a list while LossGradient collects per-datum residuals sqrt(w)*r; None otherwise
+
+
 def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
                   sigma_floor=None):
     """Accumulate weighted SSE and effective count for one observable block.
@@ -636,6 +687,9 @@ def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
                             [0.0, 0.0, known_sigma, sigma_floor])
     acc[0] += float(np.dot(weights, np.asarray(residuals, dtype=float) ** 2))
     acc[1] += float(np.sum(weights))
+    if _RESIDUAL_SINK is not None:     # the residual form of the loss (Analytic_gradient.LossGradient.residual_jacobian)
+        _RESIDUAL_SINK.append(((key, _short_obs_label(obs)),
+                               np.sqrt(np.asarray(weights, dtype=float)) * np.asarray(residuals, dtype=float)))
     # Pooled blocks must agree: if any contributor asserts a sigma or a floor,
     # the pool keeps it. Mixing asserted/floored/estimated noise in one pool is
     # a spec error, so the first assertion of each kind wins and stays -- no
@@ -2270,6 +2324,8 @@ _ENGINE_ONLY_OPTIMIZER_KEYS = (
     "analytic_gradient",
     # What to do when the bounds reach parameters a schedule cannot be integrated at.
     "schedule_bounds",
+    # How a data-floored block's sigma is resolved, "cap" (default) or "fixed": see apply_sigma_floor_setting.
+    "sigma_floor",
 )
 
 
@@ -6807,6 +6863,7 @@ def run_optimization(
     fit_mode=None,
     n_workers=None,
 ):
+    apply_sigma_floor_setting(optimizer_kwargs)
     if (profile_likelihood_analysis or fast_profile_likelihood_analysis) and not wald_analysis:
         print("Note: profile likelihood requested — also enabling wald_analysis so the "
               "Hessian-based CI is available as an independent cross-check.")
@@ -7163,6 +7220,8 @@ def run_optimization_from_groups(
         an invariance check confirms the fitted parameters cannot act before the
         first dose, so setting this True is a request, not an assertion.
     """
+    apply_sigma_floor_setting(optimization_spec.optimizer_kwargs if optimization_spec is not None
+                              else optimizer_kwargs)
     if (profile_likelihood_analysis or fast_profile_likelihood_analysis) and not wald_analysis:
         print("Note: profile likelihood requested — also enabling wald_analysis so the "
               "Hessian-based CI is available as an independent cross-check.")
