@@ -318,15 +318,20 @@ def _remember_tolerance_policy(r, solver_settings, scalar):
     except Exception:
         at_start = False
     if at_start:
+        # At the initial time the reference is re-derived every time, and a
+        # failure to do so drops the old one: it belongs to an earlier parameter
+        # vector, and pinning to it would silently use the wrong scales. (Away
+        # from t=0 the stored reference is kept on purpose -- see above.)
+        reference = None
         try:
             vec = np.asarray(r.integrator.getAbsoluteToleranceVector(), float)
             ids = state_vector_ids(r)
             n = min(len(ids), len(vec))
             if float(scalar) > 0 and n:
-                _model_cache.put(r, "_atol_reference",
-                                 (list(ids[:n]), vec[:n] / float(scalar)))
+                reference = (list(ids[:n]), vec[:n] / float(scalar))
         except Exception:
             pass
+        _model_cache.put(r, "_atol_reference", reference)
     if _model_cache.get(r, "_atol_reference") is None:
         # Never saw the initial state, so there is no initial scale to pin to.
         import warnings
@@ -728,6 +733,15 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
     # corrupted/advanced state that cannot be reverted without this snapshot.
     saved_state = save_model_state(r)
 
+    # A sub-call of a subdivision begins wherever the previous one left the
+    # vector: re-derived from the decayed state after a restore, or loosened by
+    # a ladder. The top-level call is pinned by its caller (_run_blocks,
+    # SegmentRunner); the halves are not, so pin them here, from the configured
+    # scalar. Each half then tries the configured accuracy and runs its own
+    # ladder if that fails.
+    if depth > 0:
+        apply_tolerance_vector(r)
+
     # Fast path: try once with whatever settings the model already has.
     try:
         res = _run(r, start, end, points, times, observed_species)
@@ -814,6 +828,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
 
             # Restore original integrator settings on success
             r.integrator.absolute_tolerance = orig_abs_tol
+            apply_tolerance_vector(r, scalar=orig_abs_tol)
             r.integrator.relative_tolerance = orig_rel_tol
             r.integrator.maximum_num_steps = orig_max_steps
             try:
@@ -892,6 +907,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
         
         # Restore original integrator settings before returning
         r.integrator.absolute_tolerance = orig_abs_tol
+        apply_tolerance_vector(r, scalar=orig_abs_tol)
         r.integrator.relative_tolerance = orig_rel_tol
         r.integrator.maximum_num_steps = orig_max_steps
         try:
@@ -910,6 +926,7 @@ def safe_simulate(r, solver_settings, observed_species, depth=0, label=None):
 
     # If all else fails, restore original settings and raise exception
     r.integrator.absolute_tolerance = orig_abs_tol
+    apply_tolerance_vector(r, scalar=orig_abs_tol)
     r.integrator.relative_tolerance = orig_rel_tol
     r.integrator.maximum_num_steps = orig_max_steps
     try:

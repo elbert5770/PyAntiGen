@@ -222,6 +222,76 @@ def test_a_later_configure_away_from_t0_keeps_the_reference():
     assert cache.get(r, "_tolerance_policy") is not None
 
 
+def test_a_reference_that_cannot_be_rederived_at_t0_is_dropped():
+    """A stale scale from an earlier parameter vector must not survive a failed refresh."""
+    r = model()
+    configure_integrator(r, settings(tolerance_pinning=True))
+    assert cache.get(r, "_atol_reference") is not None
+    r.reset()                                                # back at t=0
+    real = S.state_vector_ids
+    S.state_vector_ids = lambda rr: (_ for _ in ()).throw(RuntimeError("no ids"))
+    try:
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            configure_integrator(r, settings(tolerance_pinning=True))
+    finally:
+        S.state_vector_ids = real
+    assert cache.get(r, "_atol_reference") is None
+    assert cache.get(r, "_tolerance_policy") is None
+    assert any("initial time" in str(x.message) for x in w)
+
+
+def test_the_ladder_leaves_the_vector_pinned_after_restoring_the_scalar():
+    """Otherwise the next sub-call's fast path runs on a vector re-derived from the decayed state."""
+    r = model()
+    configure_integrator(r, settings(tolerance_pinning=True))
+    want = atol(r).copy()
+    real = S._run
+    state = {"n": 0}
+
+    def flaky(*a, **k):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("CVODE Error: CV_ERR_FAILURE")
+        return real(*a, **k)
+
+    S._run = flaky
+    try:
+        S.safe_simulate(r, {"start": 0, "end": 40, "n_points": 10, "variable_step_size": True},
+                        ["time", "[A]"])
+    finally:
+        S._run = real
+    assert state["n"] >= 2, "the ladder should have run"
+    assert np.allclose(atol(r), want, rtol=1e-9)
+
+
+def test_the_second_half_of_a_subdivision_starts_on_the_pinned_vector():
+    """The first half restores the scalar on success; the second half's fast path must not see the re-derived vector."""
+    r = model()
+    configure_integrator(r, settings(tolerance_pinning=True))
+    want = atol(r).copy()
+    real = S._run
+    seen = {}
+
+    def flaky(rr, start, end, *a, **k):
+        if (start, end) == (0, 40):
+            raise RuntimeError("CVODE Error: CV_ERR_FAILURE")    # every ladder attempt fails -> subdivide
+        if start > 0:
+            seen[start] = atol(rr).copy()                        # what the second half's first attempt runs on
+        return real(rr, start, end, *a, **k)
+
+    S._run = flaky
+    try:
+        _, meta = S.safe_simulate(r, {"start": 0, "end": 40, "n_points": 10, "variable_step_size": True},
+                                  ["time", "[A]"])
+    finally:
+        S._run = real
+    assert meta["subdivided"]
+    assert list(seen) == [20.0]
+    assert np.allclose(seen[20.0], want, rtol=1e-9)
+    assert np.allclose(atol(r), want, rtol=1e-9)
+
+
 def test_turning_it_off_again_clears_the_policy():
     r = model()
     configure_integrator(r, settings(tolerance_pinning=True))
