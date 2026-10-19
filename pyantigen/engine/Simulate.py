@@ -288,10 +288,19 @@ TOLERANCE_CAP_RATIO = None
 
 
 def tolerance_policy(solver_settings):
-    """``{"pin": bool, "cap_ratio": float | None}`` from *solver_settings*."""
-    pin = bool(solver_settings.get("tolerance_pinning", TOLERANCE_PINNING))
+    """``{"pin": bool, "cap_ratio": float | None}`` from *solver_settings*.
+
+    ``tolerance_pinning`` must be a real bool: ``bool("false")`` is True, so a
+    string from a config file would switch pinning on while reading as off.
+    """
+    pin = solver_settings.get("tolerance_pinning", TOLERANCE_PINNING)
+    if not isinstance(pin, (bool, np.bool_)):
+        raise TypeError(f"tolerance_pinning must be True or False, got {pin!r}")
+    pin = bool(pin)
     cap = solver_settings.get("tolerance_cap_ratio", TOLERANCE_CAP_RATIO)
     if cap is not None:
+        if isinstance(cap, (bool, np.bool_, str)):
+            raise TypeError(f"tolerance_cap_ratio must be a number, got {cap!r}")
         cap = float(cap)
         if not cap > 0:
             raise ValueError(f"tolerance_cap_ratio must be positive, got {cap}")
@@ -958,6 +967,9 @@ def configure_integrator(r, solver_settings):
     Mutates *solver_settings* with the defaults, as the original inline version
     did, so callers that read the values back afterwards still see them.
     """
+    # Before anything is touched: a bad pinning setting is a configuration
+    # error, and should not leave the integrator half set up.
+    tolerance_policy(solver_settings)
     solver_settings["integrator"] = solver_settings.get("integrator", "cvode")
     solver_settings["absolute_tolerance"] = solver_settings.get("absolute_tolerance", 1e-8)
     solver_settings["relative_tolerance"] = solver_settings.get("relative_tolerance", 1e-8)

@@ -92,6 +92,31 @@ def test_a_cap_without_pinning_is_refused():
         tolerance_policy({"tolerance_cap_ratio": 1e-3})
 
 
+@pytest.mark.parametrize("value", ["false", "False", "0", 0, 1, None])
+def test_pinning_must_be_a_real_bool(value):
+    """bool("false") is True: a string from a config file must not switch pinning on."""
+    with pytest.raises(TypeError, match="tolerance_pinning"):
+        tolerance_policy({"tolerance_pinning": value})
+
+
+@pytest.mark.parametrize("value", ["1e-3", True])
+def test_the_cap_must_be_a_number(value):
+    with pytest.raises(TypeError, match="tolerance_cap_ratio"):
+        tolerance_policy({"tolerance_pinning": True, "tolerance_cap_ratio": value})
+
+
+def test_numpy_bools_are_accepted():
+    assert tolerance_policy({"tolerance_pinning": np.True_})["pin"] is True
+
+
+def test_a_bad_setting_fails_before_the_integrator_is_touched():
+    r = model()
+    r.integrator.absolute_tolerance = 1e-3
+    with pytest.raises(ValueError, match="needs tolerance_pinning"):
+        configure_integrator(r, settings(tolerance_cap_ratio=1e-3))
+    assert r.integrator.absolute_tolerance == pytest.approx(1e-3)
+
+
 def test_a_non_positive_cap_is_refused():
     with pytest.raises(ValueError, match="positive"):
         tolerance_policy({"tolerance_pinning": True, "tolerance_cap_ratio": 0.0})
@@ -290,6 +315,19 @@ def test_the_second_half_of_a_subdivision_starts_on_the_pinned_vector():
     assert list(seen) == [20.0]
     assert np.allclose(seen[20.0], want, rtol=1e-9)
     assert np.allclose(atol(r), want, rtol=1e-9)
+
+
+def test_the_standalone_predict_helper_drops_a_pinning_policy():
+    """It takes no solver settings, so it cannot ask for pinning; a leftover policy would use a stale reference."""
+    from pyantigen.engine.Optimize import predict_concentrations
+    r = model()
+    configure_integrator(r, settings(tolerance_pinning=True))
+    assert cache.get(r, "_tolerance_policy") is not None
+    predict_concentrations([0.2], {"A": {"times": np.array([])}}, r, ["k"])
+    assert cache.get(r, "_tolerance_policy") is None
+    # and the floor path is what runs now
+    r.integrator.setIndividualTolerance("E", 1e-40)
+    assert apply_tolerance_vector(r) == 1
 
 
 def test_turning_it_off_again_clears_the_policy():

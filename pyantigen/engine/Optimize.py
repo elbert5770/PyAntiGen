@@ -8279,6 +8279,11 @@ def predict_concentrations(params, observable_data, model, param_names, observab
         model.setIntegrator('cvode')
         model.integrator.absolute_tolerance = 1e-8
         _model_cache.put(model, "_scalar_abs_tol", 1e-8)
+        # This helper takes no solver settings, so it cannot ask for pinning.
+        # Drop any policy an earlier configure_integrator left on the model, or
+        # its reference scale -- taken for a different parameter vector -- would
+        # keep pinning here.
+        _model_cache.put(model, "_tolerance_policy", None)
         model.integrator.relative_tolerance = 1e-8
         model.integrator.setValue('stiff', True)
         model.integrator.variable_step_size = True
