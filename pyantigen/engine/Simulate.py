@@ -322,6 +322,11 @@ def _remember_tolerance_policy(r, solver_settings, scalar):
     if not policy["pin"]:
         _model_cache.put(r, "_tolerance_policy", None)
         return
+    # The model clock is the test for "still at the initial state": reset() and
+    # resetAll() return it to exactly 0.0 whatever was simulated before (a model
+    # has no other start time), and save/restore_model_state carry 'time' with
+    # the amounts, so a restored state brings its clock back with it. A clock
+    # that is not 0 means the model has been integrated, whatever its start.
     try:
         at_start = float(r.getCurrentTime()) == 0.0
     except Exception:
@@ -373,6 +378,8 @@ def apply_tolerance_vector(r, scalar=None, floor=_MIN_ABSOLUTE_TOLERANCE):
     try:
         current = np.asarray(r.integrator.getAbsoluteToleranceVector(), float)
     except Exception:
+        # A vector that cannot be read cannot be floored either (the floor reads
+        # it first), so there is nothing to fall back to.
         return 0
     if len(current) < len(ids):
         return floor_tolerance_vector(r, floor)
@@ -382,12 +389,22 @@ def apply_tolerance_vector(r, scalar=None, floor=_MIN_ABSOLUTE_TOLERANCE):
         want = np.minimum(want, policy["cap_ratio"] * scalar)
     want = np.maximum(want, floor)
     n = 0
+    failed = []
     for i in np.flatnonzero(~np.isclose(current[:len(ids)], want, rtol=1e-9, atol=0.0)):
         try:
             r.integrator.setIndividualTolerance(ids[i], float(want[i]))
             n += 1
         except Exception:
-            pass
+            failed.append(ids[i])
+    if failed and not _model_cache.get(r, "_tolerance_set_warned"):
+        # Once per model: a state left at its drifted tolerance is what pinning
+        # exists to prevent, so it must not be silent, but this runs before
+        # every block and would otherwise repeat for the whole fit.
+        import warnings
+        _model_cache.put(r, "_tolerance_set_warned", True)
+        warnings.warn(f"tolerance_pinning could not set the absolute tolerance of "
+                      f"{len(failed)} state(s) (first: {failed[0]!r}); they keep "
+                      f"RoadRunner's derived value", RuntimeWarning, stacklevel=2)
     return n
 
 

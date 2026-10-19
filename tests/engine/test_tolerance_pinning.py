@@ -330,6 +330,25 @@ def test_the_standalone_predict_helper_drops_a_pinning_policy():
     assert apply_tolerance_vector(r) == 1
 
 
+def test_a_state_that_cannot_be_pinned_warns_once_per_model():
+    r = model()
+    configure_integrator(r, settings(tolerance_pinning=True))
+    ids, scale = cache.get(r, "_atol_reference")
+    bad = list(ids)
+    bad[ids.index("A")] = "not_a_state"                      # setIndividualTolerance will refuse it
+    cache.put(r, "_atol_reference", (bad, scale))
+    r.integrator.setIndividualTolerance("A", 7.0)            # drifted, so the bad id is attempted
+    r.integrator.setIndividualTolerance("B", 5.0)            # drifted, and settable
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        n = apply_tolerance_vector(r)
+        assert n >= 1, "the other states are still pinned"
+        r.integrator.setIndividualTolerance("D", 5.0)
+        apply_tolerance_vector(r)
+    msgs = [str(x.message) for x in w if "could not set" in str(x.message)]
+    assert len(msgs) == 1 and "not_a_state" in msgs[0]
+
+
 def test_turning_it_off_again_clears_the_policy():
     r = model()
     configure_integrator(r, settings(tolerance_pinning=True))
