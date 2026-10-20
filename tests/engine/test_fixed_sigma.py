@@ -187,3 +187,64 @@ def test_the_mode_is_in_the_fit_and_profile_fingerprints_and_the_default_keeps_t
     assert _fit_hash() != base_fit
     assert _spec_hash() != base_spec
     assert _fit_hash({"sigma_floor": "fixed"}) == _fit_hash()       # the key and the variable name the same fit
+
+
+def test_simtable_accepts_numpy_style_keys():
+    """Observables written for RoadRunner's result array index it as result[:, j] and result[i, j] (the Centiloid observable)."""
+    from pyantigen.engine.Analytic_gradient import SimTable
+    t = SimTable(["time", "a"], [[0.0, 1.0], [1.0, 3.0], [2.0, 5.0]])
+    assert list(t["a"]) == [1.0, 3.0, 5.0]
+    assert list(t[:, 1]) == [1.0, 3.0, 5.0]
+    assert t[1, 0] == 1.0
+    assert t[0, 1] == 1.0
+    assert t.colnames.index("a") == 1
+
+
+def test_gradient_gives_a_column_with_a_huge_sensitivity_its_own_step():
+    """A column with a 1e12 sensitivity that the loss never reads must not set the step of the column it does read."""
+    from pyantigen.engine.Analytic_gradient import LossGradient, SimTable
+    table = SimTable(["time", "junk", "obs"], np.column_stack([[0.0, 1.0, 2.0], [1.0e3, 2.0e3, 3.0e3], [10.0, 20.0, 30.0]]))
+    D = np.zeros((3, 3, 1))
+    D[:, 1, 0] = 1.0e12
+    D[:, 2, 0] = np.array([1.0, 2.0, 3.0])
+    items = {"a": {"results": table}}
+    lg = LossGradient.__new__(LossGradient)
+    lg.rel_step, lg.explicit, lg.param_names, lg.frozen_sigmas = 1e-5, set(), ["p"], None
+    lg.value = lambda it, p: float(2.5e4 + 0.5 * np.sum((it["a"]["results"].data[:, 2] - np.array([11.0, 19.0, 33.0])) ** 2))
+    groups = lg._step_groups(items, {"a": D}, 0)
+    assert len(groups) == 2 and {("a", 2)} in [g[0] for g in groups]       # the observable column is its own group
+    f, g = lg.gradient(items, {"a": D}, np.array([1.0]))
+    exact = np.sum((np.array([10.0, 20.0, 30.0]) - np.array([11.0, 19.0, 33.0])) * np.array([1.0, 2.0, 3.0]))
+    assert abs(g[0] - exact) < 1e-7 * max(abs(exact), 1.0)
+
+
+def test_columns_with_similar_steps_are_shifted_together():
+    """Offsetting partial derivatives (a mass balance) must stay inside one finite difference: columns with similar steps share it."""
+    from pyantigen.engine.Analytic_gradient import LossGradient, SimTable
+    table = SimTable(["time", "a", "b"], np.column_stack([[0.0, 1.0], [1.0e6, 2.0e6], [-1.0e6, -2.0e6]]))
+    D = np.zeros((2, 3, 1))
+    D[:, 1, 0] = [1.0e3, 2.0e3]
+    D[:, 2, 0] = [-1.0e3, -2.0e3]
+    items = {"s": {"results": table}}
+    lg = LossGradient.__new__(LossGradient)
+    lg.rel_step = 1e-5
+    groups = lg._step_groups(items, {"s": D}, 0)
+    assert len(groups) == 1 and groups[0][0] == {("s", 1), ("s", 2)}
+
+
+def test_a_parameter_one_arm_does_not_use_is_allowed_but_one_no_arm_reaches_is_not():
+    from pyantigen.engine.Analytic_gradient import _never_reached
+    names = ["k_f_A", "k_f_B", "shared", "orphan"]
+    lost = [["k_f_B", "orphan"], ["k_f_A", "orphan"]]          # arm 1 is drug A's, arm 2 is drug B's
+    assert _never_reached(names, lost) == ["orphan"]
+    assert _never_reached(names, [["k_f_B"]]) == ["k_f_B"]      # the one arm there is does not reach it: nobody does
+    assert _never_reached(names, [[]]) == []                    # nothing lost
+    assert _never_reached(names, []) == []
+
+
+def test_a_compiled_model_directory_is_one_safe_path_component():
+    from pyantigen.engine.Analytic_gradient import _model_directory
+    d = _model_directory("/cache", "Aducanumab 1 mg/kg (Q4W)", "9f6f")
+    assert d == "/cache/Aducanumab_1_mg_kg__Q4W__9f6f"
+    assert "/" not in d[len("/cache/"):] and not any(c in d for c in " ()")
+    assert _model_directory("/cache", "SILK_GSI", "ab") == "/cache/SILK_GSI_ab"        # names that were already safe keep their directory
