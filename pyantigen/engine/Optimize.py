@@ -593,6 +593,12 @@ def sigma_floor_mode():
 _SIGMA_FLOOR_MODES = ("cap", "fixed")
 
 
+def _recalibrate_floors_at_optimum():
+    """Forget the LOESS floors so the final re-evaluation recalibrates them at the fit, unless sigmas are fixed."""
+    if sigma_floor_mode() != "fixed":
+        _clear_noise_floor_cache()
+
+
 def apply_sigma_floor_setting(optimizer_kwargs):
     """Make the spec's ``optimizer_kwargs["sigma_floor"]`` ("cap" | "fixed") the mode of this process and its workers.
 
@@ -7907,7 +7913,12 @@ def run_optimization_from_groups(
         # "final" total loss is reported (out["fun"], the print below, and the
         # diagnostic-vs-fit drift check), so those stay mutually consistent
         # with opt_blocks/sigma_by_block instead of anchored on a stale value.
-        _clear_noise_floor_cache()
+        #
+        # Not in fixed-sigma mode: there the floors the fit minimized under ARE its sigmas, and recalibrating
+        # here would score the reported optimum and every later diagnostic (profile, Wald) with other sigmas
+        # than the fit used. Recalibrating at the optimum is then a deliberate second pass
+        # (pyantigen.engine.Floors.calibrate / compare), not a side effect of finishing a fit.
+        _recalibrate_floors_at_optimum()
 
         # Blocks at the optimum. These are the same (SSE, n) the objective
         # accumulated, so the sigmas reported here are exactly the ones the

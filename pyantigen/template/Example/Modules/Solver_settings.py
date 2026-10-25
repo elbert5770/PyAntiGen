@@ -8,6 +8,13 @@ BACKEND = "auto"
 # cluster point this at group or scratch storage, not at the home directory.
 AMICI_CACHE_DIR = None
 
+# How a data-floored block's sigma is set: "auto", "cap" or "fixed". "fixed" scores each block with its LOESS
+# noise floor as a known sigma, calibrated once, so the loss is const + 0.5 r.r and every f is comparable;
+# the AMICI multistart, profile and FIM stages need it, and "auto" selects it for them. "cap" is
+# min(sigma_hat, floor), re-estimated at every point: it is the older rule and will be retired. A spec's own
+# optimizer_kwargs["sigma_floor"] overrides this.
+SIGMA_FLOOR = "auto"
+
 def make_solver_settings(blocks, abs_tol=1e-10, rel_tol=1e-10, max_steps=20000):
     """Factory for solver settings dicts. Reduces boilerplate across all figure settings."""
     return {

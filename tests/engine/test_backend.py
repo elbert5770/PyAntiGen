@@ -120,3 +120,38 @@ def test_cache_dirs():
     assert B.default_cache_dir("linux", {"XDG_CACHE_HOME": "/x"}, "/h").startswith("/x/")
     assert B.cache_dir_warning("/h/.cache/p", {"SLURM_JOB_ID": "1"}, "/h")
     assert B.cache_dir_warning("/scratch/p", {"SLURM_JOB_ID": "1"}, "/h") is None
+
+
+# --- sigma policy -----------------------------------------------------------------------------------------
+
+def test_residual_stages_on_amici_get_fixed_sigma():
+    for stage in ("multistart", "profile", "fim"):
+        assert B.resolve_sigma_floor(stage, "amici") == "fixed"
+    assert B.resolve_sigma_floor("fit", "amici") is None            # a plain fit keeps the engine default
+    assert B.resolve_sigma_floor("profile", "roadrunner") is None   # until cap is retired
+
+
+def test_spec_beats_settings_and_cap_is_refused_where_the_residual_form_is_used():
+    assert B.resolve_sigma_floor("fit", "roadrunner", "fixed", "cap") == "fixed"
+    assert B.resolve_sigma_floor("fit", "roadrunner", None, "fixed") == "fixed"
+    assert B.resolve_sigma_floor("fit", "roadrunner", "auto", "auto") is None
+    with pytest.raises(B.SigmaPolicyError, match="known sigmas"):
+        B.resolve_sigma_floor("profile", "amici", "cap")
+    with pytest.raises(B.SigmaPolicyError):
+        B.resolve_sigma_floor("multistart", "amici", None, "cap")
+    assert B.resolve_sigma_floor("profile", "roadrunner", "cap") == "cap"
+    with pytest.raises(ValueError):
+        B.resolve_sigma_floor("fit", "amici", "dynamic")
+
+
+def test_configure_spec_sets_sigma_floor_from_settings(monkeypatch):
+    monkeypatch.delenv(B.ENV_BACKEND, raising=False)
+    monkeypatch.setattr(B, "amici_status", lambda *a, **k: OK)
+
+    class S:
+        SIGMA_FLOOR = "fixed"
+    spec = _Spec({"a": 1})
+    new = B.configure_spec(spec, None, S, printer=lambda *_: None)
+    assert new.optimizer_kwargs == {"a": 1, "sigma_floor": "fixed"} and spec.optimizer_kwargs == {"a": 1}
+    spec2 = _Spec({"sigma_floor": "cap"})
+    assert B.configure_spec(spec2, None, S, printer=lambda *_: None) is spec2        # the spec's own value wins

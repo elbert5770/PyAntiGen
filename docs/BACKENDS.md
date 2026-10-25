@@ -38,3 +38,23 @@ scratch storage: a home directory has a small quota and compiled models are larg
 
 This layer chooses and checks the backend. The multistart, profile and FIM stages still run from the
 project's `tools/` scripts; moving them into the engine is the next phase. BLAS is not checked.
+
+## Sigma rule
+
+How a data-floored block gets its sigma is a separate setting from the backend, but the AMICI long stages
+depend on it.
+
+| `sigma_floor` | sigma used | loss | for |
+|---|---|---|---|
+| `"fixed"` | the LOESS floor, as a known sigma, calibrated once | `const + 0.5 r.r` | AMICI multistart, profile, FIM |
+| `"cap"` (engine default) | `min(sigma_hat, floor)`, re-estimated at every point | concentrated NLL | older RoadRunner fits; to be retired |
+
+Precedence: the spec's `optimizer_kwargs["sigma_floor"]`, then `Solver_settings.SIGMA_FLOOR`, then the stage:
+multistart, profile and FIM on AMICI get `"fixed"`. `"cap"` there is an error, because the residual form of
+the loss (Levenberg-Marquardt, `J^T J` as the FIM) needs known sigmas.
+
+In fixed mode the floors are calibrated once, at the first point evaluated (normally x0), and are not
+recalibrated when a fit ends. `pyantigen.engine.Floors` saves them to a file and returns a sha256 stamp to put
+on every result, loads them back into worker processes, and compares two calibrations. Recalibrating at the
+optimum is a deliberate second pass: `Floors.calibrate`, refit, `Floors.compare`, and accept when
+`Floors.stable` holds.

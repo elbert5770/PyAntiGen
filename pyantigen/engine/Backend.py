@@ -40,6 +40,16 @@ ENV_CACHE = "PYANTIGEN_AMICI_CACHE"
 MIN_GCC = (10, 1)
 
 
+SIGMA_MODES = ("auto", "cap", "fixed")
+# Stages that use the residual form of the loss (Levenberg-Marquardt, J^T J as the FIM, one comparable f).
+# That needs every sigma known, i.e. sigma_floor="fixed".
+RESIDUAL_STAGES = ("multistart", "profile", "fim")
+
+
+class SigmaPolicyError(ValueError):
+    """The sigma rule asked for cannot be used with the backend and stage."""
+
+
 class BackendUnavailable(RuntimeError):
     """A backend that was asked for by name cannot run on this machine."""
 
@@ -150,6 +160,32 @@ def resolve_backend(stage, requested=None, settings_value=None, spec_has_gradien
     return Resolution(chosen, source, tuple(notes))
 
 
+def resolve_sigma_floor(stage, backend, spec_value=None, settings_value=None):
+    """The sigma rule to set on the spec (``"cap"`` or ``"fixed"``), or None to leave the engine's default.
+
+    The spec's own ``optimizer_kwargs["sigma_floor"]`` is the source of truth; ``Solver_settings.SIGMA_FLOOR``
+    fills it in when the spec is silent. Failing both, the AMICI residual stages (:data:`RESIDUAL_STAGES`)
+    get ``"fixed"``, since the residual form needs known sigmas; every other stage keeps the engine's default,
+    ``"cap"``, until that rule is retired. A residual stage on AMICI with ``"cap"`` is an error.
+    """
+    for name, v in (("optimizer_kwargs['sigma_floor']", spec_value), ("Solver_settings.SIGMA_FLOOR", settings_value)):
+        if v is not None and str(v).strip().lower() not in SIGMA_MODES:
+            raise ValueError(f"{name} must be one of {SIGMA_MODES}, got {v!r}")
+    chosen = None
+    for v in (spec_value, settings_value):
+        if v is not None and str(v).strip().lower() != "auto":
+            chosen = str(v).strip().lower()
+            break
+    residual = backend == "amici" and stage in RESIDUAL_STAGES
+    if chosen is None and residual:
+        chosen = "fixed"
+    if chosen == "cap" and residual:
+        raise SigmaPolicyError(
+            f"the {stage} stage on AMICI minimizes the residual form of the loss, which needs known sigmas: "
+            "use sigma_floor='fixed' (or run this stage on the RoadRunner backend)")
+    return chosen
+
+
 def apply_to_optimizer_kwargs(kwargs, resolution, cache_dir=None):
     """The spec's ``optimizer_kwargs`` with the resolved backend applied, and the notes it adds.
 
@@ -221,6 +257,11 @@ def configure_spec(spec, requested=None, settings_module=None, stage="fit", prin
                           bool(kwargs.get("analytic_gradient")))
     cache = explicit_cache_dir(getattr(settings_module, "AMICI_CACHE_DIR", None))
     new, notes = apply_to_optimizer_kwargs(kwargs, res, cache)
+    sigma = resolve_sigma_floor(stage, res.backend, kwargs.get("sigma_floor"),
+                                getattr(settings_module, "SIGMA_FLOOR", None))
+    if sigma is not None and new.get("sigma_floor") != sigma:
+        new = {**new, "sigma_floor": sigma}
+        notes = (*notes, f"sigma_floor set to {sigma!r} ({stage} on {res.backend})")
     for n in (*res.notes, *notes):
         printer(f"[backend] {n}")
     printer(f"[backend] {stage}: {res.backend} ({res.source})")
