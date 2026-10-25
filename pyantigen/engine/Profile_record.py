@@ -25,6 +25,10 @@ Conventions:
   agrees between routes; ``nll`` does not and is only compared within a route.
 * ``verdict`` is ``converged``, ``not_converged`` (an upper bound on the profile there) or ``failed``.
   ``lower`` flags a point more than ``LOWER_TOL`` below the optimum: the optimum was not global.
+* ``bound_active`` lists the free parameters sitting within ``BOUND_TOL`` of a declared bound, and the pinned
+  parameter itself if the pin lies beyond its bound. Such a point is only an upper bound on the profile (the box,
+  not the data, stopped the nuisance parameter), so a crossing it produces is *box-limited*, not an interval
+  limit; see :func:`flag_bounds` and :func:`side_verdicts`.
 """
 import json
 import math
@@ -33,6 +37,7 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Optional, Protocol, runtime_checkable
 
 VERDICTS = ("converged", "not_converged", "failed")
+BOUND_TOL = 0.002         # optimizer-space (decades for a log parameter) distance that counts as on a bound
 LOWER_TOL = 0.05          # a point this far below the optimum (in nll) is flagged ``lower``
 DNLL_95 = 1.9207          # chi2(1, 0.95) / 2: the one-parameter 95% level
 
@@ -60,6 +65,11 @@ class PointRecord:
     id: Optional[int] = None                # pin-table id
     source: Optional[str] = None            # where the point or its start came from
     interrupted: bool = False
+    bound_active: list = field(default_factory=list)
+
+    @property
+    def box_limited(self):
+        return bool(self.bound_active)
 
     def to_dict(self):
         return asdict(self)
@@ -187,6 +197,52 @@ def read_jsonl(path):
                 except ValueError:
                     pass
     return out
+
+
+def flag_bounds(rec, names, lower, upper, tol=BOUND_TOL):
+    """Fill ``rec.bound_active`` from the point's full vector. *lower*/*upper* are in the optimizer's space.
+
+    A free parameter within *tol* of a bound is named. The pinned parameter (``rec.param_idx``) is named with a
+    ``" (pin)"`` suffix if its pinned value lies beyond a bound (not merely near it: a pin at an edge is allowed).
+    Returns the record; one without a vector is left unflagged.
+    """
+    if rec.x is None:
+        return rec
+    out = []
+    for i, (xi, lo, hi) in enumerate(zip(rec.x, lower, upper)):
+        if xi is None or not math.isfinite(xi):
+            continue
+        if i == rec.param_idx:
+            if xi < lo - tol or xi > hi + tol:
+                out.append(f"{names[i]} (pin)")
+        elif xi - lo <= tol or hi - xi <= tol:
+            out.append(names[i])
+    rec.bound_active = out
+    return rec
+
+
+def side_verdicts(records, best_x, level=DNLL_95):
+    """``(below, above)``, each ``"crossed"``, ``"box-limited"`` or ``"open"``.
+
+    The side's crossing is the pair of points :func:`crossings` interpolates between. It is ``crossed`` only if
+    the first point over *level* converged with no active bound; ``box-limited`` if that point (or the last one
+    under the level) has an active bound or did not converge, since the true profile there may be lower and the
+    limit further out; ``open`` if no point on the side is over *level*.
+    """
+    pts = curve(records)
+    out = []
+    for side in (-1, 1):
+        walk = sorted((r for r in pts if (r.x_fixed - best_x) * side > 0), key=lambda r: abs(r.x_fixed - best_x))
+        under = None
+        verdict = "open"
+        for r in walk:
+            if r.dnll > level:
+                bad = r.box_limited or r.verdict != "converged" or (under is not None and under.box_limited)
+                verdict = "box-limited" if bad else "crossed"
+                break
+            under = r
+        out.append(verdict)
+    return tuple(out)
 
 
 def curve(records):

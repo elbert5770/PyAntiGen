@@ -132,3 +132,28 @@ def test_interp_and_compare_curves():
     assert hi_a is None or hi_a > 1.0                                 # a's last point (1.5 -> 2.25) is over the level
     assert math.isclose(hi_b, math.sqrt(P.DNLL_95 / 1.02), rel_tol=0.05)
     assert out["a"]["points"] == 5 and out["b"]["points"] == 17
+
+
+def _pt(x, d, bound=(), verdict="converged"):
+    return P.PointRecord(param="k", x_fixed=x, dnll=d, nll=d, verdict=verdict, bound_active=list(bound))
+
+
+def test_flag_bounds_names_nuisance_at_a_bound_and_a_pin_beyond_it():
+    r = P.PointRecord(param="b", x_fixed=3.5, param_idx=1, x=[0.0005, 3.5, 1.0, 2.9985])
+    P.flag_bounds(r, ["a", "b", "c", "d"], [0, 0, 0, 0], [3, 3, 3, 3])
+    assert r.bound_active == ["a", "b (pin)", "d"] and r.box_limited
+    ok = P.PointRecord(param="b", x_fixed=3.0, param_idx=1, x=[1.0, 3.0, 1.0, 1.0])  # a pin at the edge is allowed
+    assert not P.flag_bounds(ok, ["a", "b", "c", "d"], [0] * 4, [3] * 4).box_limited
+
+
+def test_side_verdicts_crossed_box_limited_open():
+    pts = [_pt(0.5, 0.5), _pt(1.0, 1.5), _pt(1.5, 2.5), _pt(-0.5, 0.4), _pt(-1.0, 1.0)]
+    assert P.side_verdicts(pts, 0.0) == ("open", "crossed")
+    pts[2].bound_active = ["Vm"]
+    assert P.side_verdicts(pts, 0.0)[1] == "box-limited"
+    pts[2].bound_active = []
+    pts[1].bound_active = ["Vm"]
+    assert P.side_verdicts(pts, 0.0)[1] == "box-limited"
+    pts[1].bound_active = []
+    pts[2].verdict = "not_converged"
+    assert P.side_verdicts(pts, 0.0)[1] == "box-limited"
