@@ -141,7 +141,7 @@ def _pt(x, d, bound=(), verdict="converged"):
 def test_flag_bounds_names_nuisance_at_a_bound_and_a_pin_beyond_it():
     r = P.PointRecord(param="b", x_fixed=3.5, param_idx=1, x=[0.0005, 3.5, 1.0, 2.9985])
     P.flag_bounds(r, ["a", "b", "c", "d"], [0, 0, 0, 0], [3, 3, 3, 3])
-    assert r.bound_active == ["a", "b (pin)", "d"] and r.box_limited
+    assert r.bound_active == ["a", "d"] and r.box_limited and r.pin_outside
     ok = P.PointRecord(param="b", x_fixed=3.0, param_idx=1, x=[1.0, 3.0, 1.0, 1.0])  # a pin at the edge is allowed
     assert not P.flag_bounds(ok, ["a", "b", "c", "d"], [0] * 4, [3] * 4).box_limited
 

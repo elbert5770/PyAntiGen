@@ -25,8 +25,9 @@ Conventions:
   agrees between routes; ``nll`` does not and is only compared within a route.
 * ``verdict`` is ``converged``, ``not_converged`` (an upper bound on the profile there) or ``failed``.
   ``lower`` flags a point more than ``LOWER_TOL`` below the optimum: the optimum was not global.
-* ``bound_active`` lists the free parameters sitting within ``BOUND_TOL`` of a declared bound, and the pinned
-  parameter itself if the pin lies beyond its bound. Such a point is only an upper bound on the profile (the box,
+* ``bound_active`` lists the free (nuisance) parameters sitting within ``BOUND_TOL`` of a declared bound;
+  ``pin_outside`` is set when the profiled parameter itself lies beyond its declared bound (the walk is allowed
+  to leave the box; that is reported, but it is not a box limit on the nuisance parameters). Such a point is only an upper bound on the profile (the box,
   not the data, stopped the nuisance parameter), so a crossing it produces is *box-limited*, not an interval
   limit; see :func:`flag_bounds` and :func:`side_verdicts`.
 """
@@ -66,6 +67,7 @@ class PointRecord:
     source: Optional[str] = None            # where the point or its start came from
     interrupted: bool = False
     bound_active: list = field(default_factory=list)
+    pin_outside: bool = False
 
     @property
     def box_limited(self):
@@ -202,8 +204,8 @@ def read_jsonl(path):
 def flag_bounds(rec, names, lower, upper, tol=BOUND_TOL):
     """Fill ``rec.bound_active`` from the point's full vector. *lower*/*upper* are in the optimizer's space.
 
-    A free parameter within *tol* of a bound is named. The pinned parameter (``rec.param_idx``) is named with a
-    ``" (pin)"`` suffix if its pinned value lies beyond a bound (not merely near it: a pin at an edge is allowed).
+    A free parameter within *tol* of a bound is named in ``bound_active``. The pinned parameter (``rec.param_idx``)
+    sets ``pin_outside`` if its value lies beyond a bound (not merely near it: a pin at an edge is allowed).
     Returns the record; one without a vector is left unflagged.
     """
     if rec.x is None:
@@ -213,8 +215,7 @@ def flag_bounds(rec, names, lower, upper, tol=BOUND_TOL):
         if xi is None or not math.isfinite(xi):
             continue
         if i == rec.param_idx:
-            if xi < lo - tol or xi > hi + tol:
-                out.append(f"{names[i]} (pin)")
+            rec.pin_outside = bool(xi < lo - tol or xi > hi + tol)
         elif xi - lo <= tol or hi - xi <= tol:
             out.append(names[i])
     rec.bound_active = out
