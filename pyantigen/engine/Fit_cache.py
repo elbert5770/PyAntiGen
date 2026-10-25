@@ -152,6 +152,11 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
         return round(v, 12) if np.isfinite(v) else None
 
     kwargs = dict(optimizer_kwargs or {})
+    # The sigma rule decides what the fit minimizes. It is hashed from the mode in force (the spec key or the
+    # environment variable), and only when it is not the default, so existing fits keep their hash.
+    kwargs.pop("sigma_floor", None)
+    from pyantigen.engine.Optimize import sigma_floor_mode
+    _sigma_mode = sigma_floor_mode()
     # Profile-only keys configure what happens after the fit, not the fit.
     for k in ("profile_method", "profile_optimizer_kwargs", "profile_grid",
               "profile_without_opt"):
@@ -181,6 +186,8 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
             "solver": solver_hash,
             "data": data_hash,
     }
+    if _sigma_mode != "cap":
+        key["sigma_floor"] = _sigma_mode
     # Left out at the default so fits cached before the sampler existed keep
     # their hash, and left out at one start, where nothing is sampled, so that
     # a project-wide default of "sobol" does not invalidate single-start fits.

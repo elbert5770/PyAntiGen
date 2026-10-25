@@ -334,6 +334,11 @@ def solver_fingerprint(replicates):
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def _sigma_floor_mode():
+    from pyantigen.engine.Optimize import sigma_floor_mode
+    return sigma_floor_mode()
+
+
 def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
                      fixed_sigmas=None, solver_hash=None):
     """Stable hashes identifying what a set of profile points belongs to.
@@ -391,6 +396,10 @@ def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
             # tracked; present, it makes any change to how the model is
             # integrated start a new directory. See solver_fingerprint.
             **({"solver": str(solver_hash)} if solver_hash else {}),
+            # "fixed" scores floored blocks with the floor itself: a different function from the default cap, so
+            # points computed under one must not be resumed under the other. Absent at the default, which keeps
+            # every existing profile directory valid.
+            **({"sigma_floor": _sigma_floor_mode()} if _sigma_floor_mode() != "cap" else {}),
         },
         sort_keys=True,
     )

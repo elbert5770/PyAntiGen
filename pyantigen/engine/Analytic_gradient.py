@@ -63,7 +63,9 @@ class SimTable:
         self._index = {c: i for i, c in enumerate(self.colnames)}
 
     def __getitem__(self, key):
-        return self.data[:, self._index[key]]
+        if isinstance(key, str):
+            return self.data[:, self._index[key]]
+        return self.data[key]          # numpy-style, as RoadRunner's result array allows: table[:, j], table[i, j]
 
     def __len__(self):
         return self.data.shape[0]
@@ -134,6 +136,74 @@ class LossGradient:
             raise AnalyticGradientError("the loss is not finite")
         return v
 
+    def residual_vector(self, items, p_lin):
+        """``(r, const)``: the scaled residuals ``sqrt(w) (y - yhat) / sigma`` of every datum, and ``sum n ln sigma``.
+
+        With every block's sigma known (``PYANTIGEN_SIGMA_FLOOR=fixed`` and declared sigmas) the loss is exactly
+        ``const + 0.5 * r.r``, a nonlinear least-squares problem. Raises if any block still profiles its sigma.
+        """
+        from pyantigen.engine import Optimize as O
+        p_lin = np.asarray(p_lin, dtype=float)
+        p_dict = dict(zip(self.param_names, p_lin.tolist()))
+        sink = []
+        O._RESIDUAL_SINK = sink
+        try:
+            blocks = O.collect_loss_blocks(items, self.groups, self.replicates, self.param_names, p_lin, p_dict,
+                                           frozen_sigmas=self.frozen_sigmas)
+        finally:
+            O._RESIDUAL_SINK = None
+        sig, const = {}, 0.0
+        for key, v in blocks.items():
+            sse, n, ks, fl = O._unpack_block(v)
+            if n <= 0:
+                continue
+            s, _cost, state = O._block_sigma_resolution(sse, n, ks, fl)
+            if state != "declared":
+                raise AnalyticGradientError(
+                    f"block {key} profiles its sigma ({state}): the residual form needs every sigma known "
+                    "(set PYANTIGEN_SIGMA_FLOOR=fixed)")
+            sig[key] = s
+            const += n * np.log(max(s, 1e-300))
+        parts = [v / sig[key] for key, v in sink if key in sig and v.size]
+        if not parts:
+            raise AnalyticGradientError("the loss has no data to score")
+        return np.concatenate(parts), float(const)
+
+    def residual_jacobian(self, items, directions, p_lin):
+        """``(r, J, const)``: residuals, ``J[i, k] = d r_i / d theta_k`` (linear units), and ``sum n ln sigma``.
+
+        The derivative is taken the way :meth:`gradient` takes the loss's: central differences of the residual
+        vector along the sensitivity tables (Richardson), plus a partial for each parameter the loss names itself.
+        ``J.T @ r`` is then the gradient of ``const + 0.5 r.r`` and ``J.T @ J`` its Gauss-Newton Hessian.
+        """
+        p_lin = np.asarray(p_lin, dtype=float)
+        K = len(self.param_names)
+        r0, const = self.residual_vector(items, p_lin)
+        J = np.zeros((r0.size, K))
+
+        def res(it, p):
+            r, _c = self.residual_vector(it, p)
+            if r.size != r0.size:
+                raise AnalyticGradientError("the number of scored data changed between shifted evaluations")
+            return r
+
+        for k in range(K):
+            for units, h in self._step_groups(items, directions, k):
+                def central(x, units=units, k=k):
+                    return (res(self._shift_units(items, directions, units, k, x), p_lin)
+                            - res(self._shift_units(items, directions, units, k, -x), p_lin)) / (2.0 * x)
+                J[:, k] += (4.0 * central(h / 2.0) - central(h)) / 3.0
+            if k in self.explicit:
+                d = 1e-6 * max(abs(p_lin[k]), 1e-8)
+
+                def partial(s, k=k):
+                    up, dn = p_lin.copy(), p_lin.copy()
+                    up[k] += s
+                    dn[k] -= s
+                    return (res(items, up) - res(items, dn)) / (2.0 * s)
+                J[:, k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+        return r0, J, const
+
     @staticmethod
     def _shift(items, directions, k, h):
         out = {}
@@ -143,10 +213,12 @@ class LossGradient:
             out[sim] = {**item, "results": table}
         return out
 
-    def _step(self, items, directions, k):
+    def _step(self, items, directions, k, sims=None):
         """The step along direction k that moves the smallest-scale entry by ``rel_step`` of itself."""
         ratio = 0.0
         for sim, item in items.items():
+            if sims is not None and sim not in sims:
+                continue
             D = directions.get(sim)
             if D is None:
                 continue
@@ -155,6 +227,68 @@ class LossGradient:
             scale = np.maximum(np.abs(R), 1e-6 * colmax[None, :] + 1e-300)
             ratio = max(ratio, float(np.nanmax(np.abs(D[:, :, k]) / scale)) if D.size else 0.0)
         return self.rel_step / ratio if ratio > 0 else None
+
+    # One finite-difference step for the whole loss is set by the table entry with the largest relative sensitivity in ANY
+    # column of ANY simulation. A column the loss never reads (45 states in a typical table) can have sensitivities of 1e12
+    # that fix a step far too small for the column it does read, and the central difference of that is lost in rounding:
+    # on aggregation_silk the Jacobian of one arm changed by a relative 1e-3 between two points 1e-9 apart while its residuals
+    # changed by 1e-10 (the gradient jumped by 1.9). The chain rule allows a step per (simulation, column) unit:
+    # dL/dtheta_k = sum_u dL/dR_u . D_u,k, each term by shifting only that column. Units whose steps are within SPLIT_RATIO
+    # of each other are shifted together, because splitting everything into single columns turns offsetting partial
+    # derivatives (mass balances) into rounding error. Only columns that are not read could be left out, and a probe for
+    # "read" columns proved unreliable (it missed columns on silk_appfull, error 18.7), so every column with a non-zero
+    # sensitivity is a unit. Measured (silk_appfull optimum, aggregation_silk traced points): SPLIT_RATIO from 3 to 1e5 gives
+    # the old gradient on silk_appfull (error vs forward differences 0.021) and no jump on aggregation_silk (3e-4, was 1.9);
+    # 1e7 is already too coarse there (8e-3).
+    SPLIT_RATIO = 1e3
+
+    def _unit_steps(self, items, directions, k):
+        """``{(sim, column): h}``: the step that moves that column's most sensitive entry by ``rel_step`` of itself."""
+        steps = {}
+        for sim, item in items.items():
+            D = directions.get(sim)
+            if D is None or not D.size:
+                continue
+            R = item["results"].data
+            colmax = np.nanmax(np.abs(R), axis=0)
+            for c in range(R.shape[1]):
+                Dc = D[:, c, k]
+                if not np.any(Dc):
+                    continue
+                scale = np.maximum(np.abs(R[:, c]), 1e-6 * colmax[c] + 1e-300)
+                ratio = float(np.nanmax(np.abs(Dc) / scale))
+                if ratio > 0:
+                    steps[(sim, c)] = self.rel_step / ratio
+        return steps
+
+    def _step_groups(self, items, directions, k, read=None, p_lin=None):
+        """``[(units, h)]``: (simulation, column) units that share a step. The smallest remaining step serves every unit
+        within SPLIT_RATIO of it; the rest are grouped the same way. (``read`` and ``p_lin`` are accepted and ignored.)"""
+        remaining = self._unit_steps(items, directions, k)
+        groups = []
+        while remaining:
+            h0 = min(remaining.values())
+            joint = {u for u, h in remaining.items() if h <= max(self.SPLIT_RATIO, 1.0) * h0}      # always includes the smallest
+            groups.append((joint, h0))
+            for u in joint:
+                del remaining[u]
+        return groups
+
+    @staticmethod
+    def _shift_units(items, directions, units, k, h):
+        from collections import defaultdict
+        by_sim = defaultdict(list)
+        for sim, c in units:
+            by_sim[sim].append(c)
+        out = dict(items)
+        for sim, cols in by_sim.items():
+            table = items[sim]["results"]
+            data = table.data.copy()
+            D = directions[sim]
+            for c in cols:
+                data[:, c] += h * D[:, c, k]
+            out[sim] = {**items[sim], "results": type(table)(table.colnames, data)}
+        return out
 
     def gradient(self, items, directions, p_lin):
         """``(nll, grad)`` at *p_lin*.
@@ -167,11 +301,10 @@ class LossGradient:
         f0 = self.value(items, p_lin)
         g = np.zeros(K)
         for k in range(K):
-            h = self._step(items, directions, k)
-            if h is not None:
-                def central(s, k=k):
-                    return (self.value(self._shift(items, directions, k, s), p_lin)
-                            - self.value(self._shift(items, directions, k, -s), p_lin)) / (2.0 * s)
+            for units, h in self._step_groups(items, directions, k):
+                def central(x, units=units, k=k):
+                    return (self.value(self._shift_units(items, directions, units, k, x), p_lin)
+                            - self.value(self._shift_units(items, directions, units, k, -x), p_lin)) / (2.0 * x)
                 g[k] += (4.0 * central(h / 2.0) - central(h)) / 3.0
             if k in self.explicit:                      # the loss names this parameter itself
                 d = 1e-6 * max(abs(p_lin[k]), 1e-8)
@@ -262,6 +395,24 @@ class ParameterReplay:
 # ---------------------------------------------------------------------------------------
 # AMICI
 # ---------------------------------------------------------------------------------------
+
+def _model_directory(cache_dir, name, tag):
+    """Where a compiled model lives: the simulation's name made safe for a path and a shell, plus the model's hash.
+
+    A name such as ``Aducanumab 1 mg/kg (Q4W)`` would otherwise nest a directory at the slash and break the build's
+    shell command at the parentheses.
+    """
+    return os.path.join(cache_dir, re.sub(r"\W", "_", name) + f"_{tag}")
+
+
+def _never_reached(param_names, lost_per_sim):
+    """Fitted parameters that reach no plain parameter of the model in any simulation.
+
+    A parameter one arm does not use (another drug's binding rate) is ``lost`` there by design; only one that no arm
+    reaches would silently get a zero gradient.
+    """
+    return [p for p in param_names if lost_per_sim and all(p in lost for lost in lost_per_sim)]
+
 
 def _tracked_window(settings):
     blocks = settings["simulation_blocks"]
@@ -399,12 +550,9 @@ class _SimGradient:
                     f"{name}: a hook sets species initial values that depend on the fitted parameters "
                     f"({sorted(set(found) | set(direct))}); their sensitivities are not available")
             direct = found
-        lost = [p for p, hit in zip(param_names, reach.any(axis=0)) if not hit]
-        if lost:
-            raise AnalyticGradientError(
-                f"{name}: fitted parameter(s) {lost} reach no plain parameter of the model (a species "
-                "initial value, or a parameter with an initial assignment?): the analytic gradient "
-                "would be zero for them")
+        # a parameter this arm does not use (another drug's binding rate) has a zero column here by design;
+        # AmiciGradient raises if no arm at all is reached by it
+        self.lost = [p for p, hit in zip(param_names, reach.any(axis=0)) if not hit]
         self.free = [p for p, used in zip(plain, reach.any(axis=1)) if used]
 
         columns = [c for c in replicate["Observed_species"](r) if c != "time"]
@@ -418,7 +566,7 @@ class _SimGradient:
         outputs = concentration_outputs(sbml, usable)
         tag = hashlib.sha256(json.dumps([scaled.sbml, sorted(self.free), list(outputs.items())],
                                         sort_keys=True).encode()).hexdigest()[:16]
-        directory = os.path.join(cache_dir, f"{name}_{tag}")
+        directory = _model_directory(cache_dir, name, tag)
         module_name = re.sub(r"\W", "_", f"pag_{name}_{tag}")
         import amici
         if os.path.exists(os.path.join(directory, module_name, "__init__.py")):
@@ -571,6 +719,12 @@ class AmiciGradient:
                 model_text=model_text, paths=paths, cache_dir=cache_dir, rtol=settings["rtol"],
                 atol=settings["atol"], max_steps=settings["max_steps"], verbose=settings["verbose"],
                 seed=settings["seed"], extra_times=(settings["extra_times"] or {}).get(name, ()))
+        never = _never_reached(self.param_names, [sim.lost for sim in self.sims.values()])
+        if never:
+            raise AnalyticGradientError(
+                f"fitted parameter(s) {never} reach no plain parameter of the model in any arm (a species "
+                "initial value, or a parameter with an initial assignment?): the analytic gradient "
+                "would be zero for them")
         self.n_calls = 0
 
     @staticmethod
@@ -604,6 +758,17 @@ class AmiciGradient:
             dirs[name] = D
         self.n_calls += 1
         return self.loss.gradient(items, dirs, p_lin)
+
+    def linear_residual_jacobian(self, p_lin):
+        """``(r, J, const)`` on AMICI's own simulation; see :meth:`LossGradient.residual_jacobian`."""
+        items, dirs = {}, {}
+        for name, sim in self.sims.items():
+            table, D = sim.tables(p_lin, self.groups, self.replicates, self.models)
+            items[name] = {"results": table, "data": self.models[name]["df_dict"],
+                           "replicate": self.replicates[name]}
+            dirs[name] = D
+        self.n_calls += 1
+        return self.loss.residual_jacobian(items, dirs, p_lin)
 
     def __call__(self, x_opt):
         """The gradient in optimizer space (a log10 parameter's derivative is taken with respect to log10 p)."""
