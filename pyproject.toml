@@ -39,6 +39,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+# AMICI compiles models to C++ (needs g++ >= 10, cmake, swig); not available on native Windows, use WSL.
+amici = ["amici>=1.1.0; sys_platform != 'win32'", "cmake; sys_platform != 'win32'", "swig; sys_platform != 'win32'"]
 
 [project.urls]
 Homepage = "https://github.com/elbert5770/PyAntiGen"
@@ -47,6 +49,7 @@ Issues = "https://github.com/elbert5770/PyAntiGen/issues"
 
 [project.scripts]
 pyantigen-create = "pyantigen.cli:create_project"
+pyantigen-setup = "pyantigen.setup_env:main"
 
 [tool.setuptools.packages.find]
 include = ["pyantigen*"]

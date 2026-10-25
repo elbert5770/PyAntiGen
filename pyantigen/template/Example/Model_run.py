@@ -197,6 +197,11 @@ if __name__ == "__main__":
     parser.add_argument("--diagnostics", type=str, default="_NO_DIAGNOSTICS",
                         choices=list(DIAGNOSTICS_PRESETS.keys()),
                         help="Diagnostics settings preset to run (default: _NO_DIAGNOSTICS)")
+    parser.add_argument("--backend", type=str, default=None, choices=["auto", "roadrunner", "amici"],
+                        help="Solver for the optimization: roadrunner, amici (needs `pip install "
+                             "pyantigen[amici]`, not on native Windows), or auto. Overrides "
+                             "Solver_settings.BACKEND and the PYANTIGEN_BACKEND environment variable. "
+                             "Run `pyantigen-setup` to see whether AMICI can run here.")
     parser.add_argument("--no-fit", action="store_true", dest="no_fit",
                         help="Skip the optimizer and evaluate the spec's x0 instead, "
                              "then run the requested diagnostics against it.")
@@ -205,6 +210,9 @@ if __name__ == "__main__":
 
     if len(sys.argv) == 1:
         parser.error("No arguments provided.")
+
+    if args.simulate and args.backend == "amici":
+        parser.error("--simulate always runs on RoadRunner; --backend amici applies to --optimize")
 
     update_antimony_model()
 
@@ -253,6 +261,13 @@ if __name__ == "__main__":
 
         for opt_key in opt_keys:
             opt_spec = get_OPTIMIZATION(opt_key)
+            from Modules import Solver_settings as _solver_settings
+            from pyantigen.engine.Backend import BackendUnavailable, configure_spec
+            try:
+                opt_spec = configure_spec(opt_spec, args.backend, _solver_settings, stage="fit")
+            except BackendUnavailable as exc:
+                print(f"\n*** STOPPED: {exc}", flush=True)
+                sys.exit(2)
             print(f"Starting domain optimization for: {args.optimize} [{opt_key}]")
             setup_optimization_from_groups(run_settings, opt_spec, experiment_arg)
 
