@@ -321,3 +321,42 @@ class RoadRunnerSolver:
         if rec.direction == 0:
             rec.direction = req.direction
         return rec
+
+
+def interp_dnll(records, x):
+    """The profile's dnll at *x* by linear interpolation between the neighbouring usable points, or None outside them."""
+    pts = curve(records)
+    for a, b in zip(pts, pts[1:]):
+        if a.x_fixed <= x <= b.x_fixed:
+            if b.x_fixed == a.x_fixed:
+                return min(a.dnll, b.dnll)
+            t = (x - a.x_fixed) / (b.x_fixed - a.x_fixed)
+            return a.dnll + t * (b.dnll - a.dnll)
+    return None
+
+
+def compare_curves(a, b, best_a, best_b, upto=3.0, level=DNLL_95):
+    """How two profiles of one parameter (two routes) agree.
+
+    Returns a dict: ``rows`` (each point of *a* that lies inside *b*'s range and has ``dnll <= upto``: x, dnll_a,
+    dnll_b interpolated, difference), ``max_abs_diff`` over those rows, the ``crossings`` of each, the number of
+    points and not-converged points of each, and the summed ``evals`` and ``seconds``. The two routes anchor at
+    their own optima (*best_a*, *best_b*, in ``x_fixed`` units), so dnll is each route's rise above its own.
+    Interpolating a curve that is only piecewise sampled adds an error of its own: compare where *b* is dense.
+    """
+    rows = []
+    for r in curve(a):
+        if r.dnll > upto:
+            continue
+        y = interp_dnll(b, r.x_fixed)
+        if y is not None:
+            rows.append({"x": r.x_fixed, "dnll_a": r.dnll, "dnll_b": y, "diff": r.dnll - y})
+
+    def stats(recs):
+        return {"points": len(recs), "not_converged": sum(r.verdict == "not_converged" for r in recs),
+                "failed": sum(r.verdict == "failed" for r in recs), "lower": sum(r.lower for r in recs),
+                "evals": sum(r.evals or 0 for r in recs), "seconds": sum(r.seconds or 0.0 for r in recs)}
+
+    return {"rows": rows, "max_abs_diff": max((abs(r["diff"]) for r in rows), default=None),
+            "crossings_a": crossings(a, best_a, level), "crossings_b": crossings(b, best_b, level),
+            "a": stats(a), "b": stats(b)}

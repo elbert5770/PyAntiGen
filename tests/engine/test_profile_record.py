@@ -116,3 +116,19 @@ def test_roadrunner_solver_builds_the_job_and_reads_the_result():
     assert rec.dnll == 2.0 and rec.id == 5 and rec.source == "pins" and P.validate_result(req, rec) == []
     with pytest.raises(ValueError, match="pin_rel"):
         s.solve(P.PointRequest("k", 1, -2.0, (0.1, -1.0, 0.2), -101.0, pin_rel=1e-3))
+
+
+def test_interp_and_compare_curves():
+    f = lambda x: x * x                                              # an exact quadratic profile
+    a = _pts([(x, f(x)) for x in (-1.0, -0.5, 0.5, 1.0, 1.5)])
+    b = _pts([(x / 4, f(x / 4) * 1.02) for x in range(-8, 9)])      # route B: denser, 2% higher
+    assert P.interp_dnll(b, 5.0) is None
+    assert math.isclose(P.interp_dnll(b, 0.5), 0.25 * 1.02)
+    out = P.compare_curves(a, b, 0.0, 0.0)
+    assert [round(r["x"], 1) for r in out["rows"]] == [-1.0, -0.5, 0.5, 1.0, 1.5]
+    assert out["max_abs_diff"] < 0.06
+    lo_a, hi_a = out["crossings_a"]
+    lo_b, hi_b = out["crossings_b"]
+    assert hi_a is None or hi_a > 1.0                                 # a's last point (1.5 -> 2.25) is over the level
+    assert math.isclose(hi_b, math.sqrt(P.DNLL_95 / 1.02), rel_tol=0.05)
+    assert out["a"]["points"] == 5 and out["b"]["points"] == 17
