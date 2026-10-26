@@ -380,14 +380,24 @@ class RoadRunnerSolver:
         return rec
 
 
-def interp_dnll(records, x):
-    """The profile's dnll at *x* by linear interpolation between the neighbouring usable points, or None outside them."""
+def interp_dnll(records, x, best=None):
+    """The profile's dnll at *x* between the neighbouring usable points, or None outside them.
+
+    Linear in dnll by default. With *best* (the optimum, dnll 0 there) the interpolation is linear in
+    ``sqrt(dnll)`` on each side of the optimum, which is exact for a quadratic profile; a chord of a parabola
+    would overstate dnll near the minimum. The optimum is taken as a point of the curve even if no record sits there.
+    """
     pts = curve(records)
+    if best is not None and all(abs(r.x_fixed - best) > 1e-12 for r in pts):
+        pts = sorted(pts + [PointRecord(param="", x_fixed=best, dnll=0.0, nll=0.0, verdict="converged")],
+                     key=lambda r: r.x_fixed)
     for a, b in zip(pts, pts[1:]):
         if a.x_fixed <= x <= b.x_fixed:
             if b.x_fixed == a.x_fixed:
                 return min(a.dnll, b.dnll)
             t = (x - a.x_fixed) / (b.x_fixed - a.x_fixed)
+            if best is not None and (a.x_fixed - best) * (b.x_fixed - best) >= 0 and a.dnll >= 0 and b.dnll >= 0:
+                return (math.sqrt(a.dnll) + t * (math.sqrt(b.dnll) - math.sqrt(a.dnll))) ** 2
             return a.dnll + t * (b.dnll - a.dnll)
     return None
 
@@ -399,13 +409,14 @@ def compare_curves(a, b, best_a, best_b, upto=3.0, level=DNLL_95):
     dnll_b interpolated, difference), ``max_abs_diff`` over those rows, the ``crossings`` of each, the number of
     points and not-converged points of each, and the summed ``evals`` and ``seconds``. The two routes anchor at
     their own optima (*best_a*, *best_b*, in ``x_fixed`` units), so dnll is each route's rise above its own.
-    Interpolating a curve that is only piecewise sampled adds an error of its own: compare where *b* is dense.
+    *b* is interpolated linear in sqrt(dnll) about *best_b* (exact for a parabola). Pass the same optimum for both
+    when the routes share one (RoadRunner's profile is anchored at the AMICI optimum), else each uses its own.
     """
     rows = []
     for r in curve(a):
         if r.dnll > upto:
             continue
-        y = interp_dnll(b, r.x_fixed)
+        y = interp_dnll(b, r.x_fixed, best_b)
         if y is not None:
             rows.append({"x": r.x_fixed, "dnll_a": r.dnll, "dnll_b": y, "diff": r.dnll - y})
 
