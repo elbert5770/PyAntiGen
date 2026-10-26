@@ -84,3 +84,28 @@ def test_recheck_keeps_the_lowest_and_is_resumable(tmp_path):
     n = len(store.read("profile")) - 1
     assert len(out) == 3 * n - 1 and store.done("recheck")
     assert PR.recheck(pr, 0, +1, PR.WalkSettings(), store) == out
+
+
+def test_relax_resolves_box_limited_points_with_wider_bounds(tmp_path):
+    pr = problem(ub=(9.0, 3.0, 9.0))                 # b = a^2 hits its bound at a = 1.73
+    store = PR.JsonlStore(str(tmp_path), "0_up")
+    PR.walk(pr, 0, +1, PR.WalkSettings(), store)
+    flagged = [p for p in store.read("profile") if p.box_limited]
+    assert flagged
+    got = PR.relax(pr, 0, +1, PR.WalkSettings(), store)
+    assert len(got) == len(flagged) and store.done("relax")
+    assert all(not r.box_limited and r.dnll < p.dnll for r, p in zip(got, flagged))
+    assert PR.relax(pr, 0, +1, PR.WalkSettings(), store) == got                  # finished: nothing re-run
+    PR.fill(pr, 0, +1, PR.WalkSettings(), store)
+    allrec = store.read("profile") + store.read("relax") + store.read("fill")
+    assert P.side_verdicts(allrec, 1.0)[1] == "crossed"
+
+
+def test_relax_off_and_without_box_limits_do_nothing():
+    pr = problem(ub=(9.0, 3.0, 9.0))
+    store = PR.MemoryStore()
+    PR.walk(pr, 0, +1, PR.WalkSettings(), store)
+    assert PR.relax(pr, 0, +1, PR.WalkSettings(relax=0.0), store) == [] and store.done("relax") is None
+    clean = PR.MemoryStore()
+    PR.walk(problem(), 0, +1, PR.WalkSettings(), clean)
+    assert PR.relax(problem(), 0, +1, PR.WalkSettings(), clean) == [] and clean.done("relax")

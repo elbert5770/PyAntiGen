@@ -25,7 +25,7 @@ from pyantigen.engine import Profile_lm as LM
 from pyantigen.engine.Profile_record import curve
 
 SIDE_ENV = "PYANTIGEN_PROFILE_SIDE"
-KINDS = ("profile", "fill", "recheck")
+KINDS = ("profile", "relax", "fill", "recheck")
 FAILURE_VALUE = 1e10
 
 
@@ -163,6 +163,10 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         _pts, why = PR.walk(pr, k, d, st, store, deadline, say)
         if why is None:
             log(f"[profile] out of time in {tag}; relaunch to continue")
+            break
+        PR.relax(pr, k, d, st, store, deadline, say)
+        if store.done("relax") is None and st.relax > 0:
+            log(f"[profile] out of time relaxing {tag}; relaunch to continue")
             break
         if PR.fill(pr, k, d, st, store, deadline, say) is None and store.done("fill") is None:
             log(f"[profile] out of time filling {tag}; relaunch to continue")

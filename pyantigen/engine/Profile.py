@@ -46,6 +46,7 @@ class WalkSettings:
     fill_tol: float = 0.03          # |dnll - level| at which a bracket end is close enough
     fill_rounds: int = 6
     point_max_evals: int = 40
+    relax: float = 1.0              # decades a nuisance bound may be widened to re-solve a box-limited point (0: never)
 
 
 @dataclass
@@ -187,6 +188,41 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
             say(f"*** LOWER than the 'optimum' by {-rec.dnll:.4g}: the optimum was not global ***")
 
 
+def relax(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):
+    """Re-solve the walk's box-limited points with the nuisance bounds widened by ``st.relax`` decades.
+
+    A point with a nuisance on a declared bound is only an upper bound on the profile there. Its relaxed record is stored
+    as ``relax``; its ``bound_active`` is judged against the widened bounds, so a nuisance that needed the room is no longer
+    flagged and one that still sits on the wider bound still is. :func:`Profile_record.curve` keeps the lower of the two
+    records at each value. Returns the relaxed records; solvers without ``relaxed`` leave the walk as it is.
+    """
+    st = st or WalkSettings()
+    store = store or MemoryStore()
+    say = log or (lambda *_: None)
+    done = store.read("relax")
+    if store.done("relax") or st.relax <= 0 or not hasattr(pr.solver, "relaxed"):
+        return done
+    wide = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
+    seen = {r.source for r in done}
+    for i, p in enumerate(store.read(walk_kind)):
+        tag = f"relax:{i}"
+        if i == 0 or not p.usable or not p.box_limited or tag in seen:
+            continue
+        req = wide.request(k, p.x_fixed, p.x, direction, anchor_x=tuple(p.x), deadline=deadline, max_evals=st.point_max_evals,
+                           strict=True, source=tag)
+        try:
+            rec = wide.solver.solve(req)
+        except OutOfTime:
+            return done
+        _check(req, rec)
+        store.append("relax", rec)
+        done.append(rec)
+        say(f"relax point {i} ({', '.join(p.bound_active)}): dnll {p.dnll:.4f} -> "
+            f"{rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}; still on a bound: {rec.bound_active or 'none'}")
+    store.finish("relax", f"{len(done)} point(s) re-solved with bounds widened {st.relax} decade(s)")
+    return done
+
+
 def _check(req, rec):
     bad = validate_result(req, rec)
     if bad:
@@ -222,9 +258,11 @@ def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     store = store or MemoryStore()
     say = log or (lambda *_: None)
     extra = store.read("fill")
+    if store.read("relax") and hasattr(pr.solver, "relaxed"):       # the walk needed room: insert points under the same bounds
+        pr = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
 
     def ordered():
-        return sorted(curve(store.read(walk_kind) + store.read("fill")), key=lambda q: direction * q.x_fixed)
+        return sorted(curve(store.read(walk_kind) + store.read("relax") + store.read("fill")), key=lambda q: direction * q.x_fixed)
 
     for rnd in range(len(extra), st.fill_rounds):
         pts = ordered()

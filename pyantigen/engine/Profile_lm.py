@@ -201,6 +201,14 @@ class LmSolver:
         self.backend, self.floors_sha256, self.log = backend, floors_sha256, log
         self.on_eval = on_eval
 
+    def relaxed(self, decades):
+        """A copy whose finite bounds are *decades* wider (log10 parameters) or *decades* spans wider (linear ones)."""
+        import copy
+        wide = copy.copy(self)
+        span = np.where(np.array([sc == "log10" for sc in self.scales]), 1.0, self.ub - self.lb)
+        wide.lb, wide.ub = self.lb - decades * span, self.ub + decades * span
+        return wide
+
     def _pin_box(self, req):
         k = req.param_idx
         lin = 10.0 ** req.x_fixed if self.scales[k] == "log10" else req.x_fixed
