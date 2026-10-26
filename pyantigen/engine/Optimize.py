@@ -5,6 +5,7 @@ Also provides run_all for running experiments (with optional parameter injection
 """
 
 import os
+import threading
 import time
 import numpy as np
 import warnings
@@ -6001,6 +6002,104 @@ def run_parallel_profile(
     return traces, anchor, where, convergence
 
 
+def run_protocol_profile(nll_batch_profile, res_x, nll_at_optimum, param_names, bounds, scales, method,
+                         optimizer_kwargs, wald_se, checkpoint, threshold, budget=None, n_workers=None,
+                         store_dir=None, recheck=False):
+    """The profile through :mod:`pyantigen.engine.Profile` (curvature walk, crossing fill) on the Nelder-Mead worker.
+
+    Every side (parameter, direction) is walked in its own thread, one job at a time, so up to ``2k`` points are in
+    flight in the pool; each point is a whole nuisance optimization, so this is the ``RoadRunnerSolver`` run under
+    exactly the stepping the LM/AMICI route uses. Resumable: the walk files and the worker's per-point state survive a
+    kill. Returns what :func:`run_parallel_profile` returns.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from pyantigen.engine import Profile as PR
+    from pyantigen.engine.Deadline import DeadlineReached
+    from pyantigen.engine.Profile_lm import OutOfTime
+    from pyantigen.engine.Profile_record import RoadRunnerSolver
+
+    k_all = len(param_names)
+    lb = np.array([(-np.inf if b is None or b[0] is None else b[0]) for b in bounds], float) \
+        if bounds is not None else np.full(k_all, -np.inf)
+    ub = np.array([(np.inf if b is None or b[1] is None else b[1]) for b in bounds], float) \
+        if bounds is not None else np.full(k_all, np.inf)
+    completed = checkpoint.load(param_names) if checkpoint is not None else {n: {} for n in param_names}
+    for pts in completed.values():
+        for r in pts.values():
+            nll = r.get("nll")
+            r["dnll"] = float(nll) - nll_at_optimum if nll is not None else float("nan")
+    meta = {i: {"is_log": scales[i] == "log10"} for i in range(k_all)}
+    lock = threading.Lock()
+    run_state = {"stopped": False}
+
+    def nb_for(i):
+        return None if bounds is None else [list(b) if b is not None else None
+                                            for b in (list(bounds[:i]) + list(bounds[i + 1:]))]
+
+    def run_job(job):
+        try:
+            res = nll_batch_profile([job])[0]
+        except DeadlineReached:
+            raise OutOfTime
+        res["dnll"] = float(res["nll"]) - nll_at_optimum if res.get("nll") is not None else float("nan")
+        with lock:
+            key = ProfileCheckpointKey(res["x_fixed"])
+            prev = completed.get(res["param_name"], {}).get(key)
+            if prev is None or _profile_record_is_better(res, prev):
+                if checkpoint is not None and res.get("status") == "ok" and not res.get("interrupted"):
+                    checkpoint.append(res)
+                completed.setdefault(res["param_name"], {})[key] = res
+        return res
+
+    nmax = int((optimizer_kwargs.get("options") or {}).get("maxfev") or 1500) if optimizer_kwargs else 1500
+    st = PR.WalkSettings(point_max_evals=nmax)
+    sd = None if wald_se is None else np.asarray(wald_se, float)
+    sides = [(i, d) for i in range(k_all) for d in (+1, -1)]
+    store_dir = store_dir or (os.path.join(checkpoint.dir, "walk") if getattr(checkpoint, "dir", None) else None)
+
+    def one(side):
+        i, d = side
+        solver = RoadRunnerSolver(run_job, scales, bounds=bounds, method=method, optimizer_kwargs=optimizer_kwargs)
+        pr = PR.ProfileProblem(
+            names=list(param_names), lb=lb, ub=ub, best_x=np.asarray(res_x, float), anchor_nll=float(nll_at_optimum),
+            solver=solver, best_value=lambda j: 10.0 ** res_x[j] if scales[j] == "log10" else float(res_x[j]),
+            sd_first=sd)
+        tag = f"{i}_{'up' if d > 0 else 'down'}"
+        store = PR.JsonlStore(store_dir, tag) if store_dir else PR.MemoryStore()
+        say = lambda m: print(f"  [walk {tag}] {m}", flush=True)
+        pts, why = PR.walk(pr, i, d, st, store, None, say)
+        if why is None:
+            return False
+        if PR.fill(pr, i, d, st, store, None, say) is None and store.done("fill") is None:
+            return False
+        if recheck:
+            PR.recheck(pr, i, d, st, store, None, say)
+        return True
+
+    print(f"\n[profile] protocol walk: {len(sides)} side(s), up to {min(len(sides), n_workers or len(sides))} in flight",
+          flush=True)
+    with ThreadPoolExecutor(max_workers=max(1, min(len(sides), n_workers or len(sides)))) as ex:
+        finished = list(ex.map(one, sides))
+
+    anchor, where = profile_anchor_gap(completed)
+    convergence = profile_convergence_report(param_names, completed)
+    convergence["warm"] = {}
+    convergence["reach"] = profile_reach_report(param_names, completed, res_x, bounds, threshold, anchor=anchor)
+    still = unfinished_profile_points(completed)
+    convergence["n_unfinished"] = len(still)
+    convergence["n_not_started"] = sum(1 for f in finished if not f)
+    convergence["incomplete"] = bool(still) or not all(finished)
+    convergence["protocol"] = "walk"
+    convergence["better_point"] = _better_point_record(param_names, res_x, meta, anchor, where, nll_at_optimum)
+    _print_profile_convergence(convergence)
+    _print_profile_reach(convergence["reach"])
+    if convergence["incomplete"]:
+        print("\n[profile] INCOMPLETE: the clock stopped before every side finished. Relaunch the same command to continue.")
+    else:
+        print("\n[profile] COMPLETE: every side walked and filled; relaunching is a no-op.")
+    return _assemble_profile_traces(param_names, completed, res_x, meta, anchor=anchor), anchor, where, convergence
+
+
 def _nll_gain(prev, res):
     """How many nats *res* recovered relative to *prev*, or 0 if not comparable."""
     try:
@@ -6715,6 +6814,13 @@ def _run_parallel_profile_with_checkpoint(
           f"dNLL below is measured from the frozen value.")
 
     try:
+        if os.environ.get("PYANTIGEN_PROFILE_PROTOCOL", "plan") == "walk":
+            traces, anchor, where, convergence = run_protocol_profile(
+                batch, res_x, nll_at_optimum_frozen, param_names, bounds, scales, method, optimizer_kwargs,
+                wald_se, ckpt, _PROFILE_THRESHOLD, budget=budget, n_workers=getattr(evaluator, "n_workers", None),
+                recheck=bool(os.environ.get("PYANTIGEN_PROFILE_RECHECK")))
+            convergence["screen"] = screen_summary(screen)
+            return traces, anchor, where, convergence
         traces, anchor, where, convergence = run_parallel_profile(
             batch, res_x, nll_at_optimum_frozen, param_names,
             bounds, scales, method=method, optimizer_kwargs=optimizer_kwargs,

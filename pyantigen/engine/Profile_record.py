@@ -373,6 +373,9 @@ class RoadRunnerSolver:
 
     def solve(self, req):
         raw = self.run_job(self.job_for(req))
+        if raw.get("interrupted"):
+            from pyantigen.engine.Profile_lm import OutOfTime
+            raise OutOfTime        # the clock stopped the point; its state is saved and the same request resumes it
         if _finite(raw.get("nll")) is not None:
             raw = dict(raw, dnll=float(raw["nll"]) - req.anchor_nll)
         rec = from_roadrunner(raw, self.scales, req.best_value)
