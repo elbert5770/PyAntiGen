@@ -224,3 +224,32 @@ def test_restoring_a_snapshot_puts_the_model_back():
     assert sim.save_model_state(r)["values"] != snap["values"]
     sim.restore_model_state(r, snap)
     assert sim.save_model_state(r)["values"] == snap["values"]
+
+
+def test_species_units_are_read_from_the_sbml_once_per_model():
+    """Every evaluation builds a SegmentRunner; re-reading the model's SBML each time leaked ~0.07 GB per evaluation."""
+    from pyantigen.engine.Segmented import SegmentRunner
+
+    sbml = ('<?xml version="1.0"?><sbml xmlns="http://www.sbml.org/sbml/level3/version1/core" level="3" version="1">'
+            '<model id="m"><listOfCompartments><compartment id="c" size="1" constant="true" spatialDimensions="3"/>'
+            '</listOfCompartments><listOfSpecies><species id="S" compartment="c" hasOnlySubstanceUnits="true" '
+            'boundaryCondition="false" constant="false"/></listOfSpecies></model></sbml>')
+
+    class FakeModel:
+        reads = 0
+
+        def getFloatingSpeciesIds(self):
+            return ["S"]
+
+        def getCurrentSBML(self):
+            FakeModel.reads += 1
+            return sbml
+
+    class FakeSchedule:
+        def assigned_variables(self):
+            return ["S"]
+
+    r = FakeModel()
+    for _ in range(5):
+        SegmentRunner._check_species_units(r, FakeSchedule())
+    assert FakeModel.reads == 1

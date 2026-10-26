@@ -1644,6 +1644,33 @@ def accumulate_group_nll(
     return total
 
 
+_RSS_PROBE = int(os.environ.get("PYANTIGEN_RSS_PROBE") or 0)
+_PROBE_N = [0]
+
+
+def _rss_gb():
+    with open("/proc/self/statm") as fh:
+        return int(fh.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1e9
+
+
+def _rss_probe(every):
+    """Diagnostic (``PYANTIGEN_RSS_PROBE=N``): every N evaluations print this worker's resident size, then the size
+    after gc and malloc_trim -- a drop means allocator fragmentation, no drop means objects or native memory kept alive."""
+    _PROBE_N[0] += 1
+    n = _PROBE_N[0]
+    if n % every:
+        return
+    import gc
+    before = _rss_gb()
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
+    print(f"  [rss {os.getpid()}] eval {n}: {before:.2f} GB, after gc+trim {_rss_gb():.2f} GB", flush=True)
+
+
 def evaluate_nll_fixed(
     p, models, replicates, param_names, scales, groups, group_normalization,
     fixed_sigmas, model_text=None, paths=None, events_dynamic=False,
@@ -1671,6 +1698,8 @@ def evaluate_nll_fixed(
     see :func:`_freeze_floor`. Only the profile passes supply this; every
     other diagnostic leaves it None.
     """
+    if _RSS_PROBE:
+        _rss_probe(_RSS_PROBE)
     p_lin = _to_linear(p, scales)
     p_dict = dict(zip(param_names, p_lin.tolist()))
     sim_results = simulate_active_replicates(

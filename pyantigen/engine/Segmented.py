@@ -44,6 +44,8 @@ caches separately must not contain a switch: ``switches_before`` says whether it
 """
 import numpy as np
 
+from pyantigen.engine import Model_cache as _model_cache
+
 from pyantigen.engine.Simulate import StackedResult, apply_tolerance_vector, safe_simulate
 from pyantigen.generate.input_schedule import ScheduleError
 
@@ -108,6 +110,11 @@ class SegmentRunner:
     def _check_species_units(r, schedule):
         """Refuse to assign a species whose events would set a concentration, not an amount."""
         species = set(r.getFloatingSpeciesIds()) & set(schedule.assigned_variables())
+        # The units are a property of the compiled model, so each species is checked once per model. Re-reading the
+        # SBML on every evaluation cost a serialisation and a parse of the whole model each time, and the memory of
+        # it was never returned (about 0.07 GB per evaluation on the PK model).
+        checked = _model_cache.get(r, "_species_units_checked") or frozenset()
+        species -= checked
         if not species:
             return
         import libsbml
@@ -118,6 +125,7 @@ class SegmentRunner:
                 raise ScheduleError(
                     f"{name!r} is a species in concentration units: assigning it sets a concentration, "
                     "but the runner sets amounts (declare it substanceOnly)")
+        _model_cache.put(r, "_species_units_checked", checked | frozenset(species))
 
     def close(self):
         """Undo what the run changed: the assigned inputs and the output mode."""
