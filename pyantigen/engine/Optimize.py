@@ -6850,7 +6850,13 @@ def _run_parallel_profile_with_checkpoint(
           f"dNLL below is measured from the frozen value.")
 
     try:
-        if os.environ.get("PYANTIGEN_PROFILE_PROTOCOL", "plan") == "walk":
+        protocol = os.environ.get("PYANTIGEN_PROFILE_PROTOCOL", "walk")
+        if protocol not in ("walk", "plan"):
+            raise ValueError(f"PYANTIGEN_PROFILE_PROTOCOL={protocol!r}: expected 'walk' or 'plan'")
+        print(f"[profile] protocol: {protocol}" + ("" if protocol == "walk" else
+              " (deprecated: the tiered planner is kept only to reproduce old runs; 'walk' is the default and is what the "
+              "AMICI route uses)"), flush=True)
+        if protocol == "walk":
             traces, anchor, where, convergence = run_protocol_profile(
                 batch, res_x, nll_at_optimum_frozen, param_names, bounds, scales, method, optimizer_kwargs,
                 wald_se, ckpt, _PROFILE_THRESHOLD, budget=budget, n_workers=getattr(evaluator, "n_workers", None),
