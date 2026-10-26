@@ -6078,8 +6078,15 @@ def run_protocol_profile(nll_batch_profile, res_x, nll_at_optimum, param_names, 
 
     print(f"\n[profile] protocol walk: {len(sides)} side(s), up to {min(len(sides), n_workers or len(sides))} in flight",
           flush=True)
-    with ThreadPoolExecutor(max_workers=max(1, min(len(sides), n_workers or len(sides)))) as ex:
+    ex = ThreadPoolExecutor(max_workers=max(1, min(len(sides), n_workers or len(sides))))
+    try:
         finished = list(ex.map(one, sides))
+    except BaseException:
+        # A broken worker pool (a killed worker) fails every side; do not wait for the others, and let the caller see it.
+        ex.shutdown(wait=False, cancel_futures=True)
+        print("\n[profile] a side failed (worker pool broken?); the walk stores are kept. Relaunch to resume.", flush=True)
+        raise
+    ex.shutdown()
 
     anchor, where = profile_anchor_gap(completed)
     convergence = profile_convergence_report(param_names, completed)
