@@ -20,6 +20,15 @@ than the process pool, because the pool is not what is under test.
 import io
 import contextlib
 import os
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _plan_protocol(monkeypatch):
+    """These tests drive the plan wrapper; the default protocol is now the walk."""
+    monkeypatch.setenv("PYANTIGEN_PROFILE_PROTOCOL", "plan")
+
 import sys
 
 import numpy as np

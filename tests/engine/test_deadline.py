@@ -20,6 +20,15 @@ exactly the way the feature exists to prevent.
 import contextlib
 import io
 import os
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _plan_protocol(monkeypatch):
+    """These tests drive the plan wrapper; the default protocol is now the walk."""
+    monkeypatch.setenv("PYANTIGEN_PROFILE_PROTOCOL", "plan")
+
 import sys
 import tempfile
 import time
