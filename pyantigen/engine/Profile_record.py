@@ -304,6 +304,8 @@ class PointRequest:
     pin_rel: Optional[float] = None          # None: held exactly. Else the parameter stays free in a +-pin_rel box
     source: Optional[str] = None
     label: Optional[str] = None
+    anchor_x: Optional[tuple] = None         # where an unevaluable start is pulled back toward (the previous point)
+    strict: bool = False                     # the tighter convergence test, for re-fits and crossing inserts
 
 
 @runtime_checkable
