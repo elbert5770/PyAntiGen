@@ -155,3 +155,44 @@ def test_configure_spec_sets_sigma_floor_from_settings(monkeypatch):
     assert new.optimizer_kwargs == {"a": 1, "sigma_floor": "fixed"} and spec.optimizer_kwargs == {"a": 1}
     spec2 = _Spec({"sigma_floor": "cap"})
     assert B.configure_spec(spec2, None, S, printer=lambda *_: None) is spec2        # the spec's own value wins
+
+
+def test_profile_backend_is_exported_and_a_default_amici_needs_fixed_sigma():
+    from pyantigen.engine import Backend as B
+    from pyantigen.engine.Backend import AmiciStatus
+
+    ok = AmiciStatus(available=True, problems=(), advice=())
+    quiet = lambda *_: None
+    import unittest.mock as mock
+    with mock.patch.object(B, "amici_status", return_value=ok):
+        env = {}
+        assert B.export_profile_backend(None, None, False, quiet, env=env) == "roadrunner"      # default AMICI, sigma not fixed
+        assert env[B.ENV_PROFILE_BACKEND] == "roadrunner"
+        env = {"PYANTIGEN_SIGMA_FLOOR": "fixed"}
+        assert B.export_profile_backend(None, None, False, quiet, env=env) == "amici"
+        env = {}
+        assert B.export_profile_backend("amici", None, False, quiet, env=env) == "amici"        # named: not second-guessed
+        assert B.export_profile_backend("roadrunner", None, False, quiet, env={}) == "roadrunner"
+
+
+def test_configure_spec_handles_a_spec_whose_optimizer_kwargs_is_derived():
+    """The project's Optimization builds optimizer_kwargs in __post_init__ (init=False): dataclasses.replace refuses it."""
+    from dataclasses import dataclass, field
+    from pyantigen.engine.Backend import configure_spec
+
+    @dataclass
+    class Spec:
+        n: int
+        optimizer_kwargs: dict = field(init=False, default_factory=dict)
+
+        def __post_init__(self):
+            self.optimizer_kwargs = {"options": {"maxiter": self.n}}
+
+    import unittest.mock as mock
+    from pyantigen.engine import Backend as B
+    spec = Spec(5)
+    with mock.patch.object(B, "amici_status", return_value=B.AmiciStatus(available=True)):
+        out = configure_spec(spec, "amici", None, stage="fit", printer=lambda *_: None)
+    assert out is not spec and out.n == 5
+    assert out.optimizer_kwargs["analytic_gradient"] and out.optimizer_kwargs["options"] == {"maxiter": 5}
+    assert "analytic_gradient" not in spec.optimizer_kwargs

@@ -19,6 +19,7 @@ Only the stage default falls back, to RoadRunner, with a note.
 
 Nothing here imports AMICI: ``amici_status`` looks for it, so importing this module costs nothing.
 """
+import copy
 import importlib.metadata
 import importlib.util
 import os
@@ -251,7 +252,6 @@ def configure_spec(spec, requested=None, settings_module=None, stage="fit", prin
     ``BACKEND`` and ``AMICI_CACHE_DIR`` are read if present. A named backend is also exported in
     ``PYANTIGEN_BACKEND`` so spawned workers resolve the same way.
     """
-    import dataclasses
     kwargs = getattr(spec, "optimizer_kwargs", None) or {}
     res = resolve_backend(stage, requested, getattr(settings_module, "BACKEND", None),
                           bool(kwargs.get("analytic_gradient")))
@@ -273,4 +273,36 @@ def configure_spec(spec, requested=None, settings_module=None, stage="fit", prin
             printer(f"[backend] warning: {warn}")
     if requested and str(requested).lower() != "auto":
         os.environ[ENV_BACKEND] = str(requested).lower()
-    return dataclasses.replace(spec, optimizer_kwargs=new) if new != kwargs else spec
+    export_profile_backend(requested, getattr(settings_module, "BACKEND", None), bool(kwargs.get("analytic_gradient")),
+                           printer)
+    if new == kwargs:
+        return spec
+    # Not dataclasses.replace: a spec may derive optimizer_kwargs in __post_init__ (a field with init=False), which
+    # replace() refuses; a copy with the attribute set works for both.
+    patched = copy.copy(spec)
+    object.__setattr__(patched, "optimizer_kwargs", new)
+    return patched
+
+
+ENV_PROFILE_BACKEND = "PYANTIGEN_PROFILE_BACKEND"
+
+
+def export_profile_backend(requested, settings_value, spec_has_gradient, printer=print, env=None):
+    """Resolve the backend of the *profile* stage and export it for the engine; returns it.
+
+    The stage defaults to AMICI, but its objective is the residual form, which needs ``sigma_floor="fixed"``. A default
+    that the sigma mode cannot support falls back to RoadRunner with a note; a backend *named* by the user does not,
+    and :func:`resolve_sigma_floor` refuses the combination when the stage is run.
+    """
+    env = os.environ if env is None else env
+    res = resolve_backend("profile", requested, settings_value, spec_has_gradient, env=env)
+    backend = res.backend
+    if backend == "amici" and res.source == "default" and env.get("PYANTIGEN_SIGMA_FLOOR", "cap").strip().lower() != "fixed":
+        printer("[backend] profile: AMICI is the default but needs PYANTIGEN_SIGMA_FLOOR=fixed (it is not set); using RoadRunner. "
+                "Name --backend amici to run it on AMICI.")
+        backend = "roadrunner"
+    for n in res.notes:
+        printer(f"[backend] {n}")
+    printer(f"[backend] profile: {backend} ({res.source})")
+    env[ENV_PROFILE_BACKEND] = backend
+    return backend

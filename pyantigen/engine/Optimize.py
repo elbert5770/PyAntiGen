@@ -6117,6 +6117,60 @@ def run_protocol_profile(nll_batch_profile, res_x, nll_at_optimum, param_names, 
         raise
     ex.shutdown()
 
+    return _report_protocol_profile(param_names, completed, finished, res_x, meta, bounds, threshold, nll_at_optimum)
+
+
+def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwargs, *, models, replicates, groups,
+                             x0_lin, bounds_lin, model_text, paths, run_id, checkpoint_enabled=True, fixed_sigmas=None,
+                             recheck=False, side=None):
+    """The profile stage on AMICI (:mod:`pyantigen.engine.Profile_amici`): walk, fill and recheck with the LM solver.
+
+    *side* is None for every side in turn, or ``(k, direction)`` for one (a Slurm array task). The files live in the
+    run's checkpoint directory under ``amici/``, so the same command relaunched continues. Returns what
+    :func:`run_parallel_profile` returns, built from every side's files.
+    """
+    from pyantigen.engine import Profile_amici as PA
+    from pyantigen.engine.Analytic_gradient import build_gradient
+    from pyantigen.engine.Deadline import RunBudget, resolve_deadline
+    from pyantigen.engine.Profile_checkpoint import (
+        ProfileCheckpoint, default_run_id, solver_fingerprint, spec_fingerprint,
+    )
+
+    if sigma_floor_mode() != "fixed":
+        raise RuntimeError("the AMICI profile needs sigma_floor='fixed' (PYANTIGEN_SIGMA_FLOOR=fixed): its objective is "
+                           "the residual form f = const + 0.5 r.r, which needs every sigma known")
+    model_hash, spec_hash = spec_fingerprint(param_names, res_x, groups, scales, model_text, fixed_sigmas=fixed_sigmas,
+                                             solver_hash=solver_fingerprint(replicates))
+    run_id = default_run_id(run_id, model_hash, spec_hash)
+    root = paths.get("plot_path") if checkpoint_enabled else None
+    ckpt = ProfileCheckpoint(root, run_id, model_hash, spec_hash, enabled=bool(root))
+    if not ckpt.dir:
+        raise RuntimeError("the AMICI profile keeps its points in files and needs checkpointing on (a plot_path)")
+    store_dir = os.path.join(ckpt.dir, "amici")
+    print(f"\n[profile] AMICI route, checkpointing to {store_dir}")
+    budget = RunBudget(deadline=resolve_deadline())
+    print(f"[profile] {budget.describe()}")
+    kw = dict(optimizer_kwargs or {})
+    kw.setdefault("analytic_gradient", True)
+    provider = build_gradient(kw, models=models, replicates=replicates, groups=groups, param_names=param_names,
+                              scales=scales, x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
+    out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
+                 log=lambda m: print(m, flush=True))
+    completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey)
+    finished = PA.sides_finished(store_dir, param_names, recheck=recheck)
+    meta = {i: {"is_log": scales[i] == "log10"} for i in range(len(param_names))}
+    traces, anchor, where, convergence = _report_protocol_profile(
+        param_names, completed, finished, res_x, meta, bounds, _PROFILE_THRESHOLD, out["anchor"])
+    convergence["backend"] = "amici"
+    convergence["floors"] = out["floors"]
+    return traces, anchor, where, convergence
+
+
+def _report_protocol_profile(param_names, completed, finished, res_x, meta, bounds, threshold, nll_at_optimum):
+    """Traces, anchor gap and the convergence report of a walk-protocol profile, whichever solver produced the points.
+
+    *completed* is the legacy ``{param: {ProfileCheckpointKey: raw point}}`` dict, *finished* one flag per side.
+    """
     anchor, where = profile_anchor_gap(completed)
     convergence = profile_convergence_report(param_names, completed)
     convergence["warm"] = {}
@@ -8390,7 +8444,20 @@ def run_optimization_from_groups(
 
                     # Parallel, checkpointed alternative to the sequential
                     # walker. Model_optimize prefers this when a pool exists.
-                    if _pool_state["evaluator"] is not None:
+                    if os.environ.get("PYANTIGEN_PROFILE_BACKEND") == "amici":
+                        # The profile stage on AMICI: one side per process (PYANTIGEN_PROFILE_SIDE), or every side
+                        # in turn. No pool is involved; AMICI solver objects are not thread-safe.
+                        from pyantigen.engine import Profile_amici as _PA
+                        out["stats"]["profile_likelihood_all"] = (
+                            lambda run_id=None, **_unused:
+                            _run_amici_profile_stage(
+                                res.x, param_names, bounds, scales, optimizer_kwargs,
+                                models=models, replicates=active_replicates, groups=optimization_spec.groups,
+                                x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths,
+                                run_id=run_id or groups_tag, checkpoint_enabled=settings_checkpoint,
+                                fixed_sigmas=fixed_sigmas, recheck=bool(os.environ.get("PYANTIGEN_PROFILE_RECHECK")),
+                                side=_PA.side_from_env(len(param_names))))
+                    elif _pool_state["evaluator"] is not None:
                         out["stats"]["profile_likelihood_all"] = (
                             lambda n_grid=5, range_factor=2.0, se_span=4.0,
                             n_refine=4, run_id=None, warm_passes=1,

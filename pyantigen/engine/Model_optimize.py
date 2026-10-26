@@ -763,6 +763,12 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name,
             raise
         except Exception as exc:
             import traceback
+            if os.environ.get("PYANTIGEN_PROFILE_PROTOCOL", "walk") == "walk" or \
+                    os.environ.get("PYANTIGEN_PROFILE_BACKEND") == "amici":
+                # The serial fallback below is the old sequential walker: a different algorithm that runs for hours
+                # on one core with little output. A failed walk is stopped, not replaced by it; its files are kept.
+                print(f"  the profile failed ({type(exc).__name__}: {exc}); stopping. Its points are saved: relaunch to resume.")
+                raise
             print(f"  parallel profile failed ({exc}); falling back.")
             traceback.print_exc()
             cache = {}
