@@ -157,3 +157,42 @@ def test_side_verdicts_crossed_box_limited_open():
     pts[1].bound_active = []
     pts[2].verdict = "not_converged"
     assert P.side_verdicts(pts, 0.0)[1] == "box-limited"
+
+
+def test_roadrunner_solver_strict_tightens_the_simplex_tolerances():
+    seen = []
+
+    def run_job(job):
+        seen.append(job)
+        return {**{k: v for k, v in RR.items() if k != "dnll"}, "nll": -99.0, "x_fixed": job["x_fixed"]}
+
+    s = P.RoadRunnerSolver(run_job, ["lin", "log10", "log10"], optimizer_kwargs={"options": {"xatol": 1e-3, "fatol": 1e-2}})
+    s.solve(P.PointRequest("k", 1, -2.0, (0.1, -1.0, 0.2), -101.0))
+    s.solve(P.PointRequest("k", 1, -2.0, (0.1, -1.0, 0.2), -101.0, strict=True))
+    loose, tight = (j["optimizer_kwargs"]["options"] for j in seen)
+    assert loose["xatol"] == 1e-3 and tight["xatol"] == pytest.approx(1e-4) and tight["fatol"] == pytest.approx(1e-3)
+    s2 = P.RoadRunnerSolver(run_job, ["lin", "log10", "log10"])               # spec silent: the engine's own defaults tighten
+    s2.solve(P.PointRequest("k", 1, -2.0, (0.1, -1.0, 0.2), -101.0, strict=True))
+    assert seen[-1]["optimizer_kwargs"]["options"]["xatol"] < 1e-3
+
+
+def test_roadrunner_solver_restarts_a_failed_start_from_the_anchor_once():
+    starts = []
+
+    def run_job(job):
+        starts.append(job["x_start"])
+        failed = job["x_start"] == [0.9, 0.9]
+        return {**{k: v for k, v in RR.items() if k != "dnll"}, "x_fixed": job["x_fixed"],
+                "nll": 1e10 if failed else -99.0, "status": "ok"}
+
+    s = P.RoadRunnerSolver(run_job, ["lin", "log10", "log10"])
+    req = P.PointRequest("k", 1, -2.0, (0.9, -1.0, 0.9), -101.0, anchor_x=(0.1, -1.5, 0.2))
+    rec = s.solve(req)
+    assert starts == [[0.9, 0.9], [0.1, 0.2]] and rec.dnll == 2.0 and "anchor" in rec.reason
+    starts.clear()
+    s.solve(P.PointRequest("k", 1, -2.0, (0.1, -1.0, 0.2), -101.0, anchor_x=(0.1, -1.5, 0.2)))   # good start: one call
+    assert len(starts) == 1
+    starts.clear()                                                   # no anchor, or anchor = start: nothing to fall back to
+    s.solve(P.PointRequest("k", 1, -2.0, (0.9, -1.0, 0.9), -101.0))
+    s.solve(P.PointRequest("k", 1, -2.0, (0.9, -1.0, 0.9), -101.0, anchor_x=(0.9, -1.0, 0.9)))
+    assert len(starts) == 2

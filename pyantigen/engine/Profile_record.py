@@ -100,6 +100,9 @@ class PointRecord:
         return out
 
 
+FAILURE_VALUE = 1e10        # what the worker reports for an evaluation that failed (Evaluator.FAILURE_VALUE)
+
+
 def _finite(v):
     try:
         v = float(v)
@@ -341,6 +344,11 @@ class RoadRunnerSolver:
     dict the worker writes to the checkpoint: ``Evaluator._profile_task`` in a worker process, or a pool's
     ``profile_batch`` for one job. *bounds* is the full list of ``(lo, hi)`` in optimizer space, *scales* the
     per-parameter ``"log10"``/``"lin"``. A pin box is not supported (Nelder-Mead holds the parameter fixed).
+
+    ``strict`` tightens the simplex tolerances (``xatol`` and ``fatol``) ``STRICT_FACTOR``-fold below what the spec
+    asks, for re-fits and crossing inserts. ``anchor_x`` is the fallback for a start the model cannot evaluate: if
+    every evaluation of a point failed (or the point failed outright), it is run once more from the anchor's nuisance
+    values, and the record says so in its ``reason``.
     """
     name = "nelder-mead"
     backend = "roadrunner"
@@ -353,11 +361,23 @@ class RoadRunnerSolver:
         self.method = method
         self.optimizer_kwargs = dict(optimizer_kwargs or {})
 
-    def job_for(self, req):
+    STRICT_FACTOR = 10.0
+    TOL_FLOOR = 1e-8
+
+    def _strict_options(self, kw, n_nuisance):
+        from pyantigen.engine.Optimize import nuisance_options
+        base, _ = nuisance_options(self.method, n_nuisance, kw)
+        opts = dict(kw.get("options") or {})
+        for key in ("xatol", "fatol"):
+            if key in base:
+                opts[key] = max(float(base[key]) / self.STRICT_FACTOR, self.TOL_FLOOR)
+        return opts
+
+    def job_for(self, req, start=None):
         if req.pin_rel is not None:
             raise ValueError("the RoadRunner solver holds the profiled parameter fixed; pin_rel is not supported")
         i = req.param_idx
-        start = [v for j, v in enumerate(req.x_start) if j != i]
+        start = [v for j, v in enumerate(req.x_start if start is None else start) if j != i]
         nb = None if self.bounds is None else [tuple(b) if b is not None else None
                                                for j, b in enumerate(self.bounds) if j != i]
         kw = dict(self.optimizer_kwargs)
@@ -365,14 +385,25 @@ class RoadRunnerSolver:
             opts = dict(kw.get("options") or {})
             opts["maxfev"] = int(req.max_evals)
             kw["options"] = opts
+        if getattr(req, "strict", False):
+            kw["options"] = self._strict_options(kw, len(start))
         return {"param_idx": i, "param_name": req.param, "x_fixed": float(req.x_fixed),
                 "x_fixed_linear": float(_lin(req.x_fixed, self.scales[i])), "x_start": [float(v) for v in start],
                 "warm_seeded": True, "nuisance_bounds": nb, "method": self.method, "optimizer_kwargs": kw,
                 "phase": 1, "direction": int(req.direction), "pass_label": req.label or req.source or "solver",
                 "x_step": None, "deadline": req.deadline}
 
+    @staticmethod
+    def _start_failed(raw):
+        nll = _finite(raw.get("nll"))
+        return raw.get("status") != "ok" or nll is None or nll >= FAILURE_VALUE / 10
+
     def solve(self, req):
         raw = self.run_job(self.job_for(req))
+        anchor = getattr(req, "anchor_x", None)
+        if anchor is not None and self._start_failed(raw) and not raw.get("interrupted") \
+                and [v for j, v in enumerate(anchor) if j != req.param_idx] != [v for j, v in enumerate(req.x_start) if j != req.param_idx]:
+            raw = dict(self.run_job(self.job_for(req, start=anchor)), stop_reason="restarted from the anchor: the start could not be evaluated")
         if raw.get("interrupted"):
             from pyantigen.engine.Profile_lm import OutOfTime
             raise OutOfTime        # the clock stopped the point; its state is saved and the same request resumes it
