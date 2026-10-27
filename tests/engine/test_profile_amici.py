@@ -127,19 +127,52 @@ def test_pins_mode_has_its_own_files_and_agrees_with_the_walk(tmp_path):
 
 def test_build_lock_serialises_processes(tmp_path):
     import multiprocessing as mp
+    import time
     from pyantigen.engine.Analytic_gradient import _build_lock
     ctx = mp.get_context("fork")
-    log = ctx.Queue()
+    spans = ctx.Queue()
 
-    def work(i):
+    def work():
         with _build_lock(str(tmp_path / "model_x")):
-            log.put(("in", i))
-            import time
+            t0 = time.time()
             time.sleep(0.2)
-            log.put(("out", i))
-    ps = [ctx.Process(target=work, args=(i,)) for i in range(3)]
+            spans.put((t0, time.time()))
+    ps = [ctx.Process(target=work) for _ in range(3)]
     [q.start() for q in ps]
+    got = sorted(spans.get(timeout=30) for _ in range(3))
     [q.join() for q in ps]
-    events = [log.get() for _ in range(6)]
-    assert [e[0] for e in events] == ["in", "out"] * 3                       # never two inside at once
-    assert all(a[1] == b[1] for a, b in zip(events[::2], events[1::2]))
+    assert all(a[1] <= b[0] for a, b in zip(got, got[1:]))                    # no two holders at once
+
+
+class CurvedProvider:
+    """r = (a - 1, b - a^2, c - 3): the profile of a is 0.5 (a - 1)^2, but b must follow a^2 past its bound."""
+
+    def linear_residual_jacobian(self, p):
+        a, b, c = p
+        return (np.array([a - 1.0, b - a ** 2, c - 3.0]),
+                np.array([[1.0, 0, 0], [-2.0 * a, 1.0, 0], [0, 0, 1.0]]), 0.0)
+
+
+def _curved_report(tmp_path, relax):
+    bounds = [(-9.0, 9.0), (-99.0, 3.0), (-9.0, 9.0)]
+    st = PA.PR.WalkSettings(relax=relax)
+    PA.run(CurvedProvider(), NAMES, bounds, SCALES, np.array([1.0, 1.0, 3.0]), str(tmp_path), settings=st,
+           log=lambda m: None)
+    return PA.side_report(PA.read_sides(str(tmp_path), NAMES), NAMES, bounds)
+
+
+def test_side_report_names_the_bound_that_limits_a_side(tmp_path):
+    rep = _curved_report(tmp_path, relax=0.0)
+    assert rep["a"]["above"]["verdict"] == "box-limited" and rep["a"]["above"]["bound_active"] == ["b"]
+    assert rep["a"]["below"]["verdict"] == "box-limited"            # b = a^2 reaches its bound on this side too
+    assert rep["c"]["above"]["verdict"] == "crossed"
+    text = "\n".join(PA.format_side_report(rep))
+    assert "a above: BOX-LIMITED" in text and "on a bound at the crossing: b" in text and "c above" not in text
+
+
+def test_side_report_says_when_relaxing_needed_a_wider_box(tmp_path):
+    rep = _curved_report(tmp_path, relax=1.0)
+    above = rep["a"]["above"]
+    assert above["verdict"] == "crossed" and above["bound_active"] == []
+    assert above["needs_wider"]["b"][1] > 3.0
+    assert "widen its bound" in "\n".join(PA.format_side_report(rep))

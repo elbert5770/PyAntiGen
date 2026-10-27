@@ -143,6 +143,61 @@ def completed_from_store(store_dir, names, scales, key, mode="walk"):
     return completed
 
 
+def side_report(by_param, names, bounds, level=None):
+    """Per parameter and side: the verdict, the 95% limit, and what the declared box did to the profile.
+
+    ``{param: {"below"|"above": {"verdict", "limit", "bound_active", "needs_wider": {nuisance: (lo, hi)}}}}``
+    ``bound_active`` names the nuisances on a bound at the points that fix the crossing (a box-limited side is only an upper
+    bound on the true limit). ``needs_wider`` lists nuisances whose relaxed fit left the declared bounds, with the range it
+    used, so the box can be widened on purpose. Records of the other side and the optimum itself are ignored.
+    """
+    from pyantigen.engine.Profile_record import DNLL_95, crossings, side_verdicts
+    level = DNLL_95 if level is None else level
+    lb = [(-math.inf if b is None or b[0] is None else b[0]) for b in bounds]
+    ub = [(math.inf if b is None or b[1] is None else b[1]) for b in bounds]
+    out = {}
+    for k, name in enumerate(names):
+        recs = by_param.get(name, [])
+        opt = [r for r in recs if r.source == "optimum"]
+        if not opt:
+            continue
+        best = opt[0].x_fixed
+        verdicts = side_verdicts(recs, best, level)
+        limits = crossings(recs, best, level)
+        out[name] = {}
+        for label, verdict, limit, side in zip(("below", "above"), verdicts, limits, (-1, 1)):
+            pts = sorted((r for r in curve(recs) if (r.x_fixed - best) * side > 0), key=lambda r: abs(r.x_fixed - best))
+            over = next((r for r in pts if r.dnll > level), None)
+            under = [r for r in pts if r.dnll <= level][-1:] 
+            active = sorted({n for r in ([over] if over else []) + under for n in r.bound_active})
+            wider = {}
+            for r in recs:
+                if r.source and r.source.startswith("relax") and r.x is not None and (r.x_fixed - best) * side > 0:
+                    for i, xi in enumerate(r.x):
+                        if i != k and (xi < lb[i] - 1e-9 or xi > ub[i] + 1e-9):
+                            lo, hi = wider.get(names[i], (xi, xi))
+                            wider[names[i]] = (min(lo, xi), max(hi, xi))
+            out[name][label] = {"verdict": verdict, "limit": limit, "bound_active": active, "needs_wider": wider}
+    return out
+
+
+def format_side_report(report):
+    """The lines :func:`side_report` prints."""
+    lines = []
+    for name, sides in report.items():
+        for label, d in sides.items():
+            if d["verdict"] == "crossed" and not d["needs_wider"]:
+                continue
+            what = {"box-limited": "BOX-LIMITED (the limit is only an upper bound on the interval)",
+                    "open": "OPEN (no point past the threshold)", "crossed": "crossed"}[d["verdict"]]
+            lines.append(f"  {name} {label}: {what}")
+            if d["bound_active"]:
+                lines.append(f"      nuisance on a bound at the crossing: {', '.join(d['bound_active'])}")
+            for n, (lo, hi) in d["needs_wider"].items():
+                lines.append(f"      relaxed fit left the declared box: {n} in [{lo:.4g}, {hi:.4g}] (optimizer space): widen its bound")
+    return lines
+
+
 def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=False, budget=None, settings=None, log=print, mode="walk"):
     """Walk, fill and (with *recheck*) recheck the chosen sides. Returns ``{"anchor": f, "floors": stamp, "ran": [...]}``.
 

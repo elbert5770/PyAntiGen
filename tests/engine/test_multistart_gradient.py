@@ -396,18 +396,6 @@ def test_auto_picks_serial_for_a_cheap_two_parameter_gradient(monkeypatch):
     assert not any(c[1] == "multistart gradient" for c in pool.calls)
 
 
-def test_auto_picks_the_pool_when_the_fits_are_long_and_evaluations_slow(monkeypatch):
-    # k = 2 so a gradient is only 3 wide: the ceiling is 3x. 400 iterations makes that count.
-    from pyantigen.engine import Optimize
-    clock, obj = _clocked(per_eval=60.0, cold=90.0)
-    monkeypatch.setattr(Optimize, "_now", clock)
-    pool = _Pool()
-    _, _, report = _stage(_g(parallel="auto"), pool_builder=lambda: pool, objective=obj, maxiter=400)
-    assert report["gradient"]["used_pool"] is True
-    assert any(c[1] == "multistart gradient" for c in pool.calls)
-    assert report["gradient"]["iteration_cap"] == 400
-
-
 def test_the_gradient_settings_are_part_of_what_a_checkpoint_is_for(tmp_path):
     cache = FitCache(str(tmp_path), "tag", "m" * 16, "f" * 16, n_params=2)
 

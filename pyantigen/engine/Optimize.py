@@ -6165,6 +6165,13 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
         param_names, completed, finished, res_x, meta, bounds, _PROFILE_THRESHOLD, out["anchor"])
     convergence["backend"] = "amici"
     convergence["floors"] = out["floors"]
+    sides = PA.side_report(PA.read_sides(store_dir, param_names, mode=mode), param_names, bounds)
+    convergence["sides"] = {n: {k: {**v, "needs_wider": {a: list(b) for a, b in v["needs_wider"].items()}, "limit": None
+                                    if v["limit"] is None else float(v["limit"])} for k, v in d.items()} for n, d in sides.items()}
+    lines = PA.format_side_report(sides)
+    print("\n[profile] sides: " + ("all crossed inside the declared box." if not lines else "") , flush=True)
+    for line in lines:
+        print(line, flush=True)
     return traces, anchor, where, convergence
 
 

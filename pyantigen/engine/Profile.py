@@ -294,17 +294,31 @@ def relax(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None,
         tag = f"relax:{i}"
         if i == 0 or not p.usable or not p.box_limited or tag in seen:
             continue
-        req = wide.request(k, p.x_fixed, p.x, direction, anchor_x=tuple(p.x), deadline=deadline, max_evals=st.point_max_evals,
-                           strict=True, source=tag)
-        try:
-            rec = wide.solver.solve(req)
-        except OutOfTime:
-            return done
-        _check(req, rec)
-        store.append("relax", rec)
-        done.append(rec)
-        say(f"relax point {i} ({', '.join(p.bound_active)}): dnll {p.dnll:.4f} -> "
-            f"{rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}; still on a bound: {rec.bound_active or 'none'}")
+        start = p.x
+        for attempt in range(4):                     # a far point may need more than one budget: continue where it stopped
+            src = tag if attempt == 0 else f"{tag}:cont{attempt}"
+            if src in seen:
+                prev = next(r for r in done if r.source == src)
+                if prev.verdict == "converged" or not prev.usable:
+                    break
+                start = prev.x
+                continue
+            req = wide.request(k, p.x_fixed, start, direction, anchor_x=tuple(p.x), deadline=deadline,
+                               max_evals=st.point_max_evals, strict=True, source=src)
+            try:
+                rec = wide.solver.solve(req)
+            except OutOfTime:
+                return done
+            _check(req, rec)
+            store.append("relax", rec)
+            done.append(rec)
+            seen.add(src)
+            say(f"relax point {i} ({', '.join(p.bound_active)}): dnll {p.dnll:.4f} -> "
+                f"{rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}; "
+                f"still on a bound: {rec.bound_active or 'none'}")
+            if rec.verdict == "converged" or not rec.usable:
+                break
+            start = rec.x
     store.finish("relax", f"{len(done)} point(s) re-solved with bounds widened {st.relax} decade(s)")
     return done
 
