@@ -6158,7 +6158,7 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     print(f"[profile] mode {mode}" + (f", pins {list(settings.pins)}" if mode == "pins" else ""))
     out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
                  settings=settings, mode=mode, log=lambda m: print(m, flush=True))
-    completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey)
+    completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey, mode=mode)
     finished = PA.sides_finished(store_dir, param_names, recheck=recheck, mode=mode)
     meta = {i: {"is_log": scales[i] == "log10"} for i in range(len(param_names))}
     traces, anchor, where, convergence = _report_protocol_profile(

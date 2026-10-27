@@ -106,3 +106,40 @@ def test_mode_and_pins_come_from_the_environment():
     import pytest
     with pytest.raises(ValueError):
         PA.settings_from_env({"PYANTIGEN_PROFILE_MODE": "grid"})
+
+
+def test_pins_mode_has_its_own_files_and_agrees_with_the_walk(tmp_path):
+    p = LinearProvider()
+    xs = _optimum(p)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), log=lambda m: None)
+    walk_files = sorted(f for f in __import__("os").listdir(tmp_path))
+    st = PA.PR.WalkSettings(pins=(0.5, 0.8, 1.25, 2.0, 4.0))
+    out = PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), settings=st, mode="pins", log=lambda m: None)
+    assert len(out["ran"]) == 6 and all(t.startswith("p") for t in out["ran"])
+    assert set(walk_files) <= set(__import__("os").listdir(tmp_path))            # the walk's files were not touched
+    assert PA.sides_finished(str(tmp_path), NAMES, mode="pins") == [True] * 6
+    by = PA.read_sides(str(tmp_path), NAMES, mode="pins")
+    for k, name in enumerate(NAMES):
+        lo, hi = crossings(by[name], xs[k])
+        want = _expected(p, k)
+        assert lo == pytest.approx(want[0], abs=0.01) and hi == pytest.approx(want[1], abs=0.01)
+
+
+def test_build_lock_serialises_processes(tmp_path):
+    import multiprocessing as mp
+    from pyantigen.engine.Analytic_gradient import _build_lock
+    ctx = mp.get_context("fork")
+    log = ctx.Queue()
+
+    def work(i):
+        with _build_lock(str(tmp_path / "model_x")):
+            log.put(("in", i))
+            import time
+            time.sleep(0.2)
+            log.put(("out", i))
+    ps = [ctx.Process(target=work, args=(i,)) for i in range(3)]
+    [q.start() for q in ps]
+    [q.join() for q in ps]
+    events = [log.get() for _ in range(6)]
+    assert [e[0] for e in events] == ["in", "out"] * 3                       # never two inside at once
+    assert all(a[1] == b[1] for a, b in zip(events[::2], events[1::2]))

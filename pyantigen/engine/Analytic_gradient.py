@@ -32,6 +32,8 @@ engine's parameter updates is what AMICI is given.
 AMICI is optional; on Windows it needs WSL. Nothing here imports it until a
 gradient is built.
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -396,6 +398,22 @@ class ParameterReplay:
 # AMICI
 # ---------------------------------------------------------------------------------------
 
+@contextlib.contextmanager
+def _build_lock(directory):
+    """Hold an exclusive lock on one model's build, across processes (a Slurm array compiles the same model at once).
+
+    Whoever gets the lock first compiles; the rest wait, then find the finished module and import it. The lock file
+    sits beside the model directory, and ``flock`` is released if the holder dies.
+    """
+    os.makedirs(os.path.dirname(directory) or ".", exist_ok=True)
+    with open(directory + ".lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def _model_directory(cache_dir, name, tag):
     """Where a compiled model lives: the simulation's name made safe for a path and a shell, plus the model's hash.
 
@@ -569,13 +587,15 @@ class _SimGradient:
         directory = _model_directory(cache_dir, name, tag)
         module_name = re.sub(r"\W", "_", f"pag_{name}_{tag}")
         import amici
-        if os.path.exists(os.path.join(directory, module_name, "__init__.py")):
-            module = amici.import_model_module(module_name, directory)
-        else:
-            if verbose:
-                print(f"  [amici] compiling {name}: {len(self.free)} sensitivity parameter(s), "
-                      f"{len(usable)} output(s) -> {directory}", flush=True)
-            module = compile_model(scaled, module_name, directory, free=self.free, outputs=outputs)
+        init = os.path.join(directory, module_name, "__init__.py")
+        with _build_lock(directory):       # an __init__.py seen without the lock may belong to a build still in progress
+            if os.path.exists(init):
+                module = amici.import_model_module(module_name, directory)
+            else:
+                if verbose:
+                    print(f"  [amici] compiling {name}: {len(self.free)} sensitivity parameter(s), "
+                          f"{len(usable)} output(s) -> {directory}", flush=True)
+                module = compile_model(scaled, module_name, directory, free=self.free, outputs=outputs)
         self.runner = AmiciSegmentRunner(scaled, schedule, module, states=[], rtol=rtol, atol=atol,
                                          max_steps=max_steps)
         self.t_start, self.t_first, self.t_last = _tracked_window(settings)

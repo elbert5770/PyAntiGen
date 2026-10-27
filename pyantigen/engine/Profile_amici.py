@@ -59,8 +59,9 @@ def all_sides(n_params):
     return [(k, d) for k in range(n_params) for d in (1, -1)]
 
 
-def tag_of(k, direction):
-    return f"{k}_{'up' if direction > 0 else 'down'}"
+def tag_of(k, direction, mode="walk"):
+    """File tag of a side; pins mode has its own files, so a walk's fill and relax points never leak into a pins run."""
+    return f"{'p' if mode == 'pins' else ''}{k}_{'up' if direction > 0 else 'down'}"
 
 
 def use_floors(store_dir, log=print):
@@ -115,11 +116,11 @@ def record_to_raw(rec, names, scales):
             "pin_outside": bool(rec.pin_outside)}
 
 
-def read_sides(store_dir, names, sides=None):
+def read_sides(store_dir, names, sides=None, mode="walk"):
     """Every stored record, ``{param: [PointRecord]}``, and one flag per side: all passes of the side finished."""
     by_param = {n: [] for n in names}
     for k, d in (sides or all_sides(len(names))):
-        store = PR.JsonlStore(store_dir, tag_of(k, d))
+        store = PR.JsonlStore(store_dir, tag_of(k, d, mode))
         for kind in KINDS:
             by_param[names[k]].extend(store.read(kind))
     return by_param
@@ -128,15 +129,15 @@ def read_sides(store_dir, names, sides=None):
 def sides_finished(store_dir, names, recheck=False, sides=None, mode="walk"):
     flags = []
     for k, d in (sides or all_sides(len(names))):
-        store = PR.JsonlStore(store_dir, tag_of(k, d))
+        store = PR.JsonlStore(store_dir, tag_of(k, d, mode))
         flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and (not recheck or bool(store.done("recheck"))))
     return flags
 
 
-def completed_from_store(store_dir, names, scales, key):
+def completed_from_store(store_dir, names, scales, key, mode="walk"):
     """The legacy ``{param: {key(x_fixed): raw}}`` dict from every side's files; one point per value, the lowest dnll."""
     completed = {n: {} for n in names}
-    for name, recs in read_sides(store_dir, names).items():
+    for name, recs in read_sides(store_dir, names, mode=mode).items():
         for rec in curve(recs):
             completed[name][key(rec.x_fixed)] = record_to_raw(rec, names, scales)
     return completed
@@ -171,7 +172,7 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
     todo = all_sides(n) if side is None else [side]
     ran = []
     for k, d in todo:
-        tag = tag_of(k, d)
+        tag = tag_of(k, d, mode)
         store = PR.JsonlStore(store_dir, tag)
         say = lambda m, tag=tag: log(f"  [walk {tag}] {m}")
         kind = "pins" if mode == "pins" else "profile"
