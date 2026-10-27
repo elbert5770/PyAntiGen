@@ -95,3 +95,14 @@ def test_record_to_raw_carries_what_the_reports_read(tmp_path):
     raw = PA.record_to_raw(rec, NAMES, SCALES)
     assert raw["x_fixed"] == rec.x_fixed and raw["x_fixed_linear"] == rec.x_fixed
     assert len(raw["nuisance_x"]) == 2 and raw["converged"] and not raw["interrupted"]
+
+
+def test_mode_and_pins_come_from_the_environment():
+    from pyantigen.engine import Profile_amici as PA
+    mode, st = PA.settings_from_env({})
+    assert mode == "walk" and st.pins[0] == 0.03
+    mode, st = PA.settings_from_env({"PYANTIGEN_PROFILE_MODE": "pins", "PYANTIGEN_PROFILE_PINS": "0.5, 2,10"})
+    assert mode == "pins" and st.pins == (0.5, 2.0, 10.0)
+    import pytest
+    with pytest.raises(ValueError):
+        PA.settings_from_env({"PYANTIGEN_PROFILE_MODE": "grid"})

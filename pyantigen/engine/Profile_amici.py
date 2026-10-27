@@ -25,7 +25,9 @@ from pyantigen.engine import Profile_lm as LM
 from pyantigen.engine.Profile_record import curve
 
 SIDE_ENV = "PYANTIGEN_PROFILE_SIDE"
-KINDS = ("profile", "relax", "fill", "recheck")
+KINDS = ("profile", "pins", "relax", "fill", "recheck")
+MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins
+PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
 FAILURE_VALUE = 1e10
 
 
@@ -39,6 +41,18 @@ def side_from_env(n_params, env=None):
         raise ValueError(f"{SIDE_ENV}={task}: this problem has {n_params} parameters, so sides are 0..{2 * n_params - 1} "
                          f"(2*k for the upper side of parameter k, 2*k+1 for the lower)")
     return task // 2, (1 if task % 2 == 0 else -1)
+
+
+def settings_from_env(env=None):
+    """``(mode, WalkSettings)`` from ``PYANTIGEN_PROFILE_MODE`` and ``PYANTIGEN_PROFILE_PINS``."""
+    env = os.environ if env is None else env
+    mode = (env.get(MODE_ENV) or "walk").strip().lower()
+    if mode not in ("walk", "pins"):
+        raise ValueError(f"{MODE_ENV}={mode!r}: expected 'walk' or 'pins'")
+    st = PR.WalkSettings()
+    if env.get(PINS_ENV):
+        st.pins = tuple(float(v) for v in env[PINS_ENV].split(",") if v.strip())
+    return mode, st
 
 
 def all_sides(n_params):
@@ -111,11 +125,11 @@ def read_sides(store_dir, names, sides=None):
     return by_param
 
 
-def sides_finished(store_dir, names, recheck=False, sides=None):
+def sides_finished(store_dir, names, recheck=False, sides=None, mode="walk"):
     flags = []
     for k, d in (sides or all_sides(len(names))):
         store = PR.JsonlStore(store_dir, tag_of(k, d))
-        flags.append(bool(store.done("profile")) and bool(store.done("fill")) and (not recheck or bool(store.done("recheck"))))
+        flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and (not recheck or bool(store.done("recheck"))))
     return flags
 
 
@@ -128,7 +142,7 @@ def completed_from_store(store_dir, names, scales, key):
     return completed
 
 
-def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=False, budget=None, settings=None, log=print):
+def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=False, budget=None, settings=None, log=print, mode="walk"):
     """Walk, fill and (with *recheck*) recheck the chosen sides. Returns ``{"anchor": f, "floors": stamp, "ran": [...]}``.
 
     *provider* has ``linear_residual_jacobian`` (an ``Analytic_gradient.AmiciGradient``); *bounds* are ``(lo, hi)`` in the
@@ -160,18 +174,20 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         tag = tag_of(k, d)
         store = PR.JsonlStore(store_dir, tag)
         say = lambda m, tag=tag: log(f"  [walk {tag}] {m}")
-        _pts, why = PR.walk(pr, k, d, st, store, deadline, say)
+        kind = "pins" if mode == "pins" else "profile"
+        _pts, why = (PR.pins(pr, k, d, st, store, deadline, say) if mode == "pins"
+                     else PR.walk(pr, k, d, st, store, deadline, say))
         if why is None:
             log(f"[profile] out of time in {tag}; relaunch to continue")
             break
-        PR.relax(pr, k, d, st, store, deadline, say)
+        PR.relax(pr, k, d, st, store, deadline, say, walk_kind=kind)
         if store.done("relax") is None and st.relax > 0:
             log(f"[profile] out of time relaxing {tag}; relaunch to continue")
             break
-        if PR.fill(pr, k, d, st, store, deadline, say) is None and store.done("fill") is None:
+        if PR.fill(pr, k, d, st, store, deadline, say, walk_kind=kind) is None and store.done("fill") is None:
             log(f"[profile] out of time filling {tag}; relaunch to continue")
             break
         if recheck:
-            PR.recheck(pr, k, d, st, store, deadline, say)
+            PR.recheck(pr, k, d, st, store, deadline, say, walk_kind=kind)
         ran.append(tag)
     return {"anchor": f0, "floors": stamp, "ran": ran}

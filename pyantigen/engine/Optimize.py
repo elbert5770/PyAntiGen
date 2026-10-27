@@ -6154,10 +6154,12 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     kw.setdefault("analytic_gradient", True)
     provider = build_gradient(kw, models=models, replicates=replicates, groups=groups, param_names=param_names,
                               scales=scales, x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
+    mode, settings = PA.settings_from_env()
+    print(f"[profile] mode {mode}" + (f", pins {list(settings.pins)}" if mode == "pins" else ""))
     out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
-                 log=lambda m: print(m, flush=True))
+                 settings=settings, mode=mode, log=lambda m: print(m, flush=True))
     completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey)
-    finished = PA.sides_finished(store_dir, param_names, recheck=recheck)
+    finished = PA.sides_finished(store_dir, param_names, recheck=recheck, mode=mode)
     meta = {i: {"is_log": scales[i] == "log10"} for i in range(len(param_names))}
     traces, anchor, where, convergence = _report_protocol_profile(
         param_names, completed, finished, res_x, meta, bounds, _PROFILE_THRESHOLD, out["anchor"])

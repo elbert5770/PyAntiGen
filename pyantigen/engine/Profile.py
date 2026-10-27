@@ -46,6 +46,9 @@ class WalkSettings:
     fill_tol: float = 0.03          # |dnll - level| at which a bracket end is close enough
     fill_rounds: int = 6
     point_max_evals: int = 40
+    pins: tuple = (0.03, 0.1, 0.25, 0.5, 0.7, 0.85, 1.2, 1.5, 2.0, 3.0, 6.0, 15.0)   # relative pins (x the best fit)
+    pins_full: bool = False         # solve the whole grid; else stop a side once a converged pin is past df_stop
+    pin_rel: Optional[float] = None  # None: pins held exactly; else the pin may move in a +-pin_rel box (solvers that support it)
     relax: float = 1.0              # decades a nuisance bound may be widened to re-solve a box-limited point (0: never)
 
 
@@ -186,6 +189,89 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
             f"{rec.verdict} ({rec.reason}); {rec.evals} evals")
         if rec.lower:
             say(f"*** LOWER than the 'optimum' by {-rec.dnll:.4g}: the optimum was not global ***")
+
+
+def pin_x(pr: ProfileProblem, k, rel):
+    """Optimizer-space value of the pin ``rel x best fit`` for parameter *k* (None if the best fit is not positive)."""
+    best = pr.best_value(k) if pr.best_value else None
+    if best is None or not best > 0 or not rel > 0:
+        return None
+    log = getattr(pr.solver, "scales", None) and pr.solver.scales[k] == "log10"
+    return float(math.log10(best * rel)) if log else float(best * rel)
+
+
+def pins(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None):
+    """The profile of parameter *k* on one side from a grid of relative pins, then the crossing filled in.
+
+    Pins on the side (``rel > 1`` up, ``rel < 1`` down) are solved outward, each warm-started from the nearest converged
+    pin; a pin that does not converge is continued once from where its budget ran out. Once a converged pin is
+    past ``df_stop`` the rest are skipped unless ``pins_full``. If the grid does not bracket the level, the serial walk
+    continues outward from the last pin; then :func:`fill` places points at the crossing. Records go to the ``pins`` kind
+    (the optimum first), so :func:`fill` and :func:`Profile_record.side_verdicts` read them like walk points.
+    Returns ``(records, reason)``; reason None means out of time.
+    """
+    st = st or WalkSettings()
+    store = store or MemoryStore()
+    say = log or (lambda *_: None)
+    if store.done("pins"):
+        return store.read("pins"), store.done("pins")
+    pts = store.read("pins")
+    if not pts:
+        pts = [_optimum_record(pr, k)]
+        store.append("pins", pts[0])
+    lb, ub = pr.lb, pr.ub
+    lo_x, hi_x = lb[k] - st.extend, ub[k] + st.extend
+    grid = sorted((r for r in st.pins if (r > 1) == (direction > 0) and r != 1), key=lambda r: direction * math.log(r))
+    seen = {r.source for r in pts}
+    box = st.pin_rel if getattr(pr.solver, "supports_pin_box", False) else None
+
+    def solve(val, start, tag, strict=False):
+        x_init = np.array(start, float)
+        x_init[k] = val
+        req = pr.request(k, val, np.clip(x_init, lb, ub), direction, anchor_x=tuple(start), deadline=deadline,
+                         max_evals=st.point_max_evals, strict=strict, pin_rel=box, source=tag)
+        rec = pr.solver.solve(req)
+        _check(req, rec)
+        store.append("pins", rec)
+        pts.append(rec)
+        say(f"{pr.names[k]} pin {tag}: x = {val:.5g}: dnll {rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}")
+        return rec
+
+    def neighbour(val, only_converged=True):
+        ok = [q for q in pts if q.x is not None and (q.verdict == "converged" or not only_converged)]
+        return min(ok, key=lambda q: abs(q.x_fixed - val)) if ok else pts[0]
+
+    try:
+        for rel in grid:
+            tag = f"pin:{rel:g}"
+            val = pin_x(pr, k, rel)
+            if val is None or not lo_x <= val <= hi_x or tag in seen:
+                continue
+            past = [q for q in pts[1:] if q.verdict == "converged" and q.dnll is not None and q.dnll > st.df_stop]
+            if past and not st.pins_full:
+                say(f"{pr.names[k]}: pin {rel:g} skipped; a converged pin is past {st.df_stop}")
+                continue
+            rec = solve(val, neighbour(val).x, tag)
+            if rec.verdict != "converged" and rec.usable:
+                solve(val, rec.x, f"{tag}:restart")           # continue from where the budget ran out
+        for q in [q for q in pts[1:] if q.verdict != "converged" and q.usable and not q.source.endswith(":restart")
+                  and f"{q.source}:restart" not in {r.source for r in pts}]:
+            solve(q.x_fixed, q.x, f"{q.source}:restart")
+        if _bracket(ordered_pins(pts, direction), direction, st.level) is None:
+            say(f"{pr.names[k]}: the grid does not bracket the level; walking on from the last pin")
+            walk(pr, k, direction, st, store, deadline, say, kind="pins")
+            if store.done("pins") is None:
+                return pts, None
+        else:
+            store.finish("pins", f"{len(pts) - 1} pin(s)")
+    except OutOfTime:
+        say("deadline reached; exiting to be continued")
+        return pts, None
+    return store.read("pins"), store.done("pins")
+
+
+def ordered_pins(pts, direction):
+    return sorted(curve(pts), key=lambda q: direction * q.x_fixed)
 
 
 def relax(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):

@@ -109,3 +109,47 @@ def test_relax_off_and_without_box_limits_do_nothing():
     clean = PR.MemoryStore()
     PR.walk(problem(), 0, +1, PR.WalkSettings(), clean)
     assert PR.relax(problem(), 0, +1, PR.WalkSettings(), clean) == [] and clean.done("relax")
+
+
+def test_pins_solve_the_relative_grid_and_fill_the_crossing():
+    pr = problem()
+    pr.best_value = lambda k: 1.0 if k != 1 else 1.0
+    st, store = PR.WalkSettings(pins=(0.5, 1.5, 2.0, 4.0, 6.0)), PR.MemoryStore()
+    pts, why = PR.pins(pr, 0, +1, st, store)
+    srcs = [p.source for p in pts]
+    assert srcs[0] == "optimum" and "pin:1.5" in srcs and "pin:0.5" not in srcs        # only the upper side
+    assert "pin:6" not in srcs                                                         # 4 is past df_stop: the rest is skipped
+    assert all(math.isclose(p.dnll, 0.5 * (p.x_fixed - 1.0) ** 2, abs_tol=2e-3) for p in P.curve(pts))
+    cross = PR.fill(pr, 0, +1, st, store, walk_kind="pins")
+    assert math.isclose(cross, TRUE_UP, rel_tol=1e-3)
+    assert P.side_verdicts(store.read("pins") + store.read("fill"), 1.0) == ("open", "crossed")
+
+
+def test_pins_that_miss_the_level_fall_back_to_the_walk_and_resume(tmp_path):
+    pr = problem()
+    st = PR.WalkSettings(pins=(1.2, 1.5))                           # dnll 0.02, 0.125: no crossing in the grid
+    store = PR.JsonlStore(str(tmp_path), "0_up")
+    pts, why = PR.pins(pr, 0, +1, st, store)
+    assert "threshold crossed" in why and pts[-1].dnll > 2.5
+    assert [p.source for p in pts[:3]] == ["optimum", "pin:1.2", "pin:1.5"] and pts[3].source.startswith("walk:")
+    n = len(pts)
+    assert len(PR.pins(pr, 0, +1, st, PR.JsonlStore(str(tmp_path), "0_up"))[0]) == n    # finished: nothing re-run
+    down, _ = PR.pins(pr, 0, -1, PR.WalkSettings(pins=(0.5,)), PR.MemoryStore())
+    assert down[1].source == "pin:0.5"
+
+
+def test_pins_resolve_a_pin_that_did_not_converge_from_a_converged_neighbour():
+    pr = problem()
+    real = pr.solver.solve
+    calls = []
+
+    def flaky(req):
+        rec = real(req)
+        calls.append(req.source)
+        if req.source == "pin:1.5":
+            rec.verdict = "not_converged"
+        return rec
+    pr.solver.solve = flaky
+    store = PR.MemoryStore()
+    PR.pins(pr, 0, +1, PR.WalkSettings(pins=(1.5, 3.0)), store)
+    assert "pin:1.5:restart" in calls
