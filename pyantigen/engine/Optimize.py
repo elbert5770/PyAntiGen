@@ -17,6 +17,7 @@ from pyantigen.engine.Event_times import attach_event_times
 from pyantigen.engine.Simulate import simulate
 from pyantigen.engine import Model_cache as _model_cache
 from pyantigen.engine.Profile_checkpoint import record_is_better as _profile_record_is_better
+from pyantigen.engine.Fit_lm import is_lm
 from pyantigen.engine.Noise_floor import get_noise_floor
 from pyantigen.engine.Noise_floor import clear_cache as _clear_noise_floor_cache
 
@@ -53,7 +54,9 @@ def _block_title_stats(tr, blocks):
         return None
     sigma_used, _cost, state = _block_sigma_resolution(sse, n, ks, floor)
     if state == "declared":
-        term = sse / (2.0 * sigma_used * sigma_used)
+        # n*log(sigma) is kept, as in concentrated_nll, so the panel terms add up to the objective and compare with
+        # the floored panels; it is constant for a fixed sigma, which is the only reason it could be dropped.
+        term = n * np.log(max(sigma_used, 1e-300)) + sse / (2.0 * sigma_used * sigma_used)
         tag = "sigma fixed"
     elif state in ("floored_binding", "floored_free"):
         term = n * np.log(sigma_used) + sse / (2.0 * sigma_used * sigma_used)
@@ -6139,8 +6142,20 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     if sigma_floor_mode() != "fixed":
         raise RuntimeError("the AMICI profile needs sigma_floor='fixed' (PYANTIGEN_SIGMA_FLOOR=fixed): its objective is "
                            "the residual form f = const + 0.5 r.r, which needs every sigma known")
-    model_hash, spec_hash = spec_fingerprint(param_names, res_x, groups, scales, model_text, fixed_sigmas=fixed_sigmas,
+    # The sigmas are computed from residuals, and the order the replicates are summed in changes from process to process
+    # (set order), which moves them in the 12th decimal and, in the fingerprint, gave every array task its own directory.
+    # Nine significant figures is far finer than anything the profile can see.
+    fingerprint_sigmas = {k: float(f"{float(v):.9g}") for k, v in (fixed_sigmas or {}).items()}
+    model_hash, spec_hash = spec_fingerprint(param_names, res_x, groups, scales, model_text, fixed_sigmas=fingerprint_sigmas,
                                              solver_hash=solver_fingerprint(replicates))
+    import hashlib as _hl
+    from pyantigen.engine.Profile_checkpoint import _round_sig
+    _h = lambda obj: _hl.sha256(repr(obj).encode()).hexdigest()[:6]
+    print("[profile] fingerprint parts: model " + model_hash[:8] + ", spec " + spec_hash[:8]
+          + ", x " + _h([_round_sig(v) for v in np.atleast_1d(res_x)])
+          + ", sigmas " + _h(sorted((str(k), v) for k, v in fingerprint_sigmas.items()))
+          + ", solver " + str(solver_fingerprint(replicates))[:6] + ", params " + _h(list(param_names))
+          + ", scales " + _h(list(scales)) + ", groups " + _h(sorted(groups.keys())))
     run_id = default_run_id(run_id, model_hash, spec_hash)
     root = paths.get("plot_path") if checkpoint_enabled else None
     ckpt = ProfileCheckpoint(root, run_id, model_hash, spec_hash, enabled=bool(root))
@@ -6158,6 +6173,9 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     print(f"[profile] mode {mode}" + (f", pins {list(settings.pins)}" if mode == "pins" else ""))
     out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
                  settings=settings, mode=mode, log=lambda m: print(m, flush=True))
+    if mode == "fim":
+        print("\n[profile] mode fim: the Fisher information is written; no side was walked, so the report below is empty "
+              "and 'INCOMPLETE' only means that.", flush=True)
     completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey, mode=mode)
     finished = PA.sides_finished(store_dir, param_names, recheck=recheck, mode=mode)
     meta = {i: {"is_log": scales[i] == "log10"} for i in range(len(param_names))}
@@ -7443,6 +7461,11 @@ def run_optimization_from_groups(
         print("Note: profile likelihood requested — also enabling wald_analysis so the "
               "Hessian-based CI is available as an independent cross-check.")
         wald_analysis = True
+    if wald_analysis and os.environ.get("PYANTIGEN_PROFILE_BACKEND") == "amici" and os.environ.get("PYANTIGEN_SKIP_WALD"):
+        # The AMICI profile stage takes no step from the Wald SEs, and the Hessian costs ~2k^2 RoadRunner evaluations
+        # in every array task.
+        print("[opt] PYANTIGEN_SKIP_WALD: no Wald Hessian; the AMICI profile stage does not need it.")
+        wald_analysis = False
 
     from datetime import datetime
     _progress_overlay_state["timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -7788,7 +7811,8 @@ def run_optimization_from_groups(
             from pyantigen.engine.Analytic_gradient import build_gradient
             from pyantigen.engine.Multistart import GRADIENT_METHODS
             _ms_method, _ = _resolve_multistart_stage(method, optimizer_kwargs)
-            if str(method).lower() in GRADIENT_METHODS or str(_ms_method or "").lower() in GRADIENT_METHODS:
+            if (str(method).lower() in GRADIENT_METHODS or str(_ms_method or "").lower() in GRADIENT_METHODS
+                    or is_lm(method)):
                 _analytic = build_gradient(
                     optimizer_kwargs, models=models, replicates=active_replicates,
                     groups=optimization_spec.groups, param_names=param_names, scales=scales,
@@ -7875,6 +7899,38 @@ def run_optimization_from_groups(
                 print("\n[opt] INCOMPLETE: this run reached its stop time before "
                       "the fit converged. The search state is saved; relaunch the "
                       "same command to continue.")
+                import sys
+                sys.exit(0)
+        elif is_lm(method):
+            # Bounded Levenberg-Marquardt on the AMICI residuals (Fit_lm): its own trust region, no multi-start.
+            if _analytic is None:
+                raise RuntimeError("method LM needs the AMICI gradient: run with --backend amici (a spec "
+                                   "analytic_gradient block) and PYANTIGEN_SIGMA_FLOOR=fixed")
+            from pyantigen.engine.Deadline import resolve_deadline
+            from pyantigen.engine.Fit_lm import lm_fit
+            partial = fit_cache.load_partial() if fit_cache is not None else None
+            x_start = x0
+            if partial is not None:
+                x_start = _to_opt_space(partial["x_lin"], scales)
+                print(f"[opt] resuming an unfinished fit from its best point "
+                      f"(nll {partial.get('fun')}, after {partial.get('n_evals')} evaluation(s), "
+                      f"saved {partial.get('saved')}).")
+            _progress["driver_saves"] = True
+
+            def _save_best(x, f, n):
+                if fit_cache is not None:
+                    fit_cache.save_partial(_to_linear(x, scales), f, n_evals=n)
+
+            res = lm_fit(_analytic, x_start, bounds, scales, options=(opt_kw or {}).get("options"),
+                         deadline=resolve_deadline(), on_best=_save_best, log=lambda m: print(m, flush=True))
+            if fit_cache is not None:
+                fit_cache.save_partial(_to_linear(res.x, scales), res.fun, n_evals=res.nfev, force=True)
+            # One evaluation of the engine's own objective at the result: it writes the progress file and plot for
+            # this point and gives res.fun the value everything downstream compares against.
+            res.fun = float(objective(np.asarray(res.x, float)))
+            if not res.success and res.message == "deadline reached":
+                print("\n[opt] INCOMPLETE: this run reached its stop time before the fit converged. The best point "
+                      "is saved; relaunch the same command to continue.")
                 import sys
                 sys.exit(0)
         elif method.lower() in _GLOBAL_METHODS:

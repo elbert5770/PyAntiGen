@@ -47,8 +47,8 @@ def settings_from_env(env=None):
     """``(mode, WalkSettings)`` from ``PYANTIGEN_PROFILE_MODE`` and ``PYANTIGEN_PROFILE_PINS``."""
     env = os.environ if env is None else env
     mode = (env.get(MODE_ENV) or "walk").strip().lower()
-    if mode not in ("walk", "pins"):
-        raise ValueError(f"{MODE_ENV}={mode!r}: expected 'walk' or 'pins'")
+    if mode not in ("walk", "pins", "fim"):
+        raise ValueError(f"{MODE_ENV}={mode!r}: expected 'walk', 'pins' or 'fim'")
     st = PR.WalkSettings()
     if env.get(PINS_ENV):
         st.pins = tuple(float(v) for v in env[PINS_ENV].split(",") if v.strip())
@@ -213,6 +213,19 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
     # amici_evaluate returns None on a failed integration and says why through its log; keep the reasons, drop the
     # per-evaluation chatter (the walk reports each point).
     evaluate = LM.amici_evaluate(provider, scales, log=lambda m: failures.append(m) if "failed" in m else None)
+    if mode == "fim":
+        # Only the Fisher information at the optimum: one evaluation, no walk.
+        from pyantigen.engine import Fim
+        out = evaluate(xb)
+        if out is None:
+            raise RuntimeError("AMICI could not evaluate the objective at the optimum"
+                               + (f": {failures[-1]}" if failures else ""))
+        rep = Fim.fim_report(out[2], names, scales, xb)
+        for line in Fim.format_fim(rep, out[0]):
+            log(line)
+        path = Fim.save_fim(rep, os.path.join(store_dir, "fim"), "fim", out[0])
+        log(f"[fim] written to {path} (and fim.npz)")
+        return {"anchor": float(out[0]), "floors": stamp, "ran": [], "fim": path}
     f0, sd, worst = optimum_state(evaluate, xb, lb, ub, failures)
     log(f"[profile] AMICI objective at the optimum: f {f0:.6f}; largest projected-gradient gain {worst:.3g} nats")
     if worst > 0.05:

@@ -777,6 +777,14 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name,
 
     if cache:
         pass  # parallel grid already produced every trace
+    elif profile_all is not None and os.environ.get("PYANTIGEN_PROFILE_BACKEND") == "amici":
+        # The AMICI profile ran and left no trace with two points (the fim mode, or a clock that stopped before any side
+        # had a point). The RoadRunner profile below is a different algorithm that forks one process per parameter, so it
+        # is not a fallback for this.
+        print("\n[profile] the AMICI profile has no trace with two points yet; nothing else is profiled. "
+              "Relaunch to continue.", flush=True)
+        import sys
+        sys.exit(0)
     elif n_params > 1 and _is_posix:
         # ── Linux / macOS: fork each parameter into its own process ──────────
         # Forked children inherit the closure (including non-picklable RoadRunner
