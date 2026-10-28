@@ -178,12 +178,16 @@ def test_a_loosened_scalar_scales_the_reference_not_the_failing_state():
     loosened = 1e-7
     r.integrator.absolute_tolerance = loosened               # what the ladder does
     derived = atol(r).copy()
-    assert not np.allclose(derived, loosened * scale0, rtol=1e-3), \
-        "the re-derived vector should differ from the initial one, or this test proves nothing"
     apply_tolerance_vector(r, scalar=loosened)
     assert np.allclose(atol(r), loosened * scale0, rtol=1e-9)
     # a species that has decayed far from its start keeps its initial-derived tolerance
     assert atol(r)[ids.index("A")] == pytest.approx(loosened * 1.0 * VOLUME)
+    # Whether the setter re-derives from the current state is RoadRunner's choice and
+    # differs between builds (the Linux wheels on CI derive from the initial state).
+    # Where it does not drift there is nothing here for pinning to undo.
+    if np.allclose(derived, loosened * scale0, rtol=1e-3):
+        pytest.skip("this RoadRunner build does not re-derive the vector from the "
+                    "current state, so the drift this test guards against cannot occur")
 
 
 def test_scalar_defaults_to_the_configured_one():
