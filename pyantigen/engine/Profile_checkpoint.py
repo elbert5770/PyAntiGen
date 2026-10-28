@@ -339,6 +339,21 @@ def _sigma_floor_mode():
     return sigma_floor_mode()
 
 
+def _stable_key(key):
+    """``str(key)`` with every function replaced by its module and name.
+
+    A block key is ``(block, observed_variable)`` and the observable can be a function (a derived quantity such as the
+    centiloid), whose repr carries its memory address: the same problem hashed differently in every process, so every task of
+    a Slurm array wrote its own directory. A key without a function is unchanged, so existing directories stay valid.
+    """
+    parts = key if isinstance(key, tuple) else (key,)
+    if not any(callable(p) for p in parts):
+        return str(key)
+    named = tuple(f"{getattr(p, '__module__', '')}.{getattr(p, '__qualname__', repr(p))}" if callable(p) else p
+                  for p in parts)
+    return str(named if isinstance(key, tuple) else named[0])
+
+
 def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
                      fixed_sigmas=None, solver_hash=None):
     """Stable hashes identifying what a set of profile points belongs to.
@@ -388,7 +403,7 @@ def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
             # different sigma is a different profile. Also a compact
             # fingerprint of the residuals at the optimum.
             "sigmas": sorted(
-                (str(k), round(float(v), 12))
+                (_stable_key(k), round(float(v), 12))
                 for k, v in (fixed_sigmas or {}).items()
             ),
             # Absent for callers with no replicates to read, which keeps their

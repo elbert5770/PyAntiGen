@@ -6142,18 +6142,14 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     if sigma_floor_mode() != "fixed":
         raise RuntimeError("the AMICI profile needs sigma_floor='fixed' (PYANTIGEN_SIGMA_FLOOR=fixed): its objective is "
                            "the residual form f = const + 0.5 r.r, which needs every sigma known")
-    # The sigmas are computed from residuals, and the order the replicates are summed in changes from process to process
-    # (set order), which moves them in the 12th decimal and, in the fingerprint, gave every array task its own directory.
-    # Nine significant figures is far finer than anything the profile can see.
-    fingerprint_sigmas = {k: float(f"{float(v):.9g}") for k, v in (fixed_sigmas or {}).items()}
-    model_hash, spec_hash = spec_fingerprint(param_names, res_x, groups, scales, model_text, fixed_sigmas=fingerprint_sigmas,
+    model_hash, spec_hash = spec_fingerprint(param_names, res_x, groups, scales, model_text, fixed_sigmas=fixed_sigmas,
                                              solver_hash=solver_fingerprint(replicates))
     import hashlib as _hl
-    from pyantigen.engine.Profile_checkpoint import _round_sig
+    from pyantigen.engine.Profile_checkpoint import _round_sig, _stable_key
     _h = lambda obj: _hl.sha256(repr(obj).encode()).hexdigest()[:6]
     print("[profile] fingerprint parts: model " + model_hash[:8] + ", spec " + spec_hash[:8]
           + ", x " + _h([_round_sig(v) for v in np.atleast_1d(res_x)])
-          + ", sigmas " + _h(sorted((str(k), v) for k, v in fingerprint_sigmas.items()))
+          + ", sigmas " + _h(sorted((_stable_key(k), round(float(v), 12)) for k, v in (fixed_sigmas or {}).items()))
           + ", solver " + str(solver_fingerprint(replicates))[:6] + ", params " + _h(list(param_names))
           + ", scales " + _h(list(scales)) + ", groups " + _h(sorted(groups.keys())))
     run_id = default_run_id(run_id, model_hash, spec_hash)
