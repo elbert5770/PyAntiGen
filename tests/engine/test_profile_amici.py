@@ -153,16 +153,16 @@ class CurvedProvider:
                 np.array([[1.0, 0, 0], [-2.0 * a, 1.0, 0], [0, 0, 1.0]]), 0.0)
 
 
-def _curved_report(tmp_path, relax):
+def _curved_report(tmp_path, widen):
     bounds = [(-9.0, 9.0), (-99.0, 3.0), (-9.0, 9.0)]
-    st = PA.PR.WalkSettings(relax=relax)
-    PA.run(CurvedProvider(), NAMES, bounds, SCALES, np.array([1.0, 1.0, 3.0]), str(tmp_path), settings=st,
-           log=lambda m: None)
-    return PA.side_report(PA.read_sides(str(tmp_path), NAMES), NAMES, bounds)
+    st = PA.PR.WalkSettings(widen=widen)
+    lines = []
+    PA.run(CurvedProvider(), NAMES, bounds, SCALES, np.array([1.0, 1.0, 3.0]), str(tmp_path), settings=st, log=lines.append)
+    return PA.side_report(PA.read_sides(str(tmp_path), NAMES), NAMES, bounds), lines
 
 
 def test_side_report_names_the_bound_that_limits_a_side(tmp_path):
-    rep = _curved_report(tmp_path, relax=0.0)
+    rep, _ = _curved_report(tmp_path, widen=0.0)
     assert rep["a"]["above"]["verdict"] == "box-limited" and rep["a"]["above"]["bound_active"] == ["b"]
     # below, the crossing is at a = 1 - sqrt(2 * 1.9207) = -0.96, where b = a^2 = 0.92 is inside its bound (3). The fill bracket now
     # closes on it (propose keeps its points in the middle of the bracket), so no bracket end sits on the bound.
@@ -172,9 +172,9 @@ def test_side_report_names_the_bound_that_limits_a_side(tmp_path):
     assert "a above: BOX-LIMITED" in text and "on a bound at the crossing: b" in text and "c above" not in text
 
 
-def test_side_report_says_when_relaxing_needed_a_wider_box(tmp_path):
-    rep = _curved_report(tmp_path, relax=1.0)
+def test_the_walk_widens_the_bound_that_was_in_the_way_and_says_so(tmp_path):
+    rep, lines = _curved_report(tmp_path, widen=1.0)
     above = rep["a"]["above"]
     assert above["verdict"] == "crossed" and above["bound_active"] == []
-    assert above["needs_wider"]["b"][1] > 3.0
-    assert "widen its bound" in "\n".join(PA.format_side_report(rep))
+    assert any("bound of b widened" in m and "0_up" in m for m in lines)
+    assert not any("0_down" in m and "widened" in m for m in lines)                  # below, b never reaches its bound

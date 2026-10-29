@@ -32,16 +32,17 @@ from typing import Callable, Optional
 import numpy as np
 
 from pyantigen.engine.Profile_lm import OutOfTime
-from pyantigen.engine.Profile_record import DNLL_95, PointRecord, PointRequest, curve, read_jsonl, validate_result
+from pyantigen.engine.Profile_record import BOUND_TOL, DNLL_95, PointRecord, PointRequest, curve, read_jsonl, validate_result
 
 
 @dataclass
 class WalkSettings:
     df_step: float = 0.4            # target rise of dnll per point
-    df_stop: float = 2.5            # stop once dnll exceeds this: the crossing is bracketed
+    stop_margin: float = 1.5        # stop once dnll exceeds level + stop_margin: the crossing is bracketed with room to spare
     h_min: float = 0.002            # optimizer-space step limits (decades for a log parameter)
     h_max: float = 0.5
-    extend: float = 1.0             # decades the profiled parameter may leave its declared box
+    max_decades: float = 4.0        # how far the profiled parameter may travel from the optimum, and how far a bound may be widened
+    widen: float = 1.0              # decades a bound is widened by each time a nuisance parameter is found on it
     level: float = DNLL_95
     fill_tol: float = 0.03          # |dnll - level| at which a bracket end is close enough
     fill_rounds: int = 6
@@ -49,7 +50,14 @@ class WalkSettings:
     pins: tuple = (0.03, 0.1, 0.25, 0.5, 0.7, 0.85, 1.2, 1.5, 2.0, 3.0, 6.0, 15.0)   # relative pins (x the best fit)
     pins_full: bool = False         # solve the whole grid; else stop a side once a converged pin is past df_stop
     pin_rel: Optional[float] = None  # None: pins held exactly; else the pin may move in a +-pin_rel box (solvers that support it)
-    relax: float = 1.0              # decades a nuisance bound may be widened to re-solve a box-limited point (0: never)
+    relax: float = 1.0              # pins mode only: decades a nuisance bound may be widened to re-solve a box-limited point (0: never)
+    max_gap: float = 0.25           # densify: no two neighbouring points further apart than this (decades for a log parameter) ...
+    max_dgap: float = 0.5           # ... or than this in dnll, up to the crossing
+    dense_rounds: int = 12
+
+    @property
+    def df_stop(self):
+        return self.level + self.stop_margin
 
 
 @dataclass
@@ -94,6 +102,16 @@ class JsonlStore:
         p = self.path(kind, "done")
         return open(p).read().strip() if os.path.exists(p) else None
 
+    def state(self, kind):
+        p = self.path(kind, "json")
+        return json.load(open(p)) if os.path.exists(p) else None
+
+    def set_state(self, kind, obj):
+        tmp = f"{self.path(kind, 'json')}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(obj, fh)
+        os.replace(tmp, self.path(kind, "json"))
+
     def finish(self, kind, text):
         with open(self.path(kind, "done"), "w") as fh:
             fh.write(text + "\n")
@@ -103,7 +121,13 @@ class MemoryStore:
     """Same interface, in memory (tests, and short runs that keep no checkpoint)."""
 
     def __init__(self):
-        self.rows, self.flags = {}, {}
+        self.rows, self.flags, self.states = {}, {}, {}
+
+    def state(self, kind):
+        return self.states.get(kind)
+
+    def set_state(self, kind, obj):
+        self.states[kind] = obj
 
     def read(self, kind):
         return list(self.rows.get(kind, []))
@@ -123,7 +147,7 @@ def plan_step(records, best_xk, sd_first, st: WalkSettings):
     last = records[-1]
     d = abs(last.x_fixed - best_xk)
     if len(records) == 1:
-        return max(4.0 * (sd_first if sd_first is not None else st.h_min), st.h_min)
+        return float(np.clip(4.0 * (sd_first if sd_first is not None else st.h_min), st.h_min, st.h_max))
     c = max(last.dnll, 1e-6) / d ** 2
     h = math.sqrt((max(last.dnll, 0.0) + st.df_step) / c) - d
     d_prev = abs(records[-2].x_fixed - best_xk) if len(records) > 1 else 0.0
@@ -137,6 +161,71 @@ def _optimum_record(pr: ProfileProblem, k):
                        floors_sha256=pr.floors_sha256, value=pr.best_value(k) if pr.best_value else None)
 
 
+def _unit(pr: ProfileProblem, k):
+    """Size of one "decade" for parameter *k*: 1 in a log10 space, the declared span in a linear one."""
+    scales = getattr(pr.solver, "scales", None)
+    if scales is not None and scales[k] == "log10":
+        return 1.0
+    span = float(pr.ub[k] - pr.lb[k])
+    return span if math.isfinite(span) and span > 0 else 1.0
+
+
+def _with_bounds(pr: ProfileProblem, lb, ub):
+    """*pr* with the nuisance bounds *lb*, *ub* (a solver without ``with_bounds`` keeps its own)."""
+    solver = pr.solver.with_bounds(lb, ub) if hasattr(pr.solver, "with_bounds") else pr.solver
+    return ProfileProblem(**{**pr.__dict__, "lb": np.asarray(lb, float), "ub": np.asarray(ub, float), "solver": solver})
+
+
+def side_problem(pr: ProfileProblem, store):
+    """*pr* under the bounds this side has widened to so far (``bounds_<side>.json``), the declared ones if none."""
+    saved = store.state("bounds")
+    if not saved:
+        return pr
+    return _with_bounds(pr, [-math.inf if v is None else v for v in saved["lb"]],
+                        [math.inf if v is None else v for v in saved["ub"]])
+
+
+def _widen(pr: ProfileProblem, cur: ProfileProblem, rec, st: WalkSettings):
+    """Bounds of *cur* widened by ``st.widen`` for every nuisance *rec* has on one, never past ``st.max_decades`` beyond the
+    declared box of *pr*; None if nothing can move."""
+    lb, ub, moved = cur.lb.copy(), cur.ub.copy(), False
+    for name in rec.bound_active:
+        i = pr.names.index(name)
+        u = _unit(pr, i)
+        if rec.x[i] - cur.lb[i] <= BOUND_TOL and cur.lb[i] > pr.lb[i] - st.max_decades * u:
+            lb[i], moved = max(cur.lb[i] - st.widen * u, pr.lb[i] - st.max_decades * u), True
+        elif cur.ub[i] - rec.x[i] <= BOUND_TOL and cur.ub[i] < pr.ub[i] + st.max_decades * u:
+            ub[i], moved = min(cur.ub[i] + st.widen * u, pr.ub[i] + st.max_decades * u), True
+    return (lb, ub) if moved else None
+
+
+def _save_bounds(store, cur: ProfileProblem):
+    fin = lambda v: float(v) if math.isfinite(v) else None
+    store.set_state("bounds", {"lb": [fin(v) for v in cur.lb], "ub": [fin(v) for v in cur.ub]})
+
+
+def _solve_widening(cur: ProfileProblem, pr: ProfileProblem, req, store, st: WalkSettings, say):
+    """Solve *req*; while a nuisance sits on a bound, widen that bound and re-solve from where it stopped.
+
+    Returns ``(record, problem)``: *problem* carries the widened bounds, which the side keeps (and stores) from here on, so
+    the next point starts under them. A point still on a bound once ``max_decades`` is used up is left flagged.
+    """
+    rec = cur.solver.solve(req)
+    n = 0
+    while rec.usable and rec.bound_active and st.widen > 0 and hasattr(cur.solver, "with_bounds"):
+        nb = _widen(pr, cur, rec, st)
+        if nb is None:
+            break
+        say(f"{', '.join(rec.bound_active)} on a bound: widening it by {st.widen:g} decade(s) and re-solving")
+        cur = _with_bounds(cur, *nb)
+        _save_bounds(store, cur)
+        n += 1
+        req = cur.request(req.param_idx, req.x_fixed, rec.x, req.direction, anchor_x=req.anchor_x, deadline=req.deadline,
+                          max_evals=req.max_evals, strict=True, source=f"{req.source}:wide{n}")
+        rec = cur.solver.solve(req)
+    return rec, cur
+
+
 def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, kind="profile"):
     """Walk from the optimum in *direction* (+1 / -1). Returns ``(records, reason)``; reason None means out of time."""
     st = st or WalkSettings()
@@ -148,9 +237,10 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     if not pts:
         pts = [_optimum_record(pr, k)]
         store.append(kind, pts[0])
-    lb, ub = pr.lb, pr.ub
-    stop_at = ub[k] + st.extend if direction > 0 else lb[k] - st.extend
     bk = float(pr.best_x[k])
+    reach = st.max_decades * _unit(pr, k)
+    stop_at = bk + direction * reach
+    base, pr = pr, side_problem(pr, store)
     sd = None if pr.sd_first is None else float(pr.sd_first[k])
     while True:
         last = pts[-1]
@@ -160,25 +250,25 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
         elif last.verdict == "failed":
             reason = "point could not be evaluated"
         elif len(pts) > 1 and abs(last.x_fixed - stop_at) < 1e-9:
-            reason = f"extension limit reached ({st.extend} decades beyond the declared bound): crossing unresolved"
+            reason = f"open: {st.max_decades:g} decades from the optimum reached without a crossing"
         if reason:
             store.finish(kind, reason)
             say(f"{pr.names[k]} {'up' if direction > 0 else 'down'}: finished: {reason}")
             return pts, reason
         h = plan_step(pts, bk, sd, st)
-        val = float(np.clip(last.x_fixed + direction * h, lb[k] - st.extend, ub[k] + st.extend))
+        val = float(np.clip(last.x_fixed + direction * h, min(bk, stop_at), max(bk, stop_at)))
         x_prev = np.array(last.x, float)
         x_init = x_prev.copy()
         if len(pts) > 1 and abs(last.x_fixed - pts[-2].x_fixed) > 0:
             slope = (x_prev - np.array(pts[-2].x, float)) / (last.x_fixed - pts[-2].x_fixed)
             x_init = x_prev + slope * (val - last.x_fixed)
-        x_init = np.clip(x_init, lb, ub)
-        x_init[k] = val                       # only the profiled parameter may leave its box
+        x_init = np.clip(x_init, pr.lb, pr.ub)
+        x_init[k] = val                       # the profiled parameter is not held to the box
         req = pr.request(k, val, x_init, direction, anchor_x=tuple(x_prev), deadline=deadline,
                          max_evals=st.point_max_evals, source=f"walk:{len(pts)}")
         say(f"{pr.names[k]} point {len(pts)}: x = {val:.5g} (step {val - last.x_fixed:+.4g})")
         try:
-            rec = pr.solver.solve(req)
+            rec, pr = _solve_widening(pr, base, req, store, st, say)
         except OutOfTime:
             say("deadline reached; exiting to be continued")
             return pts, None
@@ -220,7 +310,8 @@ def pins(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
         pts = [_optimum_record(pr, k)]
         store.append("pins", pts[0])
     lb, ub = pr.lb, pr.ub
-    lo_x, hi_x = lb[k] - st.extend, ub[k] + st.extend
+    reach = st.max_decades * _unit(pr, k)
+    lo_x, hi_x = float(pr.best_x[k]) - reach, float(pr.best_x[k]) + reach
     grid = sorted((r for r in st.pins if (r > 1) == (direction > 0) and r != 1), key=lambda r: direction * math.log(r))
     seen = {r.source for r in pts}
     box = st.pin_rel if getattr(pr.solver, "supports_pin_box", False) else None
@@ -369,6 +460,7 @@ def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     store = store or MemoryStore()
     say = log or (lambda *_: None)
     extra = store.read("fill")
+    pr = side_problem(pr, store)
     if store.read("relax") and hasattr(pr.solver, "relaxed"):       # the walk needed room: insert points under the same bounds
         pr = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
 
@@ -414,6 +506,61 @@ def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     store.finish("fill", json.dumps({"crossing": cross, "bracket": [a.x_fixed, c.x_fixed],
                                      "dnll_bracket": [a.dnll, c.dnll], "rounds": len(extra)}))
     return cross
+
+
+def densify(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):
+    """Fill the curve between the optimum and the crossing: bisect the widest gap until none is wider than ``max_gap`` in
+    the parameter or ``max_dgap`` in dnll. Returns the inserted records; a side with no crossing is left as it is.
+
+    The walk steps by curvature and the fill places points at the level, so a flat stretch or a step that took a large
+    jump leaves holes. Each new point is fitted once, from the mean of its two neighbours' vectors (strict convergence).
+    The range covered ends at the first point over the level.
+    """
+    st = st or WalkSettings()
+    store = store or MemoryStore()
+    say = log or (lambda *_: None)
+    done = store.read("dense")
+    if store.done("dense"):
+        return done
+    pr = side_problem(pr, store)
+    if store.read("relax") and hasattr(pr.solver, "relaxed"):
+        pr = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
+    unit = _unit(pr, k)
+
+    def ordered():
+        return sorted(curve(store.read(walk_kind) + store.read("relax") + store.read("fill") + store.read("dense")),
+                      key=lambda q: direction * q.x_fixed)
+
+    def widest(pts):
+        end = next((i for i, q in enumerate(pts) if i > 0 and q.dnll > st.level), None)
+        if end is None:
+            return None
+        gaps = [(max(abs(b.x_fixed - a.x_fixed) / (st.max_gap * unit), abs(b.dnll - a.dnll) / st.max_dgap), i)
+                for i, (a, b) in enumerate(zip(pts[:end], pts[1:end + 1]))]
+        worst = max(gaps)
+        return worst[1] if worst[0] > 1.0 else None
+
+    try:
+        for rnd in range(len(done), st.dense_rounds):
+            pts = ordered()
+            i = widest(pts)
+            if i is None:
+                break
+            a, b = pts[i], pts[i + 1]
+            val = 0.5 * (a.x_fixed + b.x_fixed)
+            x_init = 0.5 * (np.array(a.x, float) + np.array(b.x, float))
+            x_init[k] = val
+            req = pr.request(k, val, np.clip(x_init, pr.lb, pr.ub), direction, anchor_x=tuple(a.x), deadline=deadline,
+                             max_evals=st.point_max_evals, strict=True, source=f"dense:{rnd}")
+            rec = pr.solver.solve(req)
+            _check(req, rec)
+            store.append("dense", rec)
+            done.append(rec)
+            say(f"densify round {rnd}: x = {val:.5g}: dnll {rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}")
+    except OutOfTime:
+        return done
+    store.finish("dense", f"{len(done)} point(s) inserted")
+    return done
 
 
 def recheck(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):

@@ -60,10 +60,10 @@ def test_walk_resumes_from_its_checkpoint(tmp_path):
 
 
 def test_extension_limit_and_failure_end_the_walk():
-    pr = problem(lb=(-9.0, -99.0, -9.0), ub=(1.3, 99.0, 9.0))                    # box ends 0.3 above the optimum
-    st = PR.WalkSettings(extend=0.2, df_stop=99.0)
+    st = PR.WalkSettings(max_decades=0.25, stop_margin=99.0)                      # a unit is the declared span: 2 here
+    pr = problem(lb=(0.0, -99.0, -9.0), ub=(2.0, 99.0, 9.0))
     pts, why = PR.walk(pr, 0, +1, st)
-    assert "extension limit" in why and math.isclose(pts[-1].x_fixed, 1.5)
+    assert "open" in why and math.isclose(pts[-1].x_fixed, 1.5)
     pr.solver.evaluate = lambda x: None
     pts, why = PR.walk(pr, 0, +1)
     assert why == "point could not be evaluated"
@@ -71,7 +71,7 @@ def test_extension_limit_and_failure_end_the_walk():
 
 def test_box_limited_crossing_is_not_called_crossed():
     pr = problem(ub=(9.0, 3.0, 9.0))                 # b = a^2 reaches 3 at a = 1.73; beyond it b sits on its bound
-    pts, _ = PR.walk(pr, 0, +1)
+    pts, _ = PR.walk(pr, 0, +1, PR.WalkSettings(widen=0.0))
     assert any(p.box_limited for p in pts) and pts[-1].dnll > 0.5 * (pts[-1].x_fixed - 1) ** 2
     assert P.side_verdicts(pts, 1.0)[1] == "box-limited"
 
@@ -89,22 +89,23 @@ def test_recheck_keeps_the_lowest_and_is_resumable(tmp_path):
 def test_relax_resolves_box_limited_points_with_wider_bounds(tmp_path):
     pr = problem(ub=(9.0, 3.0, 9.0))                 # b = a^2 hits its bound at a = 1.73
     store = PR.JsonlStore(str(tmp_path), "0_up")
-    PR.walk(pr, 0, +1, PR.WalkSettings(), store)
+    PR.walk(pr, 0, +1, PR.WalkSettings(widen=0.0), store)
     flagged = [p for p in store.read("profile") if p.box_limited]
     assert flagged
     got = PR.relax(pr, 0, +1, PR.WalkSettings(), store)
     assert len(got) == len(flagged) and store.done("relax")
     assert all(not r.box_limited and r.dnll < p.dnll for r, p in zip(got, flagged))
     assert PR.relax(pr, 0, +1, PR.WalkSettings(), store) == got                  # finished: nothing re-run
-    PR.fill(pr, 0, +1, PR.WalkSettings(), store)
-    allrec = store.read("profile") + store.read("relax") + store.read("fill")
-    assert P.side_verdicts(allrec, 1.0)[1] == "crossed"
+    # Relaxing after the walk lowers every point under the level, so the crossing is no longer bracketed: this is why the
+    # walk widens a bound as it goes (test_walk_widens_a_bound_a_nuisance_sits_on_and_remembers_it) and relax is for pins.
+    allrec = store.read("profile") + store.read("relax")
+    assert P.side_verdicts(allrec, 1.0)[1] == "open"
 
 
 def test_relax_off_and_without_box_limits_do_nothing():
     pr = problem(ub=(9.0, 3.0, 9.0))
     store = PR.MemoryStore()
-    PR.walk(pr, 0, +1, PR.WalkSettings(), store)
+    PR.walk(pr, 0, +1, PR.WalkSettings(widen=0.0), store)
     assert PR.relax(pr, 0, +1, PR.WalkSettings(relax=0.0), store) == [] and store.done("relax") is None
     clean = PR.MemoryStore()
     PR.walk(problem(), 0, +1, PR.WalkSettings(), clean)
@@ -153,3 +154,51 @@ def test_pins_resolve_a_pin_that_did_not_converge_from_a_converged_neighbour():
     store = PR.MemoryStore()
     PR.pins(pr, 0, +1, PR.WalkSettings(pins=(1.5, 3.0)), store)
     assert "pin:1.5:restart" in calls
+
+
+def test_walk_goes_past_the_declared_box_without_a_new_spec():
+    pr = problem(ub=(1.5, 99.0, 9.0))                # the box ends 0.5 above the optimum; the crossing is at 2.96
+    pts, why = PR.walk(pr, 0, +1)
+    assert "threshold crossed" in why and pts[-1].x_fixed > 2.9 and pts[-1].dnll > PR.DNLL_95 + PR.WalkSettings().stop_margin
+
+
+def test_walk_stops_at_level_plus_margin():
+    st = PR.WalkSettings(stop_margin=0.7)
+    pts, _ = PR.walk(problem(), 0, +1, st)
+    assert pts[-1].dnll > PR.DNLL_95 + 0.7 and pts[-2].dnll <= PR.DNLL_95 + 0.7
+
+
+def test_walk_widens_a_bound_a_nuisance_sits_on_and_remembers_it(tmp_path):
+    pr = problem(ub=(9.0, 3.0, 9.0))                 # b = a^2 would sit on its bound of 3 past a = 1.73
+    store = PR.JsonlStore(str(tmp_path), "0_up")
+    pts, _ = PR.walk(pr, 0, +1, PR.WalkSettings(), store)
+    assert not any(p.box_limited for p in pts)
+    assert P.side_verdicts(pts, 1.0)[1] == "crossed"
+    saved = store.state("bounds")
+    assert saved["ub"][1] > 3.0 and saved["ub"][0] == 9.0                    # only the bound that was in the way moved
+    assert PR.side_problem(pr, store).ub[1] == saved["ub"][1]                # a resumed side starts under the widened bound
+
+
+def test_widening_stops_at_max_decades_and_leaves_the_point_flagged():
+    pr = problem(lb=(-9.0, -1.0, -9.0), ub=(9.0, 3.0, 9.0))                  # b's box spans 4
+    st = PR.WalkSettings(max_decades=0.5, widen=1.0)                          # so b's ceiling can reach 5; b = a^2 needs 8.8 at the crossing
+    pts, _ = PR.walk(pr, 0, +1, st)
+    assert any(p.box_limited for p in pts)
+
+
+def test_densify_closes_every_wide_gap_up_to_the_crossing():
+    st, store, pr = PR.WalkSettings(max_gap=0.15, max_dgap=0.2), PR.MemoryStore(), problem()
+    PR.walk(pr, 0, +1, st, store)
+    PR.fill(pr, 0, +1, st, store)
+    added = PR.densify(pr, 0, +1, st, store)
+    assert added and store.done("dense")
+    pts = sorted(P.curve(store.read("profile") + store.read("fill") + added), key=lambda q: q.x_fixed)
+    end = next(i for i, q in enumerate(pts) if i > 0 and q.dnll > st.level)
+    assert all(b.x_fixed - a.x_fixed <= 0.15 + 1e-9 or b.dnll - a.dnll <= 0.2 + 1e-9 for a, b in zip(pts[:end], pts[1:end + 1]))
+    assert PR.densify(pr, 0, +1, st, store) == added                          # finished: nothing re-run
+
+
+def test_densify_leaves_an_open_side_alone():
+    st, store, pr = PR.WalkSettings(max_decades=0.3, stop_margin=99.0), PR.MemoryStore(), problem()
+    PR.walk(pr, 0, +1, st, store)
+    assert PR.densify(pr, 0, +1, st, store) == [] and store.done("dense")

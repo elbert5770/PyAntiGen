@@ -201,6 +201,13 @@ class LmSolver:
         self.backend, self.floors_sha256, self.log = backend, floors_sha256, log
         self.on_eval = on_eval
 
+    def with_bounds(self, lb, ub):
+        """A copy whose nuisance bounds are *lb*, *ub* (optimizer space)."""
+        import copy
+        out = copy.copy(self)
+        out.lb, out.ub = np.asarray(lb, float), np.asarray(ub, float)
+        return out
+
     def relaxed(self, decades):
         """A copy whose finite bounds are *decades* wider (log10 parameters) or *decades* spans wider (linear ones)."""
         import copy

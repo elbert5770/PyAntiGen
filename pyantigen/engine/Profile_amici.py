@@ -26,7 +26,7 @@ from pyantigen.engine import Profile_lm as LM
 from pyantigen.engine.Profile_record import curve
 
 SIDE_ENV = "PYANTIGEN_PROFILE_SIDE"
-KINDS = ("profile", "pins", "relax", "fill", "recheck")
+KINDS = ("profile", "pins", "relax", "fill", "dense", "recheck")
 MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins
 PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
 FAILURE_VALUE = 1e10
@@ -131,7 +131,7 @@ def sides_finished(store_dir, names, recheck=False, sides=None, mode="walk"):
     flags = []
     for k, d in (sides or all_sides(len(names))):
         store = PR.JsonlStore(store_dir, tag_of(k, d, mode))
-        flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and (not recheck or bool(store.done("recheck"))))
+        flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and bool(store.done("dense")) and (not recheck or bool(store.done("recheck"))))
     return flags
 
 
@@ -258,14 +258,25 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         if why is None:
             log(f"[profile] out of time in {tag}; relaunch to continue")
             break
-        PR.relax(pr, k, d, st, store, deadline, say, walk_kind=kind)
-        if store.done("relax") is None and st.relax > 0:
-            log(f"[profile] out of time relaxing {tag}; relaunch to continue")
-            break
+        if mode == "pins":                           # the walk widens bounds as it goes; a pin grid cannot
+            PR.relax(pr, k, d, st, store, deadline, say, walk_kind=kind)
+            if store.done("relax") is None and st.relax > 0:
+                log(f"[profile] out of time relaxing {tag}; relaunch to continue")
+                break
         if PR.fill(pr, k, d, st, store, deadline, say, walk_kind=kind) is None and store.done("fill") is None:
             log(f"[profile] out of time filling {tag}; relaunch to continue")
             break
+        PR.densify(pr, k, d, st, store, deadline, say, walk_kind=kind)
+        if store.done("dense") is None:
+            log(f"[profile] out of time densifying {tag}; relaunch to continue")
+            break
         if recheck:
             PR.recheck(pr, k, d, st, store, deadline, say, walk_kind=kind)
+        saved = store.state("bounds")
+        for i, n_i in enumerate(names):
+            if saved and (saved["lb"][i] != (None if not math.isfinite(lb[i]) else lb[i])
+                          or saved["ub"][i] != (None if not math.isfinite(ub[i]) else ub[i])):
+                log(f"[profile] {tag}: bound of {n_i} widened to [{saved['lb'][i]}, {saved['ub'][i]}] "
+                    f"(declared [{lb[i]}, {ub[i]}], optimizer space)")
         ran.append(tag)
     return {"anchor": f0, "floors": stamp, "ran": ran}
