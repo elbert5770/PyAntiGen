@@ -178,3 +178,50 @@ def test_the_walk_widens_the_bound_that_was_in_the_way_and_says_so(tmp_path):
     assert above["verdict"] == "crossed" and above["bound_active"] == []
     assert any("bound of b widened" in m and "0_up" in m for m in lines)
     assert not any("0_down" in m and "widened" in m for m in lines)                  # below, b never reaches its bound
+
+
+def test_unfinished_tasks_are_array_ids_and_written_for_sbatch(tmp_path):
+    finished = [True, False, True, True, False, True]                      # all_sides order: 0 up, 0 down, 1 up, ...
+    assert PA.unfinished_tasks(finished, 3) == [1, 4]
+    assert PA.task_of(2, +1) == 4 and PA.task_of(2, -1) == 5
+    PA.write_unfinished(str(tmp_path), [4, 1])
+    assert (tmp_path / "unfinished.txt").read_text() == "1,4\n"
+    PA.write_unfinished(str(tmp_path), [])
+    assert (tmp_path / "unfinished.txt").read_text() == ""
+
+
+def test_collect_walks_nothing_and_reads_the_anchor_the_sides_recorded(tmp_path):
+    p = LinearProvider()
+    xs = _optimum(p)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), log=lambda m: None)         # one side only
+    before = p.calls
+    out = PA.run(None, NAMES, BOUNDS, SCALES, xs, str(tmp_path), mode="collect", log=lambda m: None)
+    assert out["ran"] == [] and p.calls == before
+    assert out["anchor"] == pytest.approx(PA.read_meta(str(tmp_path))["f"])
+    assert PA.unfinished_tasks(PA.sides_finished(str(tmp_path), NAMES), 3) == [1, 2, 3, 4, 5]
+
+
+def test_collect_before_any_side_has_run_says_so(tmp_path):
+    with pytest.raises(RuntimeError, match="no side has started"):
+        PA.run(None, NAMES, BOUNDS, SCALES, np.zeros(3), str(tmp_path), mode="collect", log=lambda m: None)
+
+
+def test_a_profile_is_not_continued_at_a_different_optimum(tmp_path):
+    p = LinearProvider()
+    xs = _optimum(p)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), log=lambda m: None)
+    PA.check_anchor(str(tmp_path), xs + 1e-6)                              # a refit that landed a hair away is the same anchor
+    with pytest.raises(RuntimeError, match="different optimum"):
+        PA.run(p, NAMES, BOUNDS, SCALES, xs + 0.01, str(tmp_path), side=(0, 1), log=lambda m: None)
+    with pytest.raises(RuntimeError, match="different optimum"):
+        PA.run(None, NAMES, BOUNDS, SCALES, xs + 0.01, str(tmp_path), mode="collect", log=lambda m: None)
+
+
+def test_the_fingerprint_without_the_optimum_does_not_move_with_a_refit():
+    from pyantigen.engine.Profile_checkpoint import spec_fingerprint
+    args = (["a", "b"], None, {"g": 1}, ["log10", "log10"], "model")
+    same = [spec_fingerprint(args[0], x, *args[2:], include_optimum=False) for x in ([1.0, 2.0], [1.3, 2.1])]
+    assert same[0] == same[1]
+    moved = [spec_fingerprint(args[0], x, *args[2:]) for x in ([1.0, 2.0], [1.3, 2.1])]
+    assert moved[0] != moved[1]
+    assert same[0][1] != moved[0][1]

@@ -27,7 +27,8 @@ from pyantigen.engine.Profile_record import curve
 
 SIDE_ENV = "PYANTIGEN_PROFILE_SIDE"
 KINDS = ("profile", "pins", "relax", "fill", "dense", "recheck")
-MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins
+MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins | fim | collect (walks nothing: reports what the sides left)
+ANCHOR_TOL = 1e-4                            # optimizer-space distance at which a refit is a different anchor
 PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
 FAILURE_VALUE = 1e10
 
@@ -48,8 +49,8 @@ def settings_from_env(env=None):
     """``(mode, WalkSettings)`` from ``PYANTIGEN_PROFILE_MODE`` and ``PYANTIGEN_PROFILE_PINS``."""
     env = os.environ if env is None else env
     mode = (env.get(MODE_ENV) or "walk").strip().lower()
-    if mode not in ("walk", "pins", "fim"):
-        raise ValueError(f"{MODE_ENV}={mode!r}: expected 'walk', 'pins' or 'fim'")
+    if mode not in ("walk", "pins", "fim", "collect"):
+        raise ValueError(f"{MODE_ENV}={mode!r}: expected 'walk', 'pins', 'fim' or 'collect'")
     st = PR.WalkSettings()
     if env.get(PINS_ENV):
         st.pins = tuple(float(v) for v in env[PINS_ENV].split(",") if v.strip())
@@ -58,6 +59,57 @@ def settings_from_env(env=None):
 
 def all_sides(n_params):
     return [(k, d) for k in range(n_params) for d in (1, -1)]
+
+
+def task_of(k, direction):
+    """The array task (``PYANTIGEN_PROFILE_SIDE``) of a side: ``2*k`` for the upper side, ``2*k + 1`` for the lower."""
+    return 2 * k + (0 if direction > 0 else 1)
+
+
+def unfinished_tasks(finished, n_params):
+    """Array task ids of the sides *finished* (one flag per side, in :func:`all_sides` order) says are not done."""
+    return [task_of(k, d) for (k, d), ok in zip(all_sides(n_params), finished) if not ok]
+
+
+def write_unfinished(store_dir, tasks):
+    """``unfinished.txt``: the tasks still to run as a comma list, ready for ``sbatch --array=``; empty when none are."""
+    tmp = os.path.join(store_dir, f"unfinished.txt.{os.getpid()}.tmp")
+    with open(tmp, "w") as fh:
+        fh.write(",".join(str(t) for t in sorted(tasks)) + "\n" if tasks else "")
+    os.replace(tmp, os.path.join(store_dir, "unfinished.txt"))
+
+
+def read_meta(store_dir):
+    p = os.path.join(store_dir, "meta.json")
+    return json.load(open(p)) if os.path.exists(p) else None
+
+
+def check_anchor(store_dir, x, tol=ANCHOR_TOL):
+    """Refuse to continue a profile that was anchored at a different optimum than *x* (optimizer space).
+
+    The profile directory is named for the problem, not the optimum, so a refit lands in the same place; every stored
+    dnll is measured from the optimum the first side saw (``meta.json``), and mixing two would be silent.
+    """
+    meta = read_meta(store_dir)
+    if meta is None:
+        return
+    saved = np.asarray(meta["x"], float)
+    xa = np.asarray(x, float)
+    if saved.shape != xa.shape or float(np.max(np.abs(saved - xa))) > tol:
+        far = "different length" if saved.shape != xa.shape else f"max |dx| {np.max(np.abs(saved - xa)):.3g}"
+        raise RuntimeError(f"{store_dir} holds a profile anchored at a different optimum ({far} > {tol:g}, optimizer space). "
+                           "Move or delete the directory to profile the new optimum from scratch.")
+
+
+def record_anchor(store_dir, f0):
+    """Add the objective at the optimum to ``meta.json`` once, so a collect run needs no evaluation to know the anchor."""
+    meta = read_meta(store_dir)
+    if meta is None or "f" in meta:
+        return
+    tmp = os.path.join(store_dir, f"meta.json.{os.getpid()}.tmp")
+    with open(tmp, "w") as fh:
+        json.dump({**meta, "f": float(f0)}, fh)
+    os.replace(tmp, os.path.join(store_dir, "meta.json"))
 
 
 def tag_of(k, direction, mode="walk"):
@@ -205,6 +257,13 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
     *provider* has ``linear_residual_jacobian`` (an ``Analytic_gradient.AmiciGradient``); *bounds* are ``(lo, hi)`` in the
     optimizer's space, None for none. Sides that run out of the clock are left resumable, and the rest are not started.
     """
+    if mode == "collect":
+        # Nothing is evaluated and nothing walked: the anchor and floors are what the sides recorded.
+        meta = read_meta(store_dir)
+        if meta is None or "f" not in meta:
+            raise RuntimeError(f"collect: {store_dir} has no anchor yet; no side has started (run the walk first)")
+        check_anchor(store_dir, res_x)
+        return {"anchor": float(meta["f"]), "floors": meta["floors"], "ran": []}
     n = len(names)
     lb = np.array([(-math.inf if b is None or b[0] is None else b[0]) for b in bounds], float)
     ub = np.array([(math.inf if b is None or b[1] is None else b[1]) for b in bounds], float)
@@ -212,6 +271,7 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
     stamp = use_floors(store_dir, log)
     meta = {"names": list(names), "scales": list(scales), "x": [float(v) for v in xb], "lb": [None if not math.isfinite(v) else float(v) for v in lb],
             "ub": [None if not math.isfinite(v) else float(v) for v in ub], "floors": stamp}
+    check_anchor(store_dir, xb)
     mp = os.path.join(store_dir, "meta.json")
     if not os.path.exists(mp):                      # what Profile_plot reads to draw this folder
         tmp = f"{mp}.{os.getpid()}.tmp"
@@ -236,6 +296,7 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         log(f"[fim] written to {path} (and fim.npz)")
         return {"anchor": float(out[0]), "floors": stamp, "ran": [], "fim": path}
     f0, sd, worst = optimum_state(evaluate, xb, lb, ub, failures)
+    record_anchor(store_dir, f0)
     log(f"[profile] AMICI objective at the optimum: f {f0:.6f}; largest projected-gradient gain {worst:.3g} nats")
     if worst > 0.05:
         log("[profile] *** the optimum is not stationary under these floors; a LOWER point is likely and the profile "

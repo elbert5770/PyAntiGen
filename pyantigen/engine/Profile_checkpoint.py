@@ -355,7 +355,7 @@ def _stable_key(key):
 
 
 def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
-                     fixed_sigmas=None, solver_hash=None):
+                     fixed_sigmas=None, solver_hash=None, include_optimum=True):
     """Stable hashes identifying what a set of profile points belongs to.
 
     Points computed against a different model, parameter set, optimum, or set of
@@ -373,12 +373,16 @@ def spec_fingerprint(param_names, x_opt, groups, scales, model_text,
     optional so that callers without them -- tests, and anything profiling a
     bare function -- keep working; when it is absent the hash is the same as it
     was before solver settings were tracked.
+
+    ``include_optimum=False`` leaves the optimum out of the hash, so the identity is the problem and not where it was
+    fitted: a refit does not orphan the profile, and the AMICI stage checks the anchor itself instead
+    (:func:`Profile_amici.check_anchor`).
     """
     model_hash = hashlib.sha256((model_text or "").encode("utf-8")).hexdigest()[:16]
     spec_blob = json.dumps(
         {
             "param_names": list(param_names),
-            "x_opt": [_round_sig(v) for v in np.atleast_1d(x_opt)],
+            **({"x_opt": [_round_sig(v) for v in np.atleast_1d(x_opt)]} if include_optimum else {}),
             "scales": list(scales),
             "groups": sorted(groups.keys()) if hasattr(groups, "keys") else None,
             # Bumped when the meaning of a stored dNLL changes.

@@ -6143,12 +6143,11 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
         raise RuntimeError("the AMICI profile needs sigma_floor='fixed' (PYANTIGEN_SIGMA_FLOOR=fixed): its objective is "
                            "the residual form f = const + 0.5 r.r, which needs every sigma known")
     model_hash, spec_hash = spec_fingerprint(param_names, res_x, groups, scales, model_text, fixed_sigmas=fixed_sigmas,
-                                             solver_hash=solver_fingerprint(replicates))
+                                             solver_hash=solver_fingerprint(replicates), include_optimum=False)
     import hashlib as _hl
-    from pyantigen.engine.Profile_checkpoint import _round_sig, _stable_key
+    from pyantigen.engine.Profile_checkpoint import _stable_key
     _h = lambda obj: _hl.sha256(repr(obj).encode()).hexdigest()[:6]
     print("[profile] fingerprint parts: model " + model_hash[:8] + ", spec " + spec_hash[:8]
-          + ", x " + _h([_round_sig(v) for v in np.atleast_1d(res_x)])
           + ", sigmas " + _h(sorted((_stable_key(k), round(float(v), 12)) for k, v in (fixed_sigmas or {}).items()))
           + ", solver " + str(solver_fingerprint(replicates))[:6] + ", params " + _h(list(param_names))
           + ", scales " + _h(list(scales)) + ", groups " + _h(sorted(groups.keys())))
@@ -6159,13 +6158,16 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
         raise RuntimeError("the AMICI profile keeps its points in files and needs checkpointing on (a plot_path)")
     store_dir = os.path.join(ckpt.dir, "amici")
     print(f"\n[profile] AMICI route, checkpointing to {store_dir}")
+    PA.check_anchor(store_dir, res_x)
     budget = RunBudget(deadline=resolve_deadline())
     print(f"[profile] {budget.describe()}")
-    kw = dict(optimizer_kwargs or {})
-    kw.setdefault("analytic_gradient", True)
-    provider = build_gradient(kw, models=models, replicates=replicates, groups=groups, param_names=param_names,
-                              scales=scales, x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
     mode, settings = PA.settings_from_env()
+    provider = None
+    if mode != "collect":                    # a collect run evaluates nothing, so it does not load the AMICI models
+        kw = dict(optimizer_kwargs or {})
+        kw.setdefault("analytic_gradient", True)
+        provider = build_gradient(kw, models=models, replicates=replicates, groups=groups, param_names=param_names,
+                                  scales=scales, x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
     print(f"[profile] mode {mode}" + (f", pins {list(settings.pins)}" if mode == "pins" else ""))
     out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
                  settings=settings, mode=mode, log=lambda m: print(m, flush=True))
@@ -6174,6 +6176,11 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
               "and 'INCOMPLETE' only means that.", flush=True)
     completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey, mode=mode)
     finished = PA.sides_finished(store_dir, param_names, recheck=recheck, mode=mode)
+    todo = PA.unfinished_tasks(finished, len(param_names))
+    PA.write_unfinished(store_dir, todo)
+    if todo:
+        print(f"[profile] {len(todo)} side(s) unfinished; relaunch with --array={','.join(map(str, todo))} "
+              f"(also in {os.path.join(store_dir, 'unfinished.txt')})", flush=True)
     meta = {i: {"is_log": scales[i] == "log10"} for i in range(len(param_names))}
     traces, anchor, where, convergence = _report_protocol_profile(
         param_names, completed, finished, res_x, meta, bounds, _PROFILE_THRESHOLD, out["anchor"])
