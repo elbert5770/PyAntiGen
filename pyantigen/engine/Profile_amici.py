@@ -15,6 +15,7 @@ the convergence report and the verdicts are assembled from every side's files.
 AMICI solver objects are not thread-safe, which is why this is one side per process and not one thread per side as the
 RoadRunner route does.
 """
+import json
 import math
 import os
 
@@ -209,6 +210,14 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
     ub = np.array([(math.inf if b is None or b[1] is None else b[1]) for b in bounds], float)
     xb = np.asarray(res_x, float)
     stamp = use_floors(store_dir, log)
+    meta = {"names": list(names), "scales": list(scales), "x": [float(v) for v in xb], "lb": [None if not math.isfinite(v) else float(v) for v in lb],
+            "ub": [None if not math.isfinite(v) else float(v) for v in ub], "floors": stamp}
+    mp = os.path.join(store_dir, "meta.json")
+    if not os.path.exists(mp):                      # what Profile_plot reads to draw this folder
+        tmp = f"{mp}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(meta, fh)
+        os.replace(tmp, mp)
     failures = []
     # amici_evaluate returns None on a failed integration and says why through its log; keep the reasons, drop the
     # per-evaluation chatter (the walk reports each point).

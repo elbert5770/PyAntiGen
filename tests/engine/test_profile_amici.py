@@ -164,7 +164,9 @@ def _curved_report(tmp_path, relax):
 def test_side_report_names_the_bound_that_limits_a_side(tmp_path):
     rep = _curved_report(tmp_path, relax=0.0)
     assert rep["a"]["above"]["verdict"] == "box-limited" and rep["a"]["above"]["bound_active"] == ["b"]
-    assert rep["a"]["below"]["verdict"] == "box-limited"            # b = a^2 reaches its bound on this side too
+    # below, the crossing is at a = 1 - sqrt(2 * 1.9207) = -0.96, where b = a^2 = 0.92 is inside its bound (3). The fill bracket now
+    # closes on it (propose keeps its points in the middle of the bracket), so no bracket end sits on the bound.
+    assert rep["a"]["below"]["verdict"] == "crossed"
     assert rep["c"]["above"]["verdict"] == "crossed"
     text = "\n".join(PA.format_side_report(rep))
     assert "a above: BOX-LIMITED" in text and "on a bound at the crossing: b" in text and "c above" not in text

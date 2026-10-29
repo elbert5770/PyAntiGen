@@ -894,61 +894,43 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name,
     opt["stats"]["profile_ci_status"] = profile_ci_state
     opt["stats"]["profile_traces"] = profile_traces
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # One panel per parameter (Profile_plot): the optimizer scale on x (log10 for a log10 parameter), converged points filled and the
+    # rest hollow, the optimum marked, the cut dashed; a full-range figure and one limited to a dNLL of 5.
+    from pyantigen.engine import Profile_plot as PP
+    _pconv = (opt.get("stats", {}).get("profile_convergence") or {})
+    _pts, _sc = _pconv.get("points"), _pconv.get("scales")
+    _prof, _mle, _scales = {}, {}, {}
     for idx, pname in enumerate(param_names):
-        cached = cache.get(idx)
-        if cached is None:
-            continue
-        pv, nr = cached
-        ax.plot(pv / params_estimated[idx], nr,
-                marker=markers[(idx // len(colors)) % len(markers)], linestyle='-',
-                label=pname, linewidth=2, color=colors[idx % len(colors)])
-
-    ax.axhline(_PROFILE_CI_THRESHOLD, color='gray', linestyle=':', alpha=0.7, linewidth=1.5,
-               label=f'95% CI (Δ NLL = {_PROFILE_CI_THRESHOLD:.2f})')
-    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
-    ax.set_xlabel('Parameter Value (relative to optimal)')
-    ax.set_ylabel('Δ NLL (relative to profile minimum)')
+        est = float(params_estimated[idx])
+        if _pts is not None and _sc is not None and pname in _pts:
+            islog = _sc[idx] == "log10"
+            _prof[pname] = [(float(x), float(y), bool(c)) for x, y, c in _pts[pname]]
+            _mle[pname] = float(np.log10(est)) if islog else est
+        else:                                  # a route that keeps no per-point verdicts: the traces, all drawn as converged
+            cached = cache.get(idx)
+            if cached is None:
+                continue
+            pv, nr = np.asarray(cached[0], float), np.asarray(cached[1], float)
+            islog = est > 0 and bool(np.all(pv > 0)) and float(pv.max() / pv.min()) > 4.0
+            tx = np.log10 if islog else (lambda v: v)
+            _prof[pname] = [(float(x), float(y), True) for x, y in zip(tx(pv), nr)]
+            _mle[pname] = float(tx(est))
+        _scales[pname] = "log10" if islog else "lin"
     _gap = opt.get("stats", {}).get("profile_anchor_gap", 0.0)
-    if _gap < -1e-3:
-        # Say it on the figure too — a plot whose optimum line sits off the
-        # minimum is the single most misleading output this code can produce.
-        ax.set_title('Profile Likelihood — WARNING: fit is '
-                     f'{abs(_gap):.3g} nats above the profile minimum')
-    else:
-        ax.set_title('Profile Likelihood (Identifiability Check)')
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-    _xwin, _use_log = _profile_plot_x(cache, params_estimated, profile_ci)
-    if _use_log:
-        ax.set_xscale('log')
-    if _xwin:
-        ax.set_xlim(*_xwin)
-    plt.tight_layout()
+    # A plot whose optimum sits off the minimum is the single most misleading output this code can produce: say it on the figure.
+    _note = f"WARNING: the fit is {abs(_gap):.3g} nats above the profile minimum" if _gap < -1e-3 else None
     _base = os.path.join(plot_path, f"{model_name}_{tag}_profile_likelihood")
-    out_path = f"{_base}_{ts}.png"
-    plt.savefig(out_path, bbox_inches="tight")
+    # the old names, with the full-range figure marked: <model>_<tag>_profile_likelihood_full_<ts>.png and ..._zoom_<ts>.png
+    out_path, out_path_zoom = PP.figures(_base, f"{model_name} {tag}", [n for n in param_names if n in _prof], _mle, _prof,
+                                         _scales, zoom=5.0, thr=_PROFILE_CI_THRESHOLD, note=_note, suffix=f"_{ts}")
     print(f"Profile likelihood saved to: {out_path}")
-
-    zoom_half = _PROFILE_CI_THRESHOLD * 0.10
-    ax.set_ylim(-zoom_half, zoom_half)
-    ax.set_title(f'Profile Likelihood (Identifiability Check, y-axis ±10% CI)')
-    out_path_zoom = f"{_base}_zoom_{ts}.png"
-    plt.savefig(out_path_zoom, bbox_inches="tight")
     print(f"Profile likelihood (zoomed) saved to: {out_path_zoom}")
-
-    ax.set_ylim(-_PROFILE_CI_THRESHOLD * 0.10, _PROFILE_CI_THRESHOLD)
-    ax.set_title(f'Profile Likelihood (Identifiability Check, y-axis -10% to +100% CI)')
-    out_path_zoom2 = f"{_base}_zoom2_{ts}.png"
-    plt.savefig(out_path_zoom2, bbox_inches="tight")
-    print(f"Profile likelihood (zoomed2) saved to: {out_path_zoom2}")
-    plt.close(fig)
 
     # ── Summary report ───────────────────────────────────────────────────
     report = _profile_report_text(
         opt, param_names, params_estimated, profile_ci, profile_ci_state,
         cache, model_name, tag, stamp.strftime("%Y-%m-%d %H:%M:%S"),
-        plot_files=(out_path, out_path_zoom, out_path_zoom2),
+        plot_files=(out_path, out_path_zoom),
     )
     report_path = os.path.join(
         plot_path, f"{model_name}_{tag}_profile_summary_{ts}.txt")
@@ -1070,57 +1052,27 @@ def _save_likelihood_slice_plot(opt, param_names, plot_path, model_name, tag="AL
               f"{_worst_at_opt:.4g} nats away from the value the fit reported "
               f"there - every dNLL above is measured from the wrong place ***")
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # The same figures as the profile (Profile_plot, kind="slice"): one panel per parameter on the optimizer scale, the cut dashed,
+    # the fitted point marked; a full-range figure and one limited to a dNLL of 5.
+    from pyantigen.engine import Profile_plot as PP
+    _prof, _mle, _scales = {}, {}, {}
     for idx, pname in enumerate(param_names):
         cached = cache.get(idx)
         if cached is None:
             continue
-        pv, nr = cached
-        ax.plot(pv / params_estimated[idx], nr,
-                marker=markers[(idx // len(colors)) % len(markers)], linestyle='-',
-                label=pname, linewidth=2, color=colors[idx % len(colors)])
-
-    # The fitted point itself, drawn on top of the curves. It is where the
-    # curves now meet, and on the zoomed figures it is often the only point of a
-    # steep slice still on screen, so it needs to be identifiable as such.
-    _opt_ys = [dnll_at_opt[p] for p in param_names if p in dnll_at_opt]
-    if _opt_ys:
-        ax.plot([1.0] * len(_opt_ys), _opt_ys, linestyle='none', marker='x',
-                color='black', markersize=8, markeredgewidth=1.5, zorder=5,
-                label=f'Optimum (Δ NLL = {max(_opt_ys, key=abs):.3g})')
-
-    ax.axhline(_PROFILE_CI_THRESHOLD, color='gray', linestyle=':', alpha=0.7, linewidth=1.5,
-               label=f'95% CI threshold (Δ NLL = {_PROFILE_CI_THRESHOLD:.2f})')
-    ax.axvline(1.0, color='red', linestyle='--', alpha=0.5, linewidth=1.5, label='Optimal')
-    ax.set_xlabel('Parameter Value (relative to optimal)')
-    ax.set_ylabel('Δ NLL (relative to minimum)')
-    if _worst_at_opt > _SLICE_DNLL_TOL:
-        ax.set_title('Likelihood Slice — WARNING: slice is '
-                     f'{_worst_at_opt:.3g} nats off the fit at the optimum')
-    else:
-        ax.set_title('Likelihood Slice')
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(0.2, 3.5)
-    plt.tight_layout()
+        pv, nr = np.asarray(cached[0], float), np.asarray(cached[1], float)
+        est = float(params_estimated[idx])
+        islog = est > 0 and bool(np.all(pv > 0))
+        tx = np.log10 if islog else (lambda v: v)
+        _prof[pname] = [(float(x), float(y), True) for x, y in zip(tx(pv), nr)]
+        _mle[pname] = float(tx(est))
+        _scales[pname] = "log10" if islog else "lin"
+    _note = (f"WARNING: the slice is {_worst_at_opt:.3g} nats off the fit at the optimum" if _worst_at_opt > _SLICE_DNLL_TOL else None)
     _base = os.path.join(plot_path, f"{model_name}_{tag}_likelihood_slice")
-    out_path = f"{_base}_{ts}.png"
-    plt.savefig(out_path, bbox_inches="tight")
+    out_path, out_path_zoom = PP.figures(_base, f"{model_name} {tag}", [n for n in param_names if n in _prof], _mle, _prof, _scales,
+                                         zoom=5.0, thr=_PROFILE_CI_THRESHOLD, note=_note, suffix=f"_{ts}", kind="slice")
     print(f"Likelihood slice saved to: {out_path}")
-
-    zoom_half = _PROFILE_CI_THRESHOLD * 0.10
-    ax.set_ylim(-zoom_half, zoom_half)
-    ax.set_title(f'Likelihood Slice (y-axis ±10% CI)')
-    out_path_zoom = f"{_base}_zoom_{ts}.png"
-    plt.savefig(out_path_zoom, bbox_inches="tight")
     print(f"Likelihood slice (zoomed) saved to: {out_path_zoom}")
-
-    ax.set_ylim(-_PROFILE_CI_THRESHOLD * 0.10, _PROFILE_CI_THRESHOLD)
-    ax.set_title(f'Likelihood Slice (y-axis -10% to +100% CI)')
-    out_path_zoom2 = f"{_base}_zoom2_{ts}.png"
-    plt.savefig(out_path_zoom2, bbox_inches="tight")
-    print(f"Likelihood slice (zoomed2) saved to: {out_path_zoom2}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------

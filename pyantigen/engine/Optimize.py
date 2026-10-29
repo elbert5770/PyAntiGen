@@ -6179,6 +6179,11 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
         param_names, completed, finished, res_x, meta, bounds, _PROFILE_THRESHOLD, out["anchor"])
     convergence["backend"] = "amici"
     convergence["floors"] = out["floors"]
+    # what Profile_plot draws: every point with its verdict, on the optimizer scale, measured from the profile's own minimum
+    convergence["scales"] = list(scales)
+    convergence["points"] = {n: [[float(r["x_fixed"]), float(r["dnll"]) - anchor, bool(r.get("converged"))]
+                                 for r in pts.values() if r.get("dnll") is not None and np.isfinite(r["dnll"])]
+                             for n, pts in completed.items()}
     sides = PA.side_report(PA.read_sides(store_dir, param_names, mode=mode), param_names, bounds)
     convergence["sides"] = {n: {k: {**v, "needs_wider": {a: list(b) for a, b in v["needs_wider"].items()}, "limit": None
                                     if v["limit"] is None else float(v["limit"])} for k, v in d.items()} for n, d in sides.items()}

@@ -338,18 +338,29 @@ def _bracket(pts, direction, level):
 
 
 def propose(pts, lo, hi, level):
-    """Value at which dnll reaches *level* between points lo and hi: a quadratic through the nearest third point, else linear."""
+    """Value at which dnll reaches *level* between points lo and hi: a quadratic through the nearest third point, else linear.
+
+    The proposal is kept inside the middle of the bracket (10 % to 90 % of it), and a bracket whose far end is far above the level
+    (more than 100 x) is bisected: interpolating towards a dnll of 3e5 puts the point 1e-5 of the way along
+    and each fill round then shrinks the bracket by almost nothing (a flat profile that ends in a cliff did this for 12 h).
+    """
     a, b = pts[lo], pts[hi]
     others = sorted((q for q in pts if q is not a and q is not b), key=lambda q: abs(q.x_fixed - a.x_fixed))[:1]
+    v = None
     if others:
-        v = np.array([others[0].x_fixed, a.x_fixed, b.x_fixed])
+        xs = np.array([others[0].x_fixed, a.x_fixed, b.x_fixed])
         y = np.array([others[0].dnll, a.dnll, b.dnll])
-        if len(set(v)) == 3:
-            roots = [r.real for r in np.roots(np.polyfit(v, y, 2) - np.array([0, 0, level]))
+        if len(set(xs)) == 3:
+            roots = [r.real for r in np.roots(np.polyfit(xs, y, 2) - np.array([0, 0, level]))
                      if abs(r.imag) < 1e-12 and min(a.x_fixed, b.x_fixed) < r.real < max(a.x_fixed, b.x_fixed)]
             if roots:
-                return float(roots[0])
-    return a.x_fixed + (level - a.dnll) * (b.x_fixed - a.x_fixed) / (b.dnll - a.dnll)
+                v = float(roots[0])
+    if v is None:
+        v = a.x_fixed + (level - a.dnll) * (b.x_fixed - a.x_fixed) / (b.dnll - a.dnll)
+    span = b.x_fixed - a.x_fixed
+    far = max(abs(a.dnll - level), abs(b.dnll - level))
+    t = 0.5 if far > 100.0 * abs(level) else min(max((v - a.x_fixed) / span, 0.1), 0.9)
+    return a.x_fixed + t * span
 
 
 def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):
