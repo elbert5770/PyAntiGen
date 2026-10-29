@@ -217,6 +217,18 @@ def test_a_profile_is_not_continued_at_a_different_optimum(tmp_path):
         PA.run(None, NAMES, BOUNDS, SCALES, xs + 0.01, str(tmp_path), mode="collect", log=lambda m: None)
 
 
+def test_the_anchor_error_names_the_fit_methods(tmp_path):
+    p = LinearProvider()
+    xs = _optimum(p)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), log=lambda m: None, fit_method="Nelder-Mead")
+    assert PA.read_meta(str(tmp_path))["fit_method"] == "Nelder-Mead"
+    with pytest.raises(RuntimeError, match="anchored by a Nelder-Mead fit and this one is LM"):
+        PA.check_anchor(str(tmp_path), xs + 0.01, fit_method="LM")
+    with pytest.raises(RuntimeError, match="Both fits are Nelder-Mead"):
+        PA.check_anchor(str(tmp_path), xs + 0.01, fit_method="Nelder-Mead")
+    PA.check_anchor(str(tmp_path), xs + 1e-6, fit_method="LM")           # the same minimum is still the same anchor
+
+
 def test_the_fingerprint_without_the_optimum_does_not_move_with_a_refit():
     from pyantigen.engine.Profile_checkpoint import spec_fingerprint
     args = (["a", "b"], None, {"g": 1}, ["log10", "log10"], "model")

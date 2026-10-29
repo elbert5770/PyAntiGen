@@ -6125,7 +6125,7 @@ def run_protocol_profile(nll_batch_profile, res_x, nll_at_optimum, param_names, 
 
 def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwargs, *, models, replicates, groups,
                              x0_lin, bounds_lin, model_text, paths, run_id, checkpoint_enabled=True, fixed_sigmas=None,
-                             recheck=False, side=None):
+                             recheck=False, side=None, fit_method=None):
     """The profile stage on AMICI (:mod:`pyantigen.engine.Profile_amici`): walk, fill and recheck with the LM solver.
 
     *side* is None for every side in turn, or ``(k, direction)`` for one (a Slurm array task). The files live in the
@@ -6158,7 +6158,7 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
         raise RuntimeError("the AMICI profile keeps its points in files and needs checkpointing on (a plot_path)")
     store_dir = os.path.join(ckpt.dir, "amici")
     print(f"\n[profile] AMICI route, checkpointing to {store_dir}")
-    PA.check_anchor(store_dir, res_x)
+    PA.check_anchor(store_dir, res_x, fit_method=fit_method)
     budget = RunBudget(deadline=resolve_deadline())
     print(f"[profile] {budget.describe()}")
     mode, settings = PA.settings_from_env()
@@ -6170,7 +6170,7 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
                                   scales=scales, x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
     print(f"[profile] mode {mode}" + (f", pins {list(settings.pins)}" if mode == "pins" else ""))
     out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
-                 settings=settings, mode=mode, log=lambda m: print(m, flush=True))
+                 settings=settings, mode=mode, fit_method=fit_method, log=lambda m: print(m, flush=True))
     if mode == "fim":
         print("\n[profile] mode fim: the Fisher information is written; no side was walked, so the report below is empty "
               "and 'INCOMPLETE' only means that.", flush=True)
@@ -8547,7 +8547,7 @@ def run_optimization_from_groups(
                                 x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths,
                                 run_id=run_id or groups_tag, checkpoint_enabled=settings_checkpoint,
                                 fixed_sigmas=fixed_sigmas, recheck=bool(os.environ.get("PYANTIGEN_PROFILE_RECHECK")),
-                                side=_PA.side_from_env(len(param_names))))
+                                side=_PA.side_from_env(len(param_names)), fit_method=method))
                     elif _pool_state["evaluator"] is not None:
                         out["stats"]["profile_likelihood_all"] = (
                             lambda n_grid=5, range_factor=2.0, se_span=4.0,

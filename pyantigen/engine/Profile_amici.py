@@ -82,11 +82,13 @@ def read_meta(store_dir):
     return json.load(open(p)) if os.path.exists(p) else None
 
 
-def check_anchor(store_dir, x, tol=ANCHOR_TOL):
+def check_anchor(store_dir, x, tol=ANCHOR_TOL, fit_method=None):
     """Refuse to continue a profile that was anchored at a different optimum than *x* (optimizer space).
 
     The profile directory is named for the problem, not the optimum, so a refit lands in the same place; every stored
-    dnll is measured from the optimum the first side saw (``meta.json``), and mixing two would be silent.
+    dnll is measured from the optimum the first side saw (``meta.json``), and mixing two would be silent. ``meta.json``
+    names the fit method that found that optimum, so the error says when the two differ (two methods stop at slightly
+    different points of the same minimum) and a refit by the same method is told apart from a different optimum.
     """
     meta = read_meta(store_dir)
     if meta is None:
@@ -95,8 +97,12 @@ def check_anchor(store_dir, x, tol=ANCHOR_TOL):
     xa = np.asarray(x, float)
     if saved.shape != xa.shape or float(np.max(np.abs(saved - xa))) > tol:
         far = "different length" if saved.shape != xa.shape else f"max |dx| {np.max(np.abs(saved - xa)):.3g}"
-        raise RuntimeError(f"{store_dir} holds a profile anchored at a different optimum ({far} > {tol:g}, optimizer space). "
-                           "Move or delete the directory to profile the new optimum from scratch.")
+        was = meta.get("fit_method")
+        who = (f" It was anchored by a {was} fit and this one is {fit_method}: the methods stop at slightly different points "
+               "of the same minimum." if was and fit_method and was != fit_method else
+               f" Both fits are {fit_method}: the optimum itself moved." if was and was == fit_method else "")
+        raise RuntimeError(f"{store_dir} holds a profile anchored at a different optimum ({far} > {tol:g}, optimizer space)."
+                           f"{who} Move or delete the directory to profile the new optimum from scratch.")
 
 
 def record_anchor(store_dir, f0):
@@ -249,7 +255,8 @@ def format_side_report(report):
     return lines
 
 
-def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=False, budget=None, settings=None, log=print, mode="walk"):
+def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=False, budget=None, settings=None, log=print, mode="walk",
+        fit_method=None):
     """Walk, fill and (with *recheck*) recheck the chosen sides. Returns ``{"anchor": f, "floors": stamp, "ran": [...]}``.
 
     *provider* has ``linear_residual_jacobian`` (an ``Analytic_gradient.AmiciGradient``); *bounds* are ``(lo, hi)`` in the
@@ -260,7 +267,7 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         meta = read_meta(store_dir)
         if meta is None or "f" not in meta:
             raise RuntimeError(f"collect: {store_dir} has no anchor yet; no side has started (run the walk first)")
-        check_anchor(store_dir, res_x)
+        check_anchor(store_dir, res_x, fit_method=fit_method)
         return {"anchor": float(meta["f"]), "floors": meta["floors"], "ran": []}
     n = len(names)
     lb = np.array([(-math.inf if b is None or b[0] is None else b[0]) for b in bounds], float)
@@ -268,8 +275,8 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
     xb = np.asarray(res_x, float)
     stamp = use_floors(store_dir, log)
     meta = {"names": list(names), "scales": list(scales), "x": [float(v) for v in xb], "lb": [None if not math.isfinite(v) else float(v) for v in lb],
-            "ub": [None if not math.isfinite(v) else float(v) for v in ub], "floors": stamp}
-    check_anchor(store_dir, xb)
+            "ub": [None if not math.isfinite(v) else float(v) for v in ub], "floors": stamp, "fit_method": fit_method}
+    check_anchor(store_dir, xb, fit_method=fit_method)
     mp = os.path.join(store_dir, "meta.json")
     if not os.path.exists(mp):                      # what Profile_plot reads to draw this folder
         tmp = f"{mp}.{os.getpid()}.tmp"
