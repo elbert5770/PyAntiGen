@@ -7916,6 +7916,24 @@ def run_optimization_from_groups(
                                    "analytic_gradient block) and PYANTIGEN_SIGMA_FLOOR=fixed")
             from pyantigen.engine.Deadline import resolve_deadline
             from pyantigen.engine.Fit_lm import lm_fit
+            from pyantigen.engine import Multistart_amici as _MA
+            _ms_task = _MA.task_from_env(getattr(optimization_spec, "n_starts", 1) or 1)
+            if _ms_task is not None:
+                # One start of a multi-start (or the collect of them) and nothing else: the fit cache is not touched.
+                import sys
+                _ms_dir = _MA.start_dir(fit_cache)
+                _ms_n = int(getattr(optimization_spec, "n_starts", 1) or 1)
+                if _ms_task == "collect":
+                    _MA.collect(_ms_dir, param_names, _ms_n)
+                else:
+                    _ms_pts = _multistart_points(x0, bounds, scales, _ms_n,
+                                                 search_decades=getattr(optimization_spec, "search_decades", None),
+                                                 seed=getattr(optimization_spec, "start_seed", None), verbose=False,
+                                                 sampler=getattr(optimization_spec, "start_sampler", "lhs"))
+                    _MA.run_task(_ms_task, _ms_pts, _analytic, bounds, scales, _ms_dir,
+                                 options=(opt_kw or {}).get("options"), deadline=resolve_deadline(),
+                                 log=lambda m: print(m, flush=True))
+                sys.exit(0)
             partial = fit_cache.load_partial() if fit_cache is not None else None
             x_start = x0
             if partial is not None:
