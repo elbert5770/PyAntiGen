@@ -102,11 +102,8 @@ def collect(directory, param_names, n_starts, cluster_radius=0.15, report_dnll=1
 
     recs = [_read(directory, i) for i in range(int(n_starts))]
     todo = [i for i, r in enumerate(recs) if r is None or not r.get("converged")]
-    os.makedirs(directory, exist_ok=True)
-    tmp = os.path.join(directory, f"unfinished.txt.{os.getpid()}.tmp")
-    with open(tmp, "w") as fh:
-        fh.write(",".join(map(str, todo)) + "\n" if todo else "")
-    os.replace(tmp, os.path.join(directory, "unfinished.txt"))
+    from pyantigen.engine import Unfinished
+    Unfinished.write(directory, todo)
     done = [r for r in recs if r is not None and r.get("converged") and math.isfinite(r["f"])]
     if todo:
         log(f"[multistart] {len(todo)} of {n_starts} start(s) not converged or missing; relaunch with "

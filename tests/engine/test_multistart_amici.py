@@ -100,3 +100,12 @@ def test_best_json_is_what_registry_update_reads(tmp_path):
     spec.loader.exec_module(mod)
     params, info = mod.read_fit(os.path.join(d, "best.json"))
     assert params == {"a": pytest.approx(1.0, abs=1e-4), "b": pytest.approx(-2.0, abs=1e-4)} and info["success"]
+
+
+def test_unfinished_list_is_also_written_where_the_submitter_asks(tmp_path, monkeypatch):
+    mirror = tmp_path / "state" / "ms.txt"
+    monkeypatch.setenv("PYANTIGEN_UNFINISHED_FILE", str(mirror))
+    d = str(tmp_path / "ms")
+    MA.run_task(0, POINTS, Bowl(), BOUNDS, SCALES, d, log=lambda m: None)
+    MA.collect(d, NAMES, 3, log=lambda m: None)
+    assert mirror.read_text() == "1,2\n" and open(os.path.join(d, "unfinished.txt")).read() == "1,2\n"

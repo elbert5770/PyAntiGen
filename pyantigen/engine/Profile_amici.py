@@ -73,10 +73,8 @@ def unfinished_tasks(finished, n_params):
 
 def write_unfinished(store_dir, tasks):
     """``unfinished.txt``: the tasks still to run as a comma list, ready for ``sbatch --array=``; empty when none are."""
-    tmp = os.path.join(store_dir, f"unfinished.txt.{os.getpid()}.tmp")
-    with open(tmp, "w") as fh:
-        fh.write(",".join(str(t) for t in sorted(tasks)) + "\n" if tasks else "")
-    os.replace(tmp, os.path.join(store_dir, "unfinished.txt"))
+    from pyantigen.engine import Unfinished
+    Unfinished.write(store_dir, tasks)
 
 
 def read_meta(store_dir):
