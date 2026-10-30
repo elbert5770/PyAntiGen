@@ -7813,21 +7813,26 @@ def run_optimization_from_groups(
         # The gradient from AMICI's forward sensitivities, when the spec asks for it
         # (optimizer_kwargs["analytic_gradient"]) and a fit is going to run. Built here, up front,
         # so that a problem it cannot handle stops the run before any fit rather than inside one.
-        _analytic = None
         from pyantigen.engine import Multistart_amici as _MS_STAGE
-        if (fit_mode != "evaluate_x0"
-                and (fit_cache is None or fit_cache.load_complete() is None or _MS_STAGE.requested())):
+
+        def _build_analytic():
             from pyantigen.engine.Analytic_gradient import build_gradient
             from pyantigen.engine.Multistart import GRADIENT_METHODS
             _ms_method, _ = _resolve_multistart_stage(method, optimizer_kwargs)
             if (str(method).lower() in GRADIENT_METHODS or str(_ms_method or "").lower() in GRADIENT_METHODS
                     or is_lm(method)):
-                _analytic = build_gradient(
+                return build_gradient(
                     optimizer_kwargs, models=models, replicates=active_replicates,
                     groups=optimization_spec.groups, param_names=param_names, scales=scales,
                     x0_lin=x0_lin, bounds_lin=bounds_lin, model_text=model_text, paths=paths)
-            elif (optimizer_kwargs or {}).get("analytic_gradient"):
+            if (optimizer_kwargs or {}).get("analytic_gradient"):
                 print(f"[opt] analytic_gradient ignored: {method} does not use a gradient.")
+            return None
+
+        _analytic = None
+        if (fit_mode != "evaluate_x0"
+                and (fit_cache is None or fit_cache.load_complete() is None or _MS_STAGE.requested())):
+            _analytic = _build_analytic()
         start_records = None
         multistart_report = None
         # Where the optimum came from when it was not fitted here: the path of
@@ -7873,6 +7878,9 @@ def run_optimization_from_groups(
                       f"re-evaluates as {fun_now:.6g} against the stored "
                       f"{fun_then}; something outside the fingerprint has "
                       f"changed, so the fit runs afresh.")
+                if _analytic is None:
+                    # The gradient is only built up front when no fit is cached; a cached fit that no longer holds means a fit runs.
+                    _analytic = _build_analytic()
         if res is not None:
             pass  # settled above: x0 evaluated, or a cached fit reused
         elif method.lower() == "differential_evolution":
