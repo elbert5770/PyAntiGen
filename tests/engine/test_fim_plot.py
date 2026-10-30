@@ -17,16 +17,17 @@ def _quad(mle, curv, xs):
 def test_a_crossed_side_is_interpolated_at_the_cut_and_an_open_side_ends_at_its_last_point():
     pts = _quad(1.0, 2.0, [0.0, 0.5, 1.5, 2.0, 3.0])                # dnll = (x - 1)^2
     ext = FP.profile_extent(pts, 1.0, thr=1.9207)
-    assert ext["high"][1] is False and abs(ext["high"][0] - (2.0 + (1.9207 - 1.0) / (4.0 - 1.0))) < 1e-9     # between 2.0 and 3.0
-    assert ext["low"] == (0.0, True)                                  # 0.0 is at dnll 1.0: never over the cut
+    assert ext["high"][1] == "closed" and abs(ext["high"][0] - (2.0 + (1.9207 - 1.0) / (4.0 - 1.0))) < 1e-9     # between 2.0 and 3.0
+    assert ext["low"] == (0.0, "open")                                # 0.0 is at dnll 1.0: never over the cut
     short = [q for q in pts if q[0] <= 1.5]
-    assert FP.profile_extent(short, 1.0)["high"] == (1.5, True)
+    assert FP.profile_extent(short, 1.0)["high"] == (1.5, "open")
 
 
-def test_unconverged_points_do_not_count_and_a_side_with_none_is_open_with_no_extent():
-    pts = [(1.5, 0.3, True), (2.0, 5.0, False)]                  # the point over the cut did not converge: it is only an upper bound
+def test_a_crossing_set_by_an_unconverged_point_is_a_bound_and_a_side_without_points_is_open_with_no_extent():
+    pts = [(1.5, 0.3, True), (2.0, 5.0, False)]                  # over the cut but not converged: dnll is only an upper bound
     ext = FP.profile_extent(pts, 1.0)
-    assert ext["high"] == (1.5, True) and ext["low"] == (None, True)
+    assert ext["high"][1] == "bound" and abs(ext["high"][0] - (1.5 + (1.9207 - 0.3) / (5.0 - 0.3) * 0.5)) < 1e-9
+    assert ext["low"] == (None, "open")
 
 
 def test_cluster_order_is_a_permutation_that_keeps_correlated_parameters_together():

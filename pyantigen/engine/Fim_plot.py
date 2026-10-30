@@ -11,6 +11,7 @@ Three panels, one parameter order (clustered by correlation, so the strongly cou
     C  weakest directions      the eigenvectors of the smallest eigenvalues (rows, weakest first) as loadings on the parameters, so
                                the combination the data barely determine is read off directly. Its columns are panel B's.
 
+A hollow marker is a crossing set by a point that did not converge (the interval is at least that wide).
 A parameter's Wald interval is ``x +- sqrt(2 * thr) * se`` in the optimizer space (decades for a log10 parameter), so it is symmetric
 there; ``thr`` is the profile cut (chi-square(1)/2, 1.9207), which makes the two intervals the same statistic.
 Panel A divides by that half-width because the intervals of one problem span several orders of magnitude: on a common axis in decades
@@ -37,15 +38,16 @@ INK, INK2, MUTED, GRID, AXIS = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c
 
 
 def profile_extent(pts, mle, thr=THRESHOLD):
-    """``{"low": (x, open), "high": (x, open)}``: where the profile reaches the cut on each side of *mle*, linearly interpolated.
+    """``{"low": (x, state), "high": (x, state)}``: where the profile reaches the cut on each side of *mle*, linearly interpolated.
 
-    *pts* is ``[(x, dnll, converged), ...]`` on the optimizer scale. Only converged points count (an unconverged dnll is an upper
-    bound on the profile). A side with a point over the cut gives its interpolated crossing and ``open`` False; a side that never
-    gets over it gives its outermost converged point and ``open`` True; a side with no converged point gives ``(None, True)``.
+    *pts* is ``[(x, dnll, converged), ...]`` on the optimizer scale. *state* is ``"closed"`` when the first point over the cut
+    converged (the crossing is bracketed), ``"bound"`` when it did not (its dnll is an upper bound on the profile, so the true
+    crossing is at least this far out: the interval is at least this wide), and ``"open"`` when no point is over the cut (*x* is the
+    outermost point, or None for a side without points).
     """
     out = {}
     for side, sel, rev in (("low", lambda x: x < mle, True), ("high", lambda x: x > mle, False)):
-        S = sorted([q for q in pts if sel(q[0]) and q[2]], key=lambda q: q[0], reverse=rev)
+        S = sorted([q for q in pts if sel(q[0])], key=lambda q: q[0], reverse=rev)
         prev, hit = (mle, 0.0), None
         for q in S:
             if q[1] > thr:
@@ -54,9 +56,9 @@ def profile_extent(pts, mle, thr=THRESHOLD):
             prev = (q[0], q[1])
         if hit is not None:
             t = (thr - prev[1]) / (hit[1] - prev[1]) if hit[1] != prev[1] else 1.0
-            out[side] = (prev[0] + t * (hit[0] - prev[0]), False)
+            out[side] = (prev[0] + t * (hit[0] - prev[0]), "closed" if hit[2] else "bound")
         else:
-            out[side] = (prev[0] if S else None, True)
+            out[side] = (prev[0] if S else None, "open")
     return out
 
 
@@ -117,22 +119,22 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
     w = np.linalg.eigvalsh(0.5 * (F + F.T))
     cond = w[-1] / w[0] if w[0] > 0 else math.inf
 
-    rows = []                                             # per parameter, in plot order: (Wald half-width, {side: (units, open)} | None)
+    rows = []                                             # per parameter, in plot order: (Wald half-width, {side: (units, state)} | None)
     for j in order:
         hw = max(half * se[j], 1e-12)
         pe = None
         if prof is not None and prof.get(names[j]):
             ext = profile_extent(prof[names[j]], x[j], thr)
-            pe = {sd: (None if v is None else (v - x[j]) / hw, op) for sd, (v, op) in ext.items()}
+            pe = {sd: (None if v is None else (v - x[j]) / hw, state) for sd, (v, state) in ext.items()}
         rows.append((hw, pe))
-    seen = [abs(v) for _, pe in rows if pe for v, _op in pe.values() if v is not None and math.isfinite(v)]
+    seen = [abs(v) for _, pe in rows if pe for v, _st in pe.values() if v is not None and math.isfinite(v)]
     lim = min(6.0, max(2.5, math.ceil(1.15 * max(seen, default=2.5))))
 
     plt.rcParams.update({"font.family": "sans-serif", "axes.edgecolor": AXIS, "axes.labelcolor": INK2, "xtick.color": INK2,
                          "ytick.color": INK2, "text.color": INK})
-    height = max(5.2, 0.33 * n + 2.6)
+    height = max(4.6, 0.33 * n + 2.8)
     fig = plt.figure(figsize=(16.5 if n > 6 else 12.5, height), facecolor=SURFACE)
-    gs = fig.add_gridspec(2, 2, width_ratios=[0.95, 1.1], height_ratios=[max(n, 4), max(k, 1) + 1.6], wspace=0.5, hspace=0.12)
+    gs = fig.add_gridspec(2, 2, width_ratios=[0.95, 1.1], height_ratios=[max(n, 4), max(k, 1) + 1.6], wspace=0.5, hspace=0.12, top=0.84, bottom=0.14)
     axA = fig.add_subplot(gs[:, 0], facecolor=SURFACE)
     axB = fig.add_subplot(gs[0, 1], facecolor=SURFACE)
     axC = fig.add_subplot(gs[1, 1], facecolor=SURFACE, sharex=axB)
@@ -143,16 +145,19 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
         if pe:
             ends = []
             for side in ("low", "high"):
-                v, op = pe[side]
+                v, state = pe[side]
+                clipped = v is not None and abs(v) > lim
                 v = 0.0 if v is None else float(np.clip(v, -lim, lim))
-                clipped = pe[side][0] is not None and abs(pe[side][0]) > lim
-                ends.append((v, op or clipped, -1 if side == "low" else 1))
+                ends.append((v, "open" if clipped else state, -1 if side == "low" else 1))
             axA.plot([ends[0][0], ends[1][0]], [i, i], color=BLUE, lw=2.4, solid_capstyle="round", zorder=2)
-            for v, op, sg in ends:
+            for v, state, sg in ends:
                 if pe["low" if sg < 0 else "high"][0] is None:
                     continue
-                axA.plot([v], [i], "<" if (op and sg < 0) else ">" if op else "o", color=BLUE, ms=7.5 if op else 6, mec=SURFACE, mew=1.2,
-                         zorder=3)
+                if state == "open":
+                    axA.plot([v], [i], "<" if sg < 0 else ">", color=BLUE, ms=7.5, mec=SURFACE, mew=1.2, zorder=3)
+                else:
+                    axA.plot([v], [i], "o", mfc=BLUE if state == "closed" else SURFACE, mec=BLUE, ms=6 if state == "closed" else 6.5,
+                             mew=1.2 if state == "closed" else 1.8, zorder=3)
         unit = " dec" if scales[order[i]] == "log10" else ""
         axA.text(1.012, i, f"\u00b1{rows[i][0]:.2g}{unit}", transform=axA.get_yaxis_transform(), va="center", ha="left",
                  fontsize=8, color=MUTED)
@@ -168,12 +173,13 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
         axA.spines[sp].set_visible(False)
     axA.tick_params(axis="y", length=0)
     handles = [Line2D([0], [0], color=BLUE, lw=2.4, marker="o", ms=6, label="profile 95 %"),
+               Line2D([0], [0], color="none", marker="o", mfc=SURFACE, mec=BLUE, mew=1.8, ms=6.5, label="set by an unconverged point"),
                Line2D([0], [0], color="none", marker=">", mfc=BLUE, mec=BLUE, ms=7.5, label="open: no crossing"),
                Patch(facecolor=GRID, edgecolor="none", label="Wald 95 % (FIM)")]
     if prof is None:
-        handles = handles[2:]
-    axA.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=3, frameon=False, fontsize=9, handlelength=1.8)
-    axA.set_title("A  Profile interval against the quadratic (Wald) interval", loc="left", fontsize=11, pad=26, color=INK)
+        handles = handles[3:]
+    axA.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=2, frameon=False, fontsize=8.5, handlelength=1.8)
+    axA.set_title("A  Profile interval against the quadratic (Wald) interval", loc="left", fontsize=11, pad=44, color=INK)
 
     # B: correlation
     cm = _cmap()
@@ -217,7 +223,7 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
     cb.ax.tick_params(labelsize=8, length=0)
 
     cond_txt = "singular" if not math.isfinite(cond) else f"{cond:.3g}"
-    fig.suptitle(f"{title}   |   {n} parameters, condition number {cond_txt}", x=0.01, ha="left", fontsize=12.5, color=INK, y=0.995)
+    fig.suptitle(f"{title}   |   {n} parameters, condition number {cond_txt}", x=0.01, ha="left", fontsize=12.5, color=INK, y=0.985)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     fig.savefig(path, dpi=dpi, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
