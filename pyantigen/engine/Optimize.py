@@ -7814,8 +7814,9 @@ def run_optimization_from_groups(
         # (optimizer_kwargs["analytic_gradient"]) and a fit is going to run. Built here, up front,
         # so that a problem it cannot handle stops the run before any fit rather than inside one.
         _analytic = None
+        from pyantigen.engine import Multistart_amici as _MS_STAGE
         if (fit_mode != "evaluate_x0"
-                and (fit_cache is None or fit_cache.load_complete() is None)):
+                and (fit_cache is None or fit_cache.load_complete() is None or _MS_STAGE.requested())):
             from pyantigen.engine.Analytic_gradient import build_gradient
             from pyantigen.engine.Multistart import GRADIENT_METHODS
             _ms_method, _ = _resolve_multistart_stage(method, optimizer_kwargs)
@@ -7833,7 +7834,6 @@ def run_optimization_from_groups(
         # the cached fit. None means the optimizer ran in this process.
         fit_source = None
         res = None
-        from pyantigen.engine import Multistart_amici as _MS_STAGE
         if fit_mode == "evaluate_x0":
             from scipy.optimize import OptimizeResult
             print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
