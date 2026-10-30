@@ -13,8 +13,8 @@ module makes that calibration a file you can name:
   one parameter vector, so after a fit moves far from x0 they can be recalibrated at the optimum and the
   fit repeated; ``compare`` is the test of whether that mattered (:func:`stable`).
 
-The file is a pickle of ``Noise_floor.export_cache()``, the format ``tools/pypesto_make_floors.py`` already
-writes, so existing floors files and their hashes are unchanged. Load only files you wrote.
+The file is a pickle of ``Noise_floor.export_cache()``, so floors files written earlier and their hashes are unchanged.
+Load only files you wrote.
 """
 import hashlib
 import math

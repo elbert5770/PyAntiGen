@@ -66,7 +66,7 @@ def test_collect_lists_unfinished_starts_and_picks_the_lowest_converged(tmp_path
     assert rep["verdict"] == "multimodal"
     best = json.load(open(os.path.join(d, "best.json")))["complete"]
     assert best["parameters"]["a"] == pytest.approx(-2.0, abs=1e-3) and best["fun"] == pytest.approx(0.0, abs=1e-5)
-    assert any("registry_update.py" in m for m in lines)
+    assert any("best.json" in m for m in lines)
 
 
 def test_collect_says_start_0_stands_when_nothing_beats_it(tmp_path):
@@ -83,23 +83,6 @@ def test_collect_says_start_0_stands_when_nothing_beats_it(tmp_path):
 def test_collect_with_nothing_run_reports_that(tmp_path):
     rep = MA.collect(str(tmp_path), NAMES, 2, log=lambda m: None)
     assert rep["best"] is None and rep["unfinished"] == [0, 1]
-
-
-def test_best_json_is_what_registry_update_reads(tmp_path):
-    import importlib.util
-    d = str(tmp_path)
-    MA.run_task(0, POINTS, Bowl(), BOUNDS, SCALES, d, log=lambda m: None)
-    MA.collect(d, NAMES, 1, log=lambda m: None)
-    here = os.path.dirname(os.path.abspath(__file__))
-    tool = os.path.normpath(os.path.join(here, "..", "..", "..", "Elbert_Esguerra_20260923", "Projects",
-                                          "Elbert_Esguerra_20260923", "tools", "registry_update.py"))
-    if not os.path.exists(tool):
-        pytest.skip("registry_update.py is a project tool, not in this checkout")
-    spec = importlib.util.spec_from_file_location("registry_update", tool)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    params, info = mod.read_fit(os.path.join(d, "best.json"))
-    assert params == {"a": pytest.approx(1.0, abs=1e-4), "b": pytest.approx(-2.0, abs=1e-4)} and info["success"]
 
 
 def test_unfinished_list_is_also_written_where_the_submitter_asks(tmp_path, monkeypatch):

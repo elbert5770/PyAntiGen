@@ -11,8 +11,7 @@ parameters is <= ``pg_tol``, or when the Newton decrement (what a full Gauss-New
 ``newton_tol`` with the projected gradient under ``pg_loose``. Anything else is ``not_converged``, an upper bound on the
 profile there, with the reason.
 
-This is the stepping core of ``tools/pypesto_silk_appfull_lm.py`` / ``_profile.py`` moved into the engine, with the
-problem (AMICI, a test function) behind one callable, ``evaluate(x) -> (f, r, J) | None``, where ``J`` is the Jacobian of
+The problem (AMICI, a test function) sits behind one callable, ``evaluate(x) -> (f, r, J) | None``, where ``J`` is the Jacobian of
 the residuals with respect to the optimizer-space parameters.
 """
 import math

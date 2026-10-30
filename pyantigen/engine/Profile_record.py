@@ -6,7 +6,7 @@ it today and they write different files:
 * RoadRunner (``Optimize`` / ``Evaluator._profile_task``): Nelder-Mead, one JSONL per parameter under
   ``results/<MODEL>/profiles/<run>/``, keys ``x_fixed``, ``nll``, ``dnll``, ``nuisance_x``, ``converged``,
   ``interrupted``, ``status``.
-* AMICI (``tools/pypesto_silk_appfull_profile.py`` and the pins runs): Levenberg-Marquardt on the residual
+* AMICI (the LM walk and the pins runs): Levenberg-Marquardt on the residual
   Jacobian, ``profile_<k>_<up|down>.jsonl`` (``val``, ``f``, ``df``, ``x``, ``verdict``, ``pg``, ``evals``)
   and ``start_<id>.json`` for a pinned point (``x``, ``fval``, ``verdict``, ``pg_inf``,
   ``evaluations_total``).

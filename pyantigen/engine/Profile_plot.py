@@ -1,6 +1,6 @@
 """Profile-likelihood figures: one panel per parameter, drawn the same way for every route.
 
-This is the standard of the project's ``tools/profile_plot_pypesto.py`` moved into the engine. Two figures with identical data:
+Two figures with identical data:
 
     <prefix>_full.png   each panel's y-axis spans every point, whatever its dNLL
     <prefix>_zoom.png   y-limit ``zoom`` (default 5), the whole series still drawn, so a curve that leaves the frame is cut by the

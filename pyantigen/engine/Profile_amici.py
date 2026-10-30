@@ -1,13 +1,19 @@
-"""The profile stage on AMICI: the walk / fill / recheck protocol with the Levenberg-Marquardt solver.
+"""The profile stage on AMICI: the walk / fill / densify protocol with the Levenberg-Marquardt solver.
 
 One *side* is a parameter and a direction. A side is the unit of work and of resumption, so the stage runs either way:
 
 * ``side=None``  every side in turn, in this process (the default; right when there is one job slot);
 * ``side=task``  one side, ``task = 2*k + (0 for up | 1 for down)``, so a Slurm array of ``2k`` tasks profiles in parallel.
-  ``PYANTIGEN_PROFILE_SIDE`` carries the task id into ``Model_run.py`` (``--profile-side``).
+  ``PYANTIGEN_PROFILE_SIDE`` carries the task id into the run (:func:`side_from_env`).
 
-Each side writes ``profile_<k>_<dir>.jsonl`` (and ``fill_``, ``recheck_``) into *store_dir* and a ``.done`` file when a pass
-finishes, so a killed or timed-out task is relaunched with the same command and continues. The floors the points were scored
+``PYANTIGEN_PROFILE_MODE`` picks what a run does: ``walk`` (the default), ``pins`` (a fixed grid), ``fim`` (only the Fisher
+information at the optimum) or ``collect`` (evaluate nothing: assemble the report from what the sides left, and list the
+unfinished ones in ``unfinished.txt``). ``PYANTIGEN_PROFILE_BACKFILL=n`` adds the optional last pass.
+
+Each side writes ``profile_<k>_<dir>.jsonl`` and, as its passes run, ``fill_``, ``dense_``, ``confirm_``, ``recheck_`` and
+``backfill_`` files into *store_dir*, a ``.done`` file when a pass finishes, and ``bounds_<k>_<dir>.json`` once it has widened
+a nuisance bound, so a killed or timed-out task is relaunched with the same command and continues. ``meta.json`` holds the
+optimum the profile is anchored at; a refit that moves it is refused (:func:`check_anchor`). The floors the points were scored
 under are written once to ``floors.pkl`` in *store_dir*; every task loads that file, so all sides see one objective and every
 record carries the file's stamp. Run again with ``side=None`` after an array: finished sides are skipped, and the traces,
 the convergence report and the verdicts are assembled from every side's files.

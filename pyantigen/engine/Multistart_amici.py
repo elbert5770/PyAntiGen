@@ -10,8 +10,8 @@ Slurm array the way the profile sides are. The spec says what the starts are (``
 * ``<i>``       fit from start ``i`` and write ``start_<i>.json``. A relaunch skips a converged start and continues an
                 unconverged one from where it stopped, so a killed or timed-out task is run again with the same command;
 * ``collect``   fit nothing: read every start, say which are missing or unconverged (``unfinished.txt``, the task ids for
-                ``sbatch --array=``), report the basins, and write ``best.json`` in the shape ``tools/registry_update.py``
-                reads, so the winner reaches the registry by the same command as any other fit.
+                ``sbatch --array=``), report the basins, and write ``best.json`` in the shape of a saved fit
+                (``{"complete": {"parameters", "fun", ...}}``), so the winner is read like any other fit.
 
 The files live in ``<plot_path>/multistart/<fit id>/``, named for the fit problem like the fit cache, and the fit cache
 itself is never written: a start that is not x0 must not become the cached fit of the problem.
@@ -133,7 +133,7 @@ def collect(directory, param_names, n_starts, cluster_radius=0.15, report_dnll=1
         log("[multistart] start 0 (the spec's x0) has not converged, so the winner cannot be compared with it")
     elif better:
         log(f"[multistart] start {best['start']} beats start 0 by {gain:.4g}: a better optimum than the registry's. "
-            f"Promote it with: python tools/registry_update.py {os.path.join(directory, 'best.json')} --apply")
+            f"Its parameters are in {os.path.join(directory, 'best.json')}: promote them into the spec's x0 or your registry.")
     else:
         log("[multistart] start 0 stands: no start found a lower optimum.")
     fit = {"complete": {"parameters": dict(zip(param_names, best["x_lin"])), "fun": best["f"], "saved": best["saved"],

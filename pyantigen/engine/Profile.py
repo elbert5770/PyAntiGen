@@ -1,22 +1,31 @@
 """The profile-likelihood stepping protocol, independent of the solver that produces each point.
 
-Ported from the AMICI route (``tools/pypesto_silk_appfull_{profile,fill,recheck}.py``), which replaces the tiered
-``Profile_plan`` / ``Stop_rules`` protocol. Everything here talks to a :class:`~Profile_record.NuisanceSolver` and
-reads and writes :class:`~Profile_record.PointRecord`, so the same protocol runs on the LM/AMICI solver
-(:mod:`Profile_lm`) or on the RoadRunner Nelder-Mead worker (``RoadRunnerSolver``).
+It replaces the tiered ``Profile_plan`` / ``Stop_rules`` protocol. Everything here talks to a
+:class:`~Profile_record.NuisanceSolver` and reads and writes :class:`~Profile_record.PointRecord`, so the same protocol runs
+on the LM/AMICI solver (:mod:`Profile_lm`) or on the RoadRunner Nelder-Mead worker (``RoadRunnerSolver``).
 
-Three passes, each resumable from its JSONL file:
+Passes, each resumable from its JSONL file and run in this order for one side (a parameter and a direction):
 
 * :func:`walk` leaves the optimum in one direction. The step follows the profile's own curvature: from the last point
   (``dnll`` at distance ``d``) it assumes ``dnll = c d^2`` and takes the step that raises ``dnll`` by ``df_step``, capped by
   ``h_max`` and by three times the previous step. The nuisance parameters start from a linear predictor through the last
-  two points. It stops once ``dnll > df_stop`` (the crossing is bracketed), when the profiled parameter has left its
-  declared box by ``extend`` decades, or when a point cannot be evaluated.
+  two points. A nuisance on a bound is widened (``widen`` decades at a time, kept per side) and the point re-solved. The
+  walk stops once ``dnll > df_stop`` (``level + stop_margin``, so the crossing is bracketed), when the profiled parameter
+  has travelled ``max_decades`` from the optimum without a crossing (the side is open), or when a point cannot be
+  evaluated. The profiled parameter is not held to the declared box. A last point over the stop level is first re-fitted
+  from a start half-way back (:func:`_confirm_end`): a big hop can land in a worse minimum of the nuisance parameters, and
+  if the re-fit is lower the walk goes on.
 * :func:`fill` inserts points where the profile crosses ``level``: a quadratic through the nearest points proposes the
   value, the point is fitted from both bracketing points' nuisance vectors (strict convergence), the lower is kept, and
   the bracket shrinks until ``|dnll - level| <= tol``.
-* :func:`recheck` refits each point from its neighbours' vectors, forward then backward, keeping the lowest. A first pass
-  warm-started into the wrong valley shows up as a decrease.
+* :func:`densify` bisects the gaps between the optimum and the crossing that are wider than ``max_gap`` (in the parameter)
+  or ``max_dgap`` (in dnll).
+* :func:`recheck` (optional) refits each point from its neighbours' vectors, forward then backward, keeping the lowest. A
+  first pass warm-started into the wrong valley shows up as a decrease.
+* :func:`backfill` (optional, ``backfill_points`` > 0) adds warm-started points in the widest gaps until the side has that
+  many converged points between the optimum and the crossing (or where the walk gave up).
+
+:func:`pins` and :func:`relax` are the older grid route: a fixed list of values, with nuisance bounds widened afterwards.
 
 Every record carries its verdict, its ``lower`` flag (better than the "optimum": the optimum was not global) and, from
 the solver, ``bound_active`` (see :func:`Profile_record.flag_bounds`); :func:`Profile_record.side_verdicts` turns the
