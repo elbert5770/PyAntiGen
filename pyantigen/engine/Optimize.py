@@ -33,7 +33,29 @@ _progress_overlay_state = {
     "nrows":       None,
     "last_render": 0.0,
     "timestamp":   None,
+    "enabled":     True,
 }
+
+
+def _progress_stem(model_name=None, experiment_id=None):
+    """``<model>_<tag>_optimization_progress``: the progress files are named like the profile plots, ``<model>_<tag>_profile_likelihood_*``."""
+    return "_".join(t for t in (model_name, experiment_id, "optimization_progress") if t)
+
+
+class _overlay_suspended:
+    """No progress figure or JSON inside the block.
+
+    For a point that is evaluated but is not part of a fit: the cached optimum re-evaluated before a profile, FIM or multi-start task
+    reuses it, or x0 evaluated for a run that does not fit. Every task would otherwise write its own figure of "evaluation 1".
+    """
+
+    def __enter__(self):
+        self._was = _progress_overlay_state["enabled"]
+        _progress_overlay_state["enabled"] = False
+
+    def __exit__(self, *exc):
+        _progress_overlay_state["enabled"] = self._was
+        return False
 
 
 def _block_title_stats(tr, blocks):
@@ -86,9 +108,10 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
     and MFL42 at 0.07 while the centiloid block, at n=501, was the one
     pinning the fit.
     """
-    if not trace_collector or not plot_path:
+    if not trace_collector or not plot_path or not _progress_overlay_state["enabled"]:
         return
 
+    stem = _progress_stem(model_name, experiment_id)
     now = time.time()
     is_improved = (best_loss is not None) and (total_loss <= best_loss)
     if not is_improved and (now - _progress_overlay_state["last_render"]) < min_interval_s:
@@ -130,7 +153,7 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
             "parameters": parameters_dict
         }
         
-        json_out = os.path.join(plot_path, f"optimization_progress_{opt_timestamp}.json")
+        json_out = os.path.join(plot_path, f"{stem}_{opt_timestamp}.json")
         try:
             with open(json_out, "w", encoding="utf-8") as f:
                 json.dump(progress_json, f, indent=2)
@@ -223,7 +246,7 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
         fontsize=11,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    out = os.path.join(plot_path, f"optimization_progress_{opt_timestamp}.png")
+    out = os.path.join(plot_path, f"{stem}_{opt_timestamp}.png")
     fig.savefig(out, dpi=100, bbox_inches="tight")
     _progress_overlay_state["last_render"] = now
 
@@ -6171,6 +6194,10 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     print(f"[profile] mode {mode}" + (f", pins {list(settings.pins)}" if mode == "pins" else ""))
     out = PA.run(provider, param_names, bounds, scales, res_x, store_dir, side=side, recheck=recheck, budget=budget,
                  settings=settings, mode=mode, fit_method=fit_method, log=lambda m: print(m, flush=True))
+    if mode in ("fim", "collect") and paths.get("plot_path"):
+        from pyantigen.engine import Fim_plot
+        Fim_plot.save_for_stage(store_dir, paths["plot_path"], paths.get("MODEL_NAME", ""), run_id,
+                                log=lambda m: print(m, flush=True))
     if mode == "fim":
         print("\n[profile] mode fim: the Fisher information is written; no side was walked, so the report below is empty "
               "and 'INCOMPLETE' only means that.", flush=True)
@@ -7217,7 +7244,9 @@ def run_optimization(
         print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
               "so diagnostics run against the supplied parameters.")
         x0_arr = np.array(x0)
-        res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
+        with _overlay_suspended():
+            _f_x0 = objective(x0_arr)
+        res = OptimizeResult(x=x0_arr, fun=_f_x0, success=True,
                              message="Optimization bypassed (fit_mode=evaluate_x0)",
                              nit=0, nfev=1)
     elif method.lower() in _GLOBAL_METHODS:
@@ -7844,7 +7873,9 @@ def run_optimization_from_groups(
             print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
                   "so diagnostics run against the supplied parameters.")
             x0_arr = np.array(x0)
-            res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
+            with _overlay_suspended():
+                _f_x0 = objective(x0_arr)
+            res = OptimizeResult(x=x0_arr, fun=_f_x0, success=True,
                                  message="Optimization bypassed (fit_mode=evaluate_x0)",
                                  nit=0, nfev=1)
         elif (fit_cache is not None and fit_cache.load_complete() is not None
@@ -7858,7 +7889,8 @@ def run_optimization_from_groups(
             from scipy.optimize import OptimizeResult
             cached = fit_cache.load_complete()
             x_cached = _to_opt_space(cached["x_lin"], scales)
-            fun_now = objective(np.array(x_cached))
+            with _overlay_suspended():
+                fun_now = objective(np.array(x_cached))
             fun_then = cached.get("fun")
             drift = (abs(fun_now - fun_then)
                      if fun_then is not None and np.isfinite(fun_now) else float("inf"))

@@ -230,6 +230,35 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
     return path
 
 
+def save_for_stage(store_dir, plot_path, model_name, tag, log=print):
+    """Write the figure for a profile folder into the results directory, named like the profile plots:
+    ``<plot_path>/<model_name>_<tag>_fim_<timestamp>.png``. Returns the path, or None (with a message) when it cannot be drawn.
+
+    Called by the stage at its FIM and collect steps; the points of the profile are drawn when there are any. A failure here is
+    reported and never stops the stage: the figure is a view of results that are already written.
+    """
+    from datetime import datetime
+
+    from pyantigen.engine import Profile_plot as PP
+    try:
+        fim = os.path.join(store_dir, "fim", "fim.npz")
+        if not os.path.exists(fim):
+            log(f"[fim] no figure: {fim} does not exist yet")
+            return None
+        z = np.load(fim, allow_pickle=True)
+        names, scales = [str(v) for v in z["names"]], [str(v) for v in z["scales"]]
+        prof = PP.load_points(store_dir, names)
+        prof = prof if any(prof.values()) else None
+        out = os.path.join(plot_path, "_".join(t for t in (model_name, tag, "fim") if t) + "_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".png")
+        draw(out, " ".join(t for t in (model_name, tag) if t) or "Fisher information", names, scales, np.asarray(z["x"], float),
+             np.asarray(z["F"], float), prof)
+        log(f"[fim] figure saved to: {out}")
+        return out
+    except Exception as exc:                       # a view of finished results must not fail the stage
+        log(f"[fim] figure not written: {type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
+
 def main(argv=None):
     from datetime import datetime
 

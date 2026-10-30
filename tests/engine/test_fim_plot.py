@@ -75,3 +75,14 @@ def test_the_program_reads_the_folders_and_names_the_file(tmp_path, capsys):
     assert (tmp_path / "SILK" / "SILK_run_fim.png").stat().st_size > 5000
     with pytest.raises(SystemExit):
         FP.main([str(tmp_path)])                                  # no fim.npz there
+
+
+def test_the_stage_figure_is_named_like_the_profile_plots_and_never_stops_the_stage(tmp_path):
+    pdir, names, scales, x, F = _fixture(tmp_path)
+    results = tmp_path / "results"
+    logs = []
+    out = FP.save_for_stage(str(pdir), str(results), "Model", "Tag", log=logs.append)
+    assert os.path.basename(out).startswith("Model_Tag_fim_") and out.endswith(".png") and os.path.getsize(out) > 5000
+    assert os.path.dirname(out) == str(results)
+    missing = FP.save_for_stage(str(tmp_path / "nothing"), str(results), "Model", "Tag", log=logs.append)
+    assert missing is None and any("does not exist" in m for m in logs)
