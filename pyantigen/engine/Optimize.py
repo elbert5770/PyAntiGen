@@ -7949,6 +7949,10 @@ def run_optimization_from_groups(
 
             res = lm_fit(_analytic, x_start, bounds, scales, options=(opt_kw or {}).get("options"),
                          deadline=resolve_deadline(), on_best=_save_best, log=lambda m: print(m, flush=True))
+            if not res.success and str(res.message).startswith("failed"):
+                # No start could be evaluated, so there is no fit: caching x0 as "the optimum" would hand it to every later stage.
+                raise RuntimeError(f"the LM fit could not start: {res.message}. Nothing is cached as a fit; fix the cause "
+                                   "(for the residual form, every block needs a known sigma) and rerun.")
             if fit_cache is not None:
                 fit_cache.save_partial(_to_linear(res.x, scales), res.fun, n_evals=res.nfev, force=True)
             # One evaluation of the engine's own objective at the result: it writes the progress file and plot for
