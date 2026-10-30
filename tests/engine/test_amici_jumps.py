@@ -60,3 +60,20 @@ def test_a_schedule_read_from_event_text_gives_the_same_gradient(tmp_path):
     x, s = runner.run(theta, 0, 14, ref.OBS, wrt=ref.THETA)
     ref.close(s, ref.sens_scaled(ref.schedule(), theta), rtol=1e-6)
     np.testing.assert_allclose(x, ref.forward(ref.schedule(), theta), rtol=1e-7, atol=1e-9)
+
+
+# the schedule's boluses are at 0, 6, 12, a reset at 3 and a set at 9: an observation exactly there is the state after the switch,
+# as RoadRunner reports it (a dose given at t shows at t)
+OBS_AT_SWITCHES = [1.0, 3.0, 6.0, 9.0, 12.0, 13.0]
+
+
+def test_an_observation_at_a_switch_is_the_state_after_it_with_its_sensitivity(runner):
+    theta = ref.at()
+    x, s = runner.run(theta, 0, 14, OBS_AT_SWITCHES, wrt=ref.THETA)
+    want = ref.forward(ref.schedule(), theta, OBS_AT_SWITCHES)
+    assert x.shape == want.shape == (len(OBS_AT_SWITCHES), len(ref.STATES))
+    np.testing.assert_allclose(x, want, rtol=1e-7, atol=1e-9)
+    ref.close(s, ref.sens_scaled(ref.schedule(), theta, OBS_AT_SWITCHES), rtol=1e-6)
+    # the dose at 6 is in the row at 6: the depot there is the pre-dose depot plus the dose
+    before = runner.run(theta, 0, 14, [5.999], wrt=[])[0][0]
+    assert x[2][ref.STATES.index("depot")] == pytest.approx(before[ref.STATES.index("depot")] + theta["dose"], rel=1e-3)

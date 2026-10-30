@@ -294,7 +294,13 @@ class PlanSegment:
     runs and ``grads[v]`` its derivatives, carried through every earlier
     assignment. ``curves[name] = (value, slope, mid)``: on the segment the measured
     input is ``value + slope*(t - mid)`` exactly. ``observed`` says whether the
-    segment ends at an observation time; ``start``/``end`` are the Breakpoints.
+    segment's end is read as an observation; ``observed_start`` whether its start is
+    (the state right after the switch that opens the segment); ``start``/``end`` are
+    the Breakpoints. An observation at the time of a switch is the state AFTER the
+    switch, as the RoadRunner engine reports it (a dose given at t shows at t): it is
+    read at the start of the segment the switch opens, and the segment that ends there
+    does not read it. At the end of the whole window there is no segment to open, so
+    the observation there is the state before the switch.
 
     ``jumps`` maps each *state* the switch at the segment's start assigns (a bolus)
     to its right-hand side text. The state's value is not known until the run gets
@@ -302,7 +308,7 @@ class PlanSegment:
     sensitivities and gets the new value and the new sensitivities back.
     """
     __slots__ = ("index", "start", "end", "t0", "t1", "dt0", "dt1",
-                 "values", "grads", "curves", "observed", "step",
+                 "values", "grads", "curves", "observed", "observed_start", "step",
                  "jumps", "pre_values", "pre_grads", "params", "wrt")
 
     def evaluate_jump(self, text, state):
@@ -949,7 +955,8 @@ class InputSchedule:
             return tuple(float(g.get(n, 0.0)) for n in wrt)
 
         out = []
-        for sg in self.segments(t_start, t_end, observation_times, params=params):
+        segs = self.segments(t_start, t_end, observation_times, params=params)
+        for sg in segs:
             applied, jumps = None, {}
             seg = PlanSegment()
             seg.pre_values = {v: d.v for v, d in held.items()}
@@ -961,7 +968,10 @@ class InputSchedule:
                            for v, t in assigns.items() if v not in state_set}
                 held.update(applied)
             seg.jumps, seg.params, seg.wrt = jumps, params, wrt
-            seg.index, seg.start, seg.end, seg.observed = sg.index, sg.start, sg.end, sg.end in obs
+            seg.index, seg.start, seg.end = sg.index, sg.start, sg.end
+            # an observation at a switch time is read after the switch (see PlanSegment); the last segment has no successor
+            seg.observed = sg.end in obs and not (sg.end in steps and sg.index < len(segs) - 1)
+            seg.observed_start = sg.index > 0 and sg.start in obs and sg.start in steps
             seg.step = None if sg.start not in steps else sorted(steps[sg.start])
             seg.t0, seg.t1 = self.time(sg.start, params), self.time(sg.end, params)
             seg.dt0 = vec(self.gradient(sg.start, params, wrt=wrt))

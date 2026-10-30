@@ -388,3 +388,41 @@ def test_event_lines_it_cannot_read_are_refused(text):
 def test_other_lines_can_be_left_for_the_caller():
     s = InputSchedule.from_antimony_events("V_SP3' = Q_refill\nat (time >= 1): a = 1\n", {}, ignore_other=True)
     assert s.unparsed == ["V_SP3' = Q_refill"] and len(s.events()) == 1
+
+
+# --- an observation at a switch time -----------------------------------------------------------------
+
+def _bolus_schedule():
+    s = InputSchedule({"dose": 5.0})
+    s.periodic(0, 6, 3, [(0, {"depot": "depot + dose"})])        # boluses at 0, 6 and 12
+    return s
+
+
+def test_an_observation_at_a_switch_is_read_after_the_switch_and_not_before_it():
+    s = _bolus_schedule()
+    plan = s.plan(-3, 20, [-1.0, 6.0, 12.0, 20.0], params={"dose": 5.0}, wrt=["dose"], states=["depot"])
+    by_start = {float(s.time(seg.start, {"dose": 5.0})): seg for seg in plan}
+    before = [seg for seg in plan if float(s.time(seg.end, {"dose": 5.0})) == 6.0][0]
+    assert not before.observed                                    # the row at 6 is the state after the bolus ...
+    assert by_start[6.0].observed_start and not by_start[6.0].observed
+    after12 = [seg for seg in plan if float(s.time(seg.start, {"dose": 5.0})) == 12.0][0]
+    assert after12.observed_start
+    # an observation that is not at a switch is read at the end of its segment, as before
+    ends_at_minus1 = [seg for seg in plan if float(s.time(seg.end, {"dose": 5.0})) == -1.0][0]
+    assert ends_at_minus1.observed and not ends_at_minus1.observed_start
+    # the segment that opens at 12 reads its own start, and its end at 20 (no switch there)
+    assert plan[-1].observed_start and plan[-1].observed
+
+
+def test_at_the_end_of_the_window_there_is_no_segment_to_open_so_the_state_before_the_switch_is_read():
+    s = _bolus_schedule()
+    plan = s.plan(-3, 12, [12.0], params={"dose": 5.0}, wrt=["dose"], states=["depot"])      # the window ends at the third bolus
+    assert plan[-1].observed and not plan[-1].observed_start and not any(seg.observed_start for seg in plan)
+
+
+def test_every_observation_time_is_read_exactly_once():
+    s = _bolus_schedule()
+    times = [-1.0, 0.0 + 1e-3, 6.0, 7.5, 12.0, 20.0]
+    plan = s.plan(-3, 20, times, params={"dose": 5.0}, wrt=["dose"], states=["depot"])
+    rows = sum(int(seg.observed) + int(seg.observed_start) for seg in plan)
+    assert rows == len(times)

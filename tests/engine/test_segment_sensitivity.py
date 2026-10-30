@@ -109,7 +109,7 @@ def build_plan(sched, theta, obs=OBS, t_start=0.0, t_end=8.0):
     out = []
     for p in sched.plan(t_start, t_end, obs, params=theta, wrt=THETA):
         s = Seg()
-        s.t0, s.t1, s.observed = p.t0, p.t1, p.observed
+        s.t0, s.t1, s.observed, s.observed_start = p.t0, p.t1, p.observed, p.observed_start
         s.dt0, s.dt1 = np.array(p.dt0), np.array(p.dt1)
         s.u = np.array([p.values[v] for v in INPUTS])
         s.du = np.array([p.grads[v] for v in INPUTS])
@@ -136,6 +136,8 @@ def forward(sched, theta, obs=OBS):
     k = theta["k_y"]
     x, out = X0.copy(), []
     for s in build_plan(sched, theta, obs):
+        if s.observed_start:                      # a time at a switch is read right after it
+            out.append(x.copy())
         if s.t1 > s.t0:
             x = _solve(lambda t, x: f_rhs(x, s.u, _curve_at(s, t), k), (s.t0, s.t1), x)
         if s.observed:
@@ -148,6 +150,8 @@ def sens_scaled(sched, theta, obs=OBS, source=True, time_term=True):
     k = theta["k_y"]
     x, S, out = X0.copy(), np.zeros((N, M)), []
     for s in build_plan(sched, theta, obs):
+        if s.observed_start:
+            out.append(S.copy())
         D, dD = s.t1 - s.t0, s.dt1 - s.dt0
 
         def aug(sc, z, s=s, D=D, dD=dD):
@@ -178,6 +182,8 @@ def sens_original(sched, theta, obs=OBS):
     x, S, out = X0.copy(), np.zeros((N, M)), []
     plan = build_plan(sched, theta, obs)
     for n, s in enumerate(plan):
+        if s.observed_start:
+            out.append(S.copy())
         def aug(t, z, s=s):
             x, S = z[:N], z[N:].reshape(N, M)
             f = f_rhs(x, s.u, _curve_at(s, t), k)

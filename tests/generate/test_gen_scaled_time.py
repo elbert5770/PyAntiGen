@@ -80,6 +80,8 @@ def run_scaled(theta, x0, obs=OBS):
     x = dict(zip(STATES, x0))
     out = []
     for seg in sched.plan(0, 8, obs, params=theta):
+        if seg.observed_start:                    # a time at a switch is read right after it
+            out.append([x[n] for n in STATES])
         r.reset()
         for k, v in sm.segment_constants(seg).items():
             r[k] = v
@@ -152,7 +154,7 @@ def test_the_public_schedule_accessors():
     assert name == "f_L" and times[-1] == 6.5 and after == 0
     p = s.plan(0, 8, [0.45], params=NOMINAL, wrt=["Q_CSF"])
     assert all(len(seg.dt0) == 1 for seg in p)
-    assert sum(seg.observed for seg in p) == 1
+    assert sum(int(seg.observed) + int(seg.observed_start) for seg in p) == 1
 
 
 def test_initial_assignment_chains_are_followed_to_the_parameters():

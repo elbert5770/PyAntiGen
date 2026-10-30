@@ -95,6 +95,8 @@ def forward(sched, theta, obs=OBS):
     x, S, out = np.zeros(N), np.zeros((N, M)), []
     for seg in plan(sched, theta, obs):
         x, S = apply_jumps(seg, x, S)
+        if seg.observed_start:                      # a time at a switch is read right after it
+            out.append(x.copy())
         q = seg.values["Q_in"]
         if seg.t1 > seg.t0:
             sol = solve_ivp(lambda t, y: f_rhs(y, q, ka, ke), (seg.t0, seg.t1), x,
@@ -116,6 +118,8 @@ def sens_scaled(sched, theta, obs=OBS, keep_gx=True):
             else:                                   # negative control: forget the carried sensitivity
                 x2, S2 = apply_jumps(seg, x, np.zeros_like(S))
                 x, S = x2, S2
+        if seg.observed_start:
+            out.append(S.copy())
         q, dq = seg.values["Q_in"], np.array(seg.grads["Q_in"])
         dt0, dt1 = np.array(seg.dt0), np.array(seg.dt1)
         D, dD = seg.t1 - seg.t0, dt1 - dt0
@@ -174,6 +178,8 @@ def sens_original(sched, theta, obs=OBS):
             f_after = f_rhs(x_new, seg.values["Q_in"], ka, ke)
             S = S_new - np.outer(f_after, dt)
             x = x_new
+        if seg.observed_start:
+            out.append(S.copy())
         q, dq = seg.values["Q_in"], np.array(seg.grads["Q_in"])
 
         def aug(t, z, q=q, dq=dq):
@@ -346,6 +352,8 @@ def test_the_scaled_model_with_boluses_reproduces_the_events():
     got = []
     for seg in sched.plan(0, 14, OBS, params=theta, wrt=THETA, states=sm.jump_states):
         x, S = apply_jumps(seg, x, S)
+        if seg.observed_start:
+            got.append(x.copy())
         r.reset()
         for k, v in sm.segment_constants(seg).items():
             r[k] = v

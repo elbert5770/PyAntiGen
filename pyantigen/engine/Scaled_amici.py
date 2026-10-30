@@ -251,19 +251,27 @@ class AmiciSegmentRunner:
             model.set_initial_state(list(x))
             if npar:
                 model.set_initial_state_sensitivities(list(sx.ravel()))
+            # a time read right after the switch that opens this segment is its t = 0 output
+            model.set_timepoints([0.0, 1.0] if seg.observed_start else [1.0])
             rdata = self._sundials.run_simulation(model, solver)
             if int(rdata.status) != self._sundials.AMICI_SUCCESS:
                 raise RuntimeError(f"AMICI failed on the segment [{seg.t0:.6g}, {seg.t1:.6g}] h: "
                                    f"status {int(rdata.status)}; {list(rdata.messages)[:2]}")
+            cols = [self._index[n] for n in self.states]
+
+            def read(k):
+                out_x.append(np.array(rdata.x)[k][cols])
+                out_s.append(np.array(rdata.sx)[k].reshape(npar, nx)[:, cols].T if npar else np.zeros((len(cols), 0)))
+                if outputs:
+                    out_y.append(np.array(rdata.y)[k][self._output_index])
+                    out_sy.append(np.array(rdata.sy)[k].reshape(npar, -1)[:, self._output_index].T
+                                  if npar else np.zeros((len(self._output_index), 0)))
+
+            if seg.observed_start:
+                read(0)
             x = np.array(rdata.x)[-1].copy()
             if npar:
                 sx = np.array(rdata.sx)[-1].reshape(npar, nx).copy()
             if seg.observed:
-                cols = [self._index[n] for n in self.states]
-                out_x.append(x[cols])
-                out_s.append(sx[:, cols].T)
-                if outputs:
-                    out_y.append(np.array(rdata.y)[-1][self._output_index])
-                    out_sy.append(np.array(rdata.sy)[-1].reshape(npar, -1)[:, self._output_index].T
-                                  if npar else np.zeros((len(self._output_index), 0)))
+                read(-1)
         return np.array(out_x), np.array(out_s), np.array(out_y), np.array(out_sy)
