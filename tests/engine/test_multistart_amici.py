@@ -109,3 +109,8 @@ def test_unfinished_list_is_also_written_where_the_submitter_asks(tmp_path, monk
     MA.run_task(0, POINTS, Bowl(), BOUNDS, SCALES, d, log=lambda m: None)
     MA.collect(d, NAMES, 3, log=lambda m: None)
     assert mirror.read_text() == "1,2\n" and open(os.path.join(d, "unfinished.txt")).read() == "1,2\n"
+
+
+def test_a_multistart_stage_is_recognised_so_the_fit_cache_cannot_short_circuit_it():
+    assert MA.requested({"PYANTIGEN_MULTISTART": "3"}) and MA.requested({"PYANTIGEN_MULTISTART": "collect"})
+    assert not MA.requested({}) and not MA.requested({"PYANTIGEN_MULTISTART": "  "})

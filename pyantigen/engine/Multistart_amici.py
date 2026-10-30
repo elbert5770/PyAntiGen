@@ -27,6 +27,11 @@ ENV = "PYANTIGEN_MULTISTART"
 BETTER_NATS = 0.05          # a winner this much below start 0 is a better optimum, not optimizer scatter
 
 
+def requested(env=None):
+    """True when ``PYANTIGEN_MULTISTART`` names a task (or ``collect``): the run is a multi-start stage, whatever the fit cache holds."""
+    return bool(str((os.environ if env is None else env).get(ENV) or "").strip())
+
+
 def task_from_env(n_starts, env=None):
     """``None`` (not a multi-start run), ``"collect"``, or the start index named in ``PYANTIGEN_MULTISTART``."""
     raw = (os.environ if env is None else env).get(ENV)

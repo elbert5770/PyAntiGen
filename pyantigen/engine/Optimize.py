@@ -7833,6 +7833,7 @@ def run_optimization_from_groups(
         # the cached fit. None means the optimizer ran in this process.
         fit_source = None
         res = None
+        from pyantigen.engine import Multistart_amici as _MS_STAGE
         if fit_mode == "evaluate_x0":
             from scipy.optimize import OptimizeResult
             print("[opt] fit_mode='evaluate_x0' — skipping the fit and evaluating x0 "
@@ -7841,7 +7842,9 @@ def run_optimization_from_groups(
             res = OptimizeResult(x=x0_arr, fun=objective(x0_arr), success=True,
                                  message="Optimization bypassed (fit_mode=evaluate_x0)",
                                  nit=0, nfev=1)
-        elif fit_cache is not None and fit_cache.load_complete() is not None:
+        elif (fit_cache is not None and fit_cache.load_complete() is not None
+              and not _MS_STAGE.requested()):
+            # (Not on a multi-start stage: the starts are fitted whatever the cache holds, and never written to it.)
             # A finished fit of exactly this problem. Re-evaluated here rather
             # than trusted: one evaluation is cheap, it proves the model still
             # integrates at that point, and it is the last line of defence
