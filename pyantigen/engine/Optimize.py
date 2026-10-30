@@ -7960,10 +7960,12 @@ def run_optimization_from_groups(
 
             res = lm_fit(_analytic, x_start, bounds, scales, options=(opt_kw or {}).get("options"),
                          deadline=resolve_deadline(), on_best=_save_best, log=lambda m: print(m, flush=True))
-            if not res.success and str(res.message).startswith("failed"):
-                # No start could be evaluated, so there is no fit: caching x0 as "the optimum" would hand it to every later stage.
-                raise RuntimeError(f"the LM fit could not start: {res.message}. Nothing is cached as a fit; fix the cause "
-                                   "(for the residual form, every block needs a known sigma) and rerun.")
+            if not res.success and str(res.message) != "deadline reached":
+                # A fit that did not converge is not "the optimum": caching it would hand it to every later stage (the FIM and the
+                # profile anchor on it). The best point so far is kept as the partial state, so a rerun continues from it.
+                raise RuntimeError(f"the LM fit did not converge: {res.message}. Nothing is cached as a fit. A failed start usually "
+                                   "means a block has no known sigma; a stalled fit means the objective is not smooth near the point "
+                                   "(see the rejected steps in the log).")
             if fit_cache is not None:
                 fit_cache.save_partial(_to_linear(res.x, scales), res.fun, n_evals=res.nfev, force=True)
             # One evaluation of the engine's own objective at the result: it writes the progress file and plot for
