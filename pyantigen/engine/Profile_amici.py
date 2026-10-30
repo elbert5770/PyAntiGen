@@ -26,7 +26,7 @@ from pyantigen.engine import Profile_lm as LM
 from pyantigen.engine.Profile_record import curve
 
 SIDE_ENV = "PYANTIGEN_PROFILE_SIDE"
-KINDS = ("profile", "pins", "relax", "fill", "dense", "recheck", "backfill")
+KINDS = ("profile", "pins", "relax", "confirm", "fill", "dense", "recheck", "backfill")
 MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins | fim | collect (walks nothing: reports what the sides left)
 ANCHOR_TOL = 1e-4                            # optimizer-space distance at which a refit is a different anchor
 BACKFILL_ENV = "PYANTIGEN_PROFILE_BACKFILL"  # converged points wanted inside the level on each side; 0 turns the last pass off

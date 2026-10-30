@@ -256,3 +256,65 @@ def test_backfill_is_off_by_default_and_a_later_run_adds_to_the_same_files():
     assert added and len(store.read("profile")) == n_before                              # the walk's points are untouched
     assert len(_inside(store, st, "profile", "backfill")[1]) >= 6
     assert store.done("backfill").startswith("target 6:")
+
+
+class _Trap:
+    """A solver that lands in a worse minimum (dnll + 4) whenever it starts more than 0.3 away in the profiled value."""
+
+    def __init__(self, inner, k=0):
+        self.inner, self.k = inner, k
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def with_bounds(self, lb, ub):
+        return _Trap(self.inner.with_bounds(lb, ub), self.k)
+
+    def solve(self, req):
+        rec = self.inner.solve(req)
+        far = abs(req.x_fixed - req.anchor_x[self.k]) > 0.3
+        if far and rec.usable:
+            rec.nll, rec.dnll = rec.nll + 4.0, rec.dnll + 4.0
+        return rec
+
+
+def _trapped():
+    pr = problem()
+    pr.solver = _Trap(pr.solver)
+    return pr
+
+
+def test_a_walk_that_ends_on_a_bad_minimum_is_confirmed_from_half_way_and_goes_on():
+    st, store, pr = PR.WalkSettings(), PR.MemoryStore(), _trapped()
+    pts, why = PR.walk(pr, 0, +1, st, store)
+    assert "threshold crossed" in why
+    for p in pts[1:]:                                           # every point is on the true profile, not 4 above it
+        assert math.isclose(p.dnll, 0.5 * (p.x_fixed - 1.0) ** 2, abs_tol=2e-3)
+    assert pts[-1].dnll > st.df_stop and store.read("confirm")
+    assert PR.walk(pr, 0, +1, st, store)[1] == why                             # finished: nothing re-run
+
+
+def test_without_confirm_the_same_walk_stops_on_the_bad_point():
+    st, store, pr = PR.WalkSettings(confirm=False), PR.MemoryStore(), _trapped()
+    pts, why = PR.walk(pr, 0, +1, st, store)
+    assert "threshold crossed" in why and len(pts) == 2 and pts[-1].dnll > 4.0 and not store.read("confirm")
+
+
+def test_a_confirmed_walk_resumes_with_the_lower_point(tmp_path):
+    st, pr = PR.WalkSettings(), _trapped()
+    store = PR.JsonlStore(str(tmp_path), "0_up")
+    PR.walk(pr, 0, +1, st, store, deadline=0.0)
+    pts, _ = PR.walk(pr, 0, +1, st, PR.JsonlStore(str(tmp_path), "0_up"))
+    again = PR._walk_points(PR.JsonlStore(str(tmp_path), "0_up"), "profile")
+    assert [round(p.x_fixed, 9) for p in again] == [round(p.x_fixed, 9) for p in pts]
+    assert all(math.isclose(a.dnll, b.dnll, abs_tol=1e-9) for a, b in zip(again, pts))
+
+
+def test_densify_does_not_bisect_a_jump_between_neighbouring_values():
+    import dataclasses
+    st, store, pr = PR.WalkSettings(confirm=False), PR.MemoryStore(), _trapped()
+    PR.walk(pr, 0, +1, st, store)
+    end = store.read("profile")[1]                                   # x = 1.5 at dnll 4.125 (the trap)
+    store.append("fill", dataclasses.replace(end, x_fixed=end.x_fixed - 1e-5, dnll=1.0, nll=1.0))
+    added = PR.densify(pr, 0, +1, st, store)
+    assert added and not [r for r in added if end.x_fixed - 1e-5 < r.x_fixed < end.x_fixed]        # the sliver is left alone

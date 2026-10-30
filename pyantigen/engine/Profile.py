@@ -54,6 +54,8 @@ class WalkSettings:
     max_gap: float = 0.25           # densify: no two neighbouring points further apart than this (decades for a log parameter) ...
     max_dgap: float = 0.5           # ... or than this in dnll, up to the crossing
     dense_rounds: int = 12
+    confirm: bool = True            # a walk that ends over the stop level re-fits its last point from a start half-way back
+    confirm_tol: float = 0.05       # ... and keeps the re-fit, and goes on walking, when it is lower by more than this (nats)
     backfill_points: int = 0        # backfill: converged points wanted between the optimum and the crossing (0: no backfill pass)
     backfill_rounds: int = 12
 
@@ -228,6 +230,58 @@ def _solve_widening(cur: ProfileProblem, pr: ProfileProblem, req, store, st: Wal
     return rec, cur
 
 
+def _walk_points(store, kind):
+    """The walk's records, each replaced by the lowest ``confirm`` record at its value (the walk's order is kept)."""
+    better = {}
+    for c in store.read("confirm"):
+        if c.usable:
+            key = round(c.x_fixed, 12)
+            if key not in better or c.dnll < better[key].dnll:
+                better[key] = c
+    out = []
+    for r in store.read(kind):
+        c = better.get(round(r.x_fixed, 12))
+        out.append(c if c is not None and r.usable and c.dnll < r.dnll else r)
+    return out
+
+
+def _confirm_end(cur: ProfileProblem, base: ProfileProblem, k, direction, pts, st: WalkSettings, store, deadline, say):
+    """Re-fit the point that ended the walk over the stop level from a start half-way back; ``(record or None, problem)``.
+
+    A big hop can land a fit in a worse minimum of the nuisance parameters (a ridge, a bound widened mid-solve) and end the walk
+    on a dnll the profile does not have: fitted again from a point half-way, the same value comes out lower. The half-way point
+    is fitted first from the previous point, then the last value from it, both strictly; both are kept in ``confirm`` records.
+    Returns the lower record when it is lower by more than ``st.confirm_tol``, else None.
+    """
+    last, prev = pts[-1], pts[-2]
+    key = round(last.x_fixed, 12)
+    if any(round(c.x_fixed, 12) == key for c in store.read("confirm")):
+        return None, cur
+    n = len(pts) - 1
+    xm = 0.5 * (prev.x_fixed + last.x_fixed)
+    x_init = np.clip(np.array(prev.x, float), cur.lb, cur.ub)
+    x_init[k] = xm
+    say(f"confirming the end point x = {last.x_fixed:.5g} (dnll {last.dnll:.4g}) from a start at x = {xm:.5g}")
+    req = cur.request(k, xm, x_init, direction, anchor_x=tuple(prev.x), deadline=deadline, max_evals=st.point_max_evals,
+                      strict=True, source=f"confirm:{n}:mid")
+    mid, cur = _solve_widening(cur, base, req, store, st, say)
+    _check(req, mid)
+    store.append("confirm", mid)
+    if not mid.usable:
+        return None, cur
+    x_init = np.clip(np.array(mid.x, float), cur.lb, cur.ub)
+    x_init[k] = last.x_fixed
+    req = cur.request(k, last.x_fixed, x_init, direction, anchor_x=tuple(mid.x), deadline=deadline, max_evals=st.point_max_evals,
+                      strict=True, source=f"confirm:{n}")
+    again, cur = _solve_widening(cur, base, req, store, st, say)
+    _check(req, again)
+    store.append("confirm", again)
+    if again.usable and again.dnll < last.dnll - st.confirm_tol:
+        say(f"the end point was not on the profile: dnll {again.dnll:.4g} from the half-way start against {last.dnll:.4g}")
+        return again, cur
+    return None, cur
+
+
 def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, kind="profile"):
     """Walk from the optimum in *direction* (+1 / -1). Returns ``(records, reason)``; reason None means out of time."""
     st = st or WalkSettings()
@@ -235,7 +289,7 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     say = log or (lambda *_: None)
     if store.done(kind):
         return store.read(kind), store.done(kind)
-    pts = store.read(kind)
+    pts = _walk_points(store, kind)
     if not pts:
         pts = [_optimum_record(pr, k)]
         store.append(kind, pts[0])
@@ -247,6 +301,14 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     while True:
         last = pts[-1]
         reason = None
+        if st.confirm and len(pts) > 1 and last.dnll is not None and last.dnll > st.df_stop and last.usable:
+            try:
+                better, pr = _confirm_end(pr, base, k, direction, pts, st, store, deadline, say)
+            except OutOfTime:
+                say("deadline reached; exiting to be continued")
+                return pts, None
+            if better is not None:
+                pts[-1] = last = better
         if last.dnll is not None and last.dnll > st.df_stop:
             reason = f"dnll {last.dnll:.3g} > {st.df_stop}: threshold crossed"
         elif last.verdict == "failed":
@@ -467,7 +529,7 @@ def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
         pr = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
 
     def ordered():
-        return sorted(curve(store.read(walk_kind) + store.read("relax") + store.read("fill")), key=lambda q: direction * q.x_fixed)
+        return sorted(curve(store.read(walk_kind) + store.read("confirm") + store.read("relax") + store.read("fill")), key=lambda q: direction * q.x_fixed)
 
     for rnd in range(len(extra), st.fill_rounds):
         pts = ordered()
@@ -530,15 +592,20 @@ def densify(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=Non
     unit = _unit(pr, k)
 
     def ordered():
-        return sorted(curve(store.read(walk_kind) + store.read("relax") + store.read("fill") + store.read("dense")),
+        return sorted(curve(store.read(walk_kind) + store.read("confirm") + store.read("relax") + store.read("fill") + store.read("dense")),
                       key=lambda q: direction * q.x_fixed)
 
     def widest(pts):
         end = next((i for i, q in enumerate(pts) if i > 0 and q.dnll > st.level), None)
         if end is None:
             return None
+        # A gap too narrow to subdivide usefully is a jump in dnll between neighbouring values, not a hole: bisecting it only
+        # converges on its end. The jump is _confirm_end's business; here it is left alone.
         gaps = [(max(abs(b.x_fixed - a.x_fixed) / (st.max_gap * unit), abs(b.dnll - a.dnll) / st.max_dgap), i)
-                for i, (a, b) in enumerate(zip(pts[:end], pts[1:end + 1]))]
+                for i, (a, b) in enumerate(zip(pts[:end], pts[1:end + 1]))
+                if abs(b.x_fixed - a.x_fixed) > 0.02 * st.max_gap * unit]
+        if not gaps:
+            return None
         worst = max(gaps)
         return worst[1] if worst[0] > 1.0 else None
 
@@ -595,7 +662,7 @@ def backfill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=No
     tried = set()
 
     def ordered():
-        return sorted(curve(store.read(walk_kind) + store.read("relax") + store.read("fill") + store.read("dense")
+        return sorted(curve(store.read(walk_kind) + store.read("confirm") + store.read("relax") + store.read("fill") + store.read("dense")
                             + store.read("backfill")), key=lambda q: direction * q.x_fixed)
 
     def span(pts):

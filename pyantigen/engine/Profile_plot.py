@@ -160,7 +160,7 @@ def load_points(pdir, names):
     """``{name: [(x, dnll, converged)]}``: walk, relax, fill, dense and backfill records; a point keeps its lowest nll over the files."""
     prof = {n: [] for n in names}
     best = {}
-    for kind in ("profile", "relax", "fill", "dense", "backfill"):
+    for kind in ("profile", "relax", "confirm", "fill", "dense", "backfill"):
         for f in sorted(glob.glob(os.path.join(pdir, f"{kind}_*.jsonl"))):
             for r in _read_jsonl(f):
                 p, x, nll = r.get("param"), r.get("x_fixed"), r.get("nll")
