@@ -6175,7 +6175,7 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
         print("\n[profile] mode fim: the Fisher information is written; no side was walked, so the report below is empty "
               "and 'INCOMPLETE' only means that.", flush=True)
     completed = PA.completed_from_store(store_dir, param_names, scales, ProfileCheckpointKey, mode=mode)
-    finished = PA.sides_finished(store_dir, param_names, recheck=recheck, mode=mode)
+    finished = PA.sides_finished(store_dir, param_names, recheck=recheck, mode=mode, backfill_points=settings.backfill_points)
     todo = PA.unfinished_tasks(finished, len(param_names))
     PA.write_unfinished(store_dir, todo)
     if todo:

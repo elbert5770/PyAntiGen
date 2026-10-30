@@ -202,3 +202,54 @@ def test_densify_leaves_an_open_side_alone():
     st, store, pr = PR.WalkSettings(max_decades=0.3, stop_margin=99.0), PR.MemoryStore(), problem()
     PR.walk(pr, 0, +1, st, store)
     assert PR.densify(pr, 0, +1, st, store) == [] and store.done("dense")
+
+
+def _inside(store, st, *kinds):
+    pts = sorted(P.curve(sum((store.read(k) for k in kinds), [])), key=lambda q: q.x_fixed)
+    end = next((i for i, q in enumerate(pts) if i > 0 and q.dnll > st.level), len(pts) - 1)
+    return pts, [q for q in pts[1:end] if q.verdict == "converged"]
+
+
+def test_backfill_puts_the_wanted_points_between_the_optimum_and_the_crossing():
+    st, store, pr = PR.WalkSettings(df_step=1.5, max_gap=9.0, max_dgap=99.0, backfill_points=5), PR.MemoryStore(), problem()
+    PR.walk(pr, 0, +1, st, store)
+    PR.fill(pr, 0, +1, st, store)
+    PR.densify(pr, 0, +1, st, store)
+    before = len(_inside(store, st, "profile", "fill", "dense")[1])
+    added = PR.backfill(pr, 0, +1, st, store)
+    pts, inside = _inside(store, st, "profile", "fill", "dense", "backfill")
+    assert len(inside) >= 5 and store.done("backfill").startswith("target 5:")
+    assert before < 5 and added                                             # the earlier passes left it sparse; the pass added
+    assert PR.backfill(pr, 0, +1, st, store) == added                      # finished for this target: nothing re-run
+
+
+def test_backfill_new_points_lie_inside_the_level_and_are_warm_started():
+    st, store, pr = PR.WalkSettings(df_step=1.5, max_gap=9.0, max_dgap=99.0, backfill_points=8), PR.MemoryStore(), problem()
+    PR.walk(pr, 0, +1, st, store)
+    PR.fill(pr, 0, +1, st, store)
+    PR.densify(pr, 0, +1, st, store)
+    added = PR.backfill(pr, 0, +1, st, store)
+    assert added
+    assert all(r.dnll <= st.level + 0.3 for r in added if r.usable)        # cut at the interpolated crossing, not beyond it
+    assert all(r.source.startswith("backfill:") for r in added)
+
+
+def test_backfill_on_an_open_side_spreads_points_to_where_the_walk_gave_up():
+    st, store, pr = PR.WalkSettings(max_decades=0.3, stop_margin=99.0, backfill_points=5), PR.MemoryStore(), problem()
+    PR.walk(pr, 0, +1, st, store)
+    pts0 = sorted(P.curve(store.read("profile")), key=lambda q: q.x_fixed)
+    far = pts0[-1].x_fixed
+    PR.backfill(pr, 0, +1, st, store)
+    pts = sorted(P.curve(store.read("profile") + store.read("backfill")), key=lambda q: q.x_fixed)
+    assert pts[-1].x_fixed == far                                            # the futility point stays the end
+    assert len([q for q in pts[1:-1] if q.verdict == "converged"]) >= 5
+
+
+def test_backfill_zero_does_nothing_and_a_new_target_runs_again():
+    st, store, pr = PR.WalkSettings(backfill_points=0), PR.MemoryStore(), problem()
+    PR.walk(pr, 0, +1, st, store)
+    assert PR.backfill(pr, 0, +1, st, store) == [] and store.done("backfill").startswith("target 0:")
+    st.backfill_points = 6
+    PR.backfill(pr, 0, +1, st, store)
+    assert len(_inside(store, st, "profile", "backfill")[1]) >= 6
+    assert store.done("backfill").startswith("target 6:")

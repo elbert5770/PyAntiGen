@@ -54,6 +54,8 @@ class WalkSettings:
     max_gap: float = 0.25           # densify: no two neighbouring points further apart than this (decades for a log parameter) ...
     max_dgap: float = 0.5           # ... or than this in dnll, up to the crossing
     dense_rounds: int = 12
+    backfill_points: int = 5        # backfill: converged points wanted between the optimum and the crossing (0: none)
+    backfill_rounds: int = 12
 
     @property
     def df_stop(self):
@@ -560,6 +562,87 @@ def densify(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=Non
     except OutOfTime:
         return done
     store.finish("dense", f"{len(done)} point(s) inserted")
+    return done
+
+
+def backfill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):
+    """Last pass on a side: at least ``st.backfill_points`` converged points between the optimum and where the curve
+    crosses the level, or, if it never does, where the walk gave up. Returns the inserted records.
+
+    The points are placed in the widest gap of the parameter (in decades), each fitted once and strictly, from the
+    neighbours' vectors interpolated to its value. A gap that ends in the crossing is cut at the interpolated crossing, so
+    a new point lies inside the level. A point that comes out over the level moves the crossing in, and a point that does
+    not converge does not count and its value is not tried again. The pass runs after every other, so what it adds
+    is only what they left sparse.
+    """
+    st = st or WalkSettings()
+    store = store or MemoryStore()
+    say = log or (lambda *_: None)
+    target = int(st.backfill_points)
+    tag = f"target {target}:"
+    flag = store.done("backfill")
+    if flag is not None and flag.startswith(tag):
+        return store.read("backfill")
+    done = store.read("backfill")
+    pr = side_problem(pr, store)
+    if store.read("relax") and hasattr(pr.solver, "relaxed"):
+        pr = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
+    unit = _unit(pr, k)
+    tried = set()
+
+    def ordered():
+        return sorted(curve(store.read(walk_kind) + store.read("relax") + store.read("fill") + store.read("dense")
+                            + store.read("backfill")), key=lambda q: direction * q.x_fixed)
+
+    def span(pts):
+        """``(inner, nodes)``: the points inside the level, and ``(x, left, right)`` per gap, left to right.
+
+        *left* is the record the gap starts at and *right* the one it ends at, which for a gap that ends in the crossing is
+        the first point over the level (its end in x is the interpolated crossing)."""
+        end = next((i for i, q in enumerate(pts) if i > 0 and q.dnll > st.level), None)
+        if end is None:                                  # open: the farthest point is where the walk gave up
+            inner, last = pts[1:-1], pts[-1]
+            x_end = last.x_fixed
+        else:
+            inner, last = pts[1:end], pts[end]
+            a = pts[end - 1]
+            x_end = a.x_fixed + (st.level - a.dnll) / (last.dnll - a.dnll) * (last.x_fixed - a.x_fixed)
+        left = [pts[0]] + inner
+        xs = [q.x_fixed for q in left] + [x_end]
+        return inner, [(xs[j], xs[j + 1], left[j], left[j + 1] if j + 1 < len(left) else last) for j in range(len(left))]
+
+    try:
+        for rnd in range(len(done), st.backfill_rounds):
+            pts = ordered()
+            if len(pts) < 2:
+                break
+            inner, gaps = span(pts)
+            if sum(1 for q in inner if q.verdict == "converged") >= target:
+                break
+            order = sorted(gaps, key=lambda g: -abs(g[1] - g[0]))
+            gap = next((g for g in order if round(0.5 * (g[0] + g[1]), 9) not in tried), None)
+            if gap is None:
+                break
+            lo, hi, a, b = gap
+            val = 0.5 * (lo + hi)
+            tried.add(round(val, 9))
+            t = (val - a.x_fixed) / (b.x_fixed - a.x_fixed) if b.x_fixed != a.x_fixed else 0.5
+            x_init = np.array(a.x, float) + t * (np.array(b.x, float) - np.array(a.x, float))
+            x_init[k] = val
+            req = pr.request(k, val, np.clip(x_init, pr.lb, pr.ub), direction, anchor_x=tuple(a.x), deadline=deadline,
+                             max_evals=st.point_max_evals, strict=True, source=f"backfill:{rnd}")
+            rec = pr.solver.solve(req)
+            _check(req, rec)
+            store.append("backfill", rec)
+            done.append(rec)
+            say(f"backfill round {rnd}: x = {val:.5g}: dnll {rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}")
+    except OutOfTime:
+        return done
+    pts = ordered()
+    inside = sum(1 for q in span(pts)[0] if q.verdict == "converged") if len(pts) > 1 else 0
+    if target > 0 and inside < target:
+        say(f"backfill: {inside} converged point(s) inside the level, short of {target}")
+    store.finish("backfill", f"{tag} {len(done)} point(s) added, {inside} converged inside the level")
     return done
 
 

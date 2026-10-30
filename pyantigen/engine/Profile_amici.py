@@ -26,9 +26,10 @@ from pyantigen.engine import Profile_lm as LM
 from pyantigen.engine.Profile_record import curve
 
 SIDE_ENV = "PYANTIGEN_PROFILE_SIDE"
-KINDS = ("profile", "pins", "relax", "fill", "dense", "recheck")
+KINDS = ("profile", "pins", "relax", "fill", "dense", "recheck", "backfill")
 MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins | fim | collect (walks nothing: reports what the sides left)
 ANCHOR_TOL = 1e-4                            # optimizer-space distance at which a refit is a different anchor
+BACKFILL_ENV = "PYANTIGEN_PROFILE_BACKFILL"  # converged points wanted inside the level on each side; 0 turns the last pass off
 PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
 FAILURE_VALUE = 1e10
 
@@ -54,6 +55,8 @@ def settings_from_env(env=None):
     st = PR.WalkSettings()
     if env.get(PINS_ENV):
         st.pins = tuple(float(v) for v in env[PINS_ENV].split(",") if v.strip())
+    if env.get(BACKFILL_ENV, "").strip():
+        st.backfill_points = int(env[BACKFILL_ENV])
     return mode, st
 
 
@@ -183,11 +186,15 @@ def read_sides(store_dir, names, sides=None, mode="walk"):
     return by_param
 
 
-def sides_finished(store_dir, names, recheck=False, sides=None, mode="walk"):
+def sides_finished(store_dir, names, recheck=False, sides=None, mode="walk", backfill_points=None):
+    """One flag per side: every pass is done. A side whose backfill was made for another target is not."""
     flags = []
     for k, d in (sides or all_sides(len(names))):
         store = PR.JsonlStore(store_dir, tag_of(k, d, mode))
-        flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and bool(store.done("dense")) and (not recheck or bool(store.done("recheck"))))
+        filled = store.done("backfill")
+        ok = filled is not None and (backfill_points is None or filled.startswith(f"target {int(backfill_points)}:"))
+        flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and bool(store.done("dense"))
+                     and (not recheck or bool(store.done("recheck"))) and ok)
     return flags
 
 
@@ -338,6 +345,10 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
             break
         if recheck:
             PR.recheck(pr, k, d, st, store, deadline, say, walk_kind=kind)
+        PR.backfill(pr, k, d, st, store, deadline, say, walk_kind=kind)
+        if store.done("backfill") is None:
+            log(f"[profile] out of time backfilling {tag}; relaunch to continue")
+            break
         saved = store.state("bounds")
         for i, n_i in enumerate(names):
             if saved and (saved["lb"][i] != (None if not math.isfinite(lb[i]) else lb[i])

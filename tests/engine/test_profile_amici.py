@@ -4,6 +4,7 @@ import math
 import numpy as np
 import pytest
 
+from pyantigen.engine import Profile as PR
 from pyantigen.engine import Profile_amici as PA
 from pyantigen.engine.Profile_record import crossings
 
@@ -215,6 +216,19 @@ def test_a_profile_is_not_continued_at_a_different_optimum(tmp_path):
         PA.run(p, NAMES, BOUNDS, SCALES, xs + 0.01, str(tmp_path), side=(0, 1), log=lambda m: None)
     with pytest.raises(RuntimeError, match="different optimum"):
         PA.run(None, NAMES, BOUNDS, SCALES, xs + 0.01, str(tmp_path), mode="collect", log=lambda m: None)
+
+
+def test_a_side_is_finished_only_for_the_backfill_target_it_ran_with(tmp_path):
+    p = LinearProvider()
+    xs = _optimum(p)
+    st = PR.WalkSettings(backfill_points=3)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), settings=st, log=lambda m: None)
+    store = PR.JsonlStore(str(tmp_path), PA.tag_of(0, 1))
+    assert store.done("backfill").startswith("target 3:")
+    assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)], backfill_points=3) == [True]
+    assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)], backfill_points=5) == [False]   # relaunch with 5 runs it again
+    assert PA.settings_from_env({"PYANTIGEN_PROFILE_BACKFILL": "7"})[1].backfill_points == 7
+    assert PA.settings_from_env({})[1].backfill_points == 5
 
 
 def test_the_anchor_error_names_the_fit_methods(tmp_path):
