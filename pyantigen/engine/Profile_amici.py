@@ -187,12 +187,13 @@ def read_sides(store_dir, names, sides=None, mode="walk"):
 
 
 def sides_finished(store_dir, names, recheck=False, sides=None, mode="walk", backfill_points=None):
-    """One flag per side: every pass is done. A side whose backfill was made for another target is not."""
+    """One flag per side: every pass is done. With a ``backfill_points`` target a side counts only once its backfill ran for
+    that target; with none (or 0) the backfill is not asked for and a side is finished without it."""
     flags = []
     for k, d in (sides or all_sides(len(names))):
         store = PR.JsonlStore(store_dir, tag_of(k, d, mode))
         filled = store.done("backfill")
-        ok = filled is not None and (backfill_points is None or filled.startswith(f"target {int(backfill_points)}:"))
+        ok = not backfill_points or (filled is not None and filled.startswith(f"target {int(backfill_points)}:"))
         flags.append(bool(store.done("pins" if mode == "pins" else "profile")) and bool(store.done("fill")) and bool(store.done("dense"))
                      and (not recheck or bool(store.done("recheck"))) and ok)
     return flags
@@ -346,7 +347,7 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         if recheck:
             PR.recheck(pr, k, d, st, store, deadline, say, walk_kind=kind)
         PR.backfill(pr, k, d, st, store, deadline, say, walk_kind=kind)
-        if store.done("backfill") is None:
+        if st.backfill_points > 0 and store.done("backfill") is None:
             log(f"[profile] out of time backfilling {tag}; relaunch to continue")
             break
         saved = store.state("bounds")

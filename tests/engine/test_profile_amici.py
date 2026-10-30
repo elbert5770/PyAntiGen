@@ -218,17 +218,21 @@ def test_a_profile_is_not_continued_at_a_different_optimum(tmp_path):
         PA.run(None, NAMES, BOUNDS, SCALES, xs + 0.01, str(tmp_path), mode="collect", log=lambda m: None)
 
 
-def test_a_side_is_finished_only_for_the_backfill_target_it_ran_with(tmp_path):
+def test_a_profile_without_backfill_is_finished_and_a_later_backfill_run_adds_to_it(tmp_path):
     p = LinearProvider()
     xs = _optimum(p)
-    st = PR.WalkSettings(backfill_points=3)
-    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), settings=st, log=lambda m: None)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), log=lambda m: None)
     store = PR.JsonlStore(str(tmp_path), PA.tag_of(0, 1))
-    assert store.done("backfill").startswith("target 3:")
+    assert store.done("backfill") is None
+    assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)]) == [True]                        # not asked for: finished
+    assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)], backfill_points=3) == [False]    # asked for: not yet
+    walked = len(store.read("profile"))
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(tmp_path), side=(0, 1), settings=PR.WalkSettings(backfill_points=3), log=lambda m: None)
+    assert store.done("backfill").startswith("target 3:") and len(store.read("profile")) == walked
     assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)], backfill_points=3) == [True]
-    assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)], backfill_points=5) == [False]   # relaunch with 5 runs it again
+    assert PA.sides_finished(str(tmp_path), NAMES, sides=[(0, 1)], backfill_points=5) == [False]    # another target runs again
     assert PA.settings_from_env({"PYANTIGEN_PROFILE_BACKFILL": "7"})[1].backfill_points == 7
-    assert PA.settings_from_env({})[1].backfill_points == 5
+    assert PA.settings_from_env({})[1].backfill_points == 0
 
 
 def test_the_anchor_error_names_the_fit_methods(tmp_path):

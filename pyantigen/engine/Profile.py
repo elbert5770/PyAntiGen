@@ -54,7 +54,7 @@ class WalkSettings:
     max_gap: float = 0.25           # densify: no two neighbouring points further apart than this (decades for a log parameter) ...
     max_dgap: float = 0.5           # ... or than this in dnll, up to the crossing
     dense_rounds: int = 12
-    backfill_points: int = 5        # backfill: converged points wanted between the optimum and the crossing (0: none)
+    backfill_points: int = 0        # backfill: converged points wanted between the optimum and the crossing (0: no backfill pass)
     backfill_rounds: int = 12
 
     @property
@@ -569,6 +569,8 @@ def backfill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=No
     """Last pass on a side: at least ``st.backfill_points`` converged points between the optimum and where the curve
     crosses the level, or, if it never does, where the walk gave up. Returns the inserted records.
 
+    It is optional: with ``backfill_points`` 0 (the default) nothing runs and no flag is written, so a profile made without it
+    is complete, and one run later with a target adds the points to the files the profile already has.
     The points are placed in the widest gap of the parameter (in decades), each fitted once and strictly, from the
     neighbours' vectors interpolated to its value. A gap that ends in the crossing is cut at the interpolated crossing, so
     a new point lies inside the level. A point that comes out over the level moves the crossing in, and a point that does
@@ -579,6 +581,8 @@ def backfill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=No
     store = store or MemoryStore()
     say = log or (lambda *_: None)
     target = int(st.backfill_points)
+    if target <= 0:
+        return store.read("backfill")
     tag = f"target {target}:"
     flag = store.done("backfill")
     if flag is not None and flag.startswith(tag):
@@ -640,7 +644,7 @@ def backfill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=No
         return done
     pts = ordered()
     inside = sum(1 for q in span(pts)[0] if q.verdict == "converged") if len(pts) > 1 else 0
-    if target > 0 and inside < target:
+    if inside < target:
         say(f"backfill: {inside} converged point(s) inside the level, short of {target}")
     store.finish("backfill", f"{tag} {len(done)} point(s) added, {inside} converged inside the level")
     return done

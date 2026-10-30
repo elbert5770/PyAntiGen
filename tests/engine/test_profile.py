@@ -245,11 +245,14 @@ def test_backfill_on_an_open_side_spreads_points_to_where_the_walk_gave_up():
     assert len([q for q in pts[1:-1] if q.verdict == "converged"]) >= 5
 
 
-def test_backfill_zero_does_nothing_and_a_new_target_runs_again():
-    st, store, pr = PR.WalkSettings(backfill_points=0), PR.MemoryStore(), problem()
+def test_backfill_is_off_by_default_and_a_later_run_adds_to_the_same_files():
+    st, store, pr = PR.WalkSettings(df_step=1.5), PR.MemoryStore(), problem()
+    assert st.backfill_points == 0
     PR.walk(pr, 0, +1, st, store)
-    assert PR.backfill(pr, 0, +1, st, store) == [] and store.done("backfill").startswith("target 0:")
-    st.backfill_points = 6
-    PR.backfill(pr, 0, +1, st, store)
+    n_before = len(store.read("profile"))
+    assert PR.backfill(pr, 0, +1, st, store) == [] and store.done("backfill") is None     # off: nothing run, no flag
+    st.backfill_points = 6                                                               # asked for afterwards
+    added = PR.backfill(pr, 0, +1, st, store)
+    assert added and len(store.read("profile")) == n_before                              # the walk's points are untouched
     assert len(_inside(store, st, "profile", "backfill")[1]) >= 6
     assert store.done("backfill").startswith("target 6:")
