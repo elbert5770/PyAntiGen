@@ -255,3 +255,19 @@ def test_the_fingerprint_without_the_optimum_does_not_move_with_a_refit():
     moved = [spec_fingerprint(args[0], x, *args[2:]) for x in ([1.0, 2.0], [1.3, 2.1])]
     assert moved[0] != moved[1]
     assert same[0][1] != moved[0][1]
+
+
+def test_warm_gain_is_the_recheck_drop_and_absent_without_a_recheck(tmp_path):
+    """The recheck result reaches the report as ``warm_gain``; a point that was never rechecked carries none."""
+    p = LinearProvider()
+    xs = _optimum(p)
+    plain, rechecked = tmp_path / "plain", tmp_path / "rechecked"
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(plain), side=(0, 1), log=lambda m: None)
+    PA.run(p, NAMES, BOUNDS, SCALES, xs, str(rechecked), side=(0, 1), recheck=True, log=lambda m: None)
+    key = lambda x: round(x, 12)
+    assert all("warm_gain" not in r for r in PA.completed_from_store(str(plain), NAMES, SCALES, key)["a"].values())
+    pts = PA.completed_from_store(str(rechecked), NAMES, SCALES, key)["a"].values()
+    gains = [r["warm_gain"] for r in pts if "warm_gain" in r]
+    assert gains and all(g >= 0.0 and math.isfinite(g) for g in gains)
+    # a quadratic profile is solved exactly by the walk, so the recheck has nothing to lower
+    assert max(gains) < 1e-6

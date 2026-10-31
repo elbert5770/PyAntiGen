@@ -209,8 +209,23 @@ def completed_from_store(store_dir, names, scales, key, mode="walk"):
     """The legacy ``{param: {key(x_fixed): raw}}`` dict from every side's files; one point per value, the lowest dnll."""
     completed = {n: {} for n in names}
     for name, recs in read_sides(store_dir, names, mode=mode).items():
+        earlier, rechecked = {}, set()
+        for r in recs:
+            if not r.usable:
+                continue
+            v = round(r.x_fixed, 12)
+            if str(r.source or "").startswith("recheck:"):
+                rechecked.add(v)
+            elif v not in earlier or r.dnll < earlier[v]:
+                earlier[v] = r.dnll
         for rec in curve(recs):
-            completed[name][key(rec.x_fixed)] = record_to_raw(rec, names, scales)
+            raw = record_to_raw(rec, names, scales)
+            v = round(rec.x_fixed, 12)
+            if v in rechecked and v in earlier:
+                # How far the recheck lowered the point below its best earlier value (0 if it did not): the direct
+                # measurement of the bias a capped point carried, the field the RoadRunner warm pass also writes.
+                raw["warm_gain"] = max(0.0, float(earlier[v] - rec.dnll))
+            completed[name][key(rec.x_fixed)] = raw
     return completed
 
 
