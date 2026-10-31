@@ -134,7 +134,7 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
                          "ytick.color": INK2, "text.color": INK})
     height = max(4.6, 0.33 * n + 2.8)
     fig = plt.figure(figsize=(16.5 if n > 6 else 12.5, height), facecolor=SURFACE)
-    gs = fig.add_gridspec(2, 2, width_ratios=[0.95, 1.1], height_ratios=[max(n, 4), max(k, 1) + 1.6], wspace=0.5, hspace=0.12, top=0.84, bottom=0.14)
+    gs = fig.add_gridspec(2, 2, width_ratios=[0.95, 1.1], height_ratios=[max(n, 4), max(k, 1) + 1.6], wspace=0.5, hspace=0.12, top=1.0 - 1.35 / height, bottom=0.14)   # 1.35 in above the axes: the figure title, then panel A's legend and title
     axA = fig.add_subplot(gs[:, 0], facecolor=SURFACE)
     axB = fig.add_subplot(gs[0, 1], facecolor=SURFACE)
     axC = fig.add_subplot(gs[1, 1], facecolor=SURFACE, sharex=axB)
@@ -223,7 +223,7 @@ def draw(path, title, names, scales, x, F, prof=None, k=3, thr=THRESHOLD, show=0
     cb.ax.tick_params(labelsize=8, length=0)
 
     cond_txt = "singular" if not math.isfinite(cond) else f"{cond:.3g}"
-    fig.suptitle(f"{title}   |   {n} parameters, condition number {cond_txt}", x=0.01, ha="left", fontsize=12.5, color=INK, y=0.985)
+    fig.suptitle(f"{title}   |   {n} parameters, condition number {cond_txt}", x=0.01, ha="left", fontsize=12.5, color=INK, y=0.995)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     fig.savefig(path, dpi=dpi, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
