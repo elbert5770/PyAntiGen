@@ -67,6 +67,15 @@ def run_steady_state(model_text, paths, settings):
         print(s, rss.getValue(s))
 
 
+def _print_comparison(label, rows, show=8):
+    """The AMICI-versus-RoadRunner disagreement of one replicate, worst columns first."""
+    print(f"[compare] {label}: AMICI vs RoadRunner on {len(rows)} shared column(s); "
+          f"max relative difference {rows[0][2]:.3e} ({rows[0][0]})" if rows else
+          f"[compare] {label}: no shared column")
+    for name, diff, rel, at, a, b in rows[:show]:
+        print(f"    {name:<48s} max|diff| {diff:.3e}   relative {rel:.3e}   at {at:.6g} h: AMICI {a:.6g}, RoadRunner {b:.6g}")
+
+
 def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=None):
 
     data_path = paths["data_path"]
@@ -75,7 +84,15 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
     print("run_simulation", MODEL_NAME)
     save_path = os.path.join(repo_root, "generated", MODEL_NAME, MODEL_NAME + "_events.txt")
 
+    use_amici = str(settings.get("backend") or "roadrunner").lower() == "amici"
+    if use_amici:
+        if parameter_overrides:
+            raise ValueError("parameter_overrides are not supported with the AMICI backend")
+        from pyantigen.engine.Backend import default_cache_dir, explicit_cache_dir
+        cache_dir = explicit_cache_dir(settings.get("amici_cache_dir")) or default_cache_dir()
+
     results_dict = {}
+    left_out = {}
     experiment = EXPERIMENT_dict['EXPERIMENT']
     for label, replicate in experiment.replicates.items():
         print("Label", label)
@@ -88,6 +105,10 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
         full_model_text = model_text + "\n" + events
 
         r = TelluriumGen(full_model_text, paths, settings)
+        if use_amici:
+            # the replay AMICI's setup runs restores this baseline before Update_parameters, as an optimization does
+            from pyantigen.engine.Optimize import remember_parameter_baseline
+            remember_parameter_baseline(r)
 
         replicate["Update_parameters"](r, replicate)
         if parameter_overrides:
@@ -103,7 +124,19 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
 
         solver_settings = replicate["Solver_settings"](replicate)
         observed_species = replicate["Observed_species"](r)
-        results = simulate(r, solver_settings, observed_species)
+        if use_amici:
+            from pyantigen.engine.Simulate_amici import compare_results, simulate_amici
+            roadrunner = simulate(r, solver_settings, observed_species) if settings.get("compare_backends") else None
+            results, dropped = simulate_amici(
+                replicate, r, events, model_text, paths, replicate["Label"], cache_dir, solver_settings,
+                verbose=settings.get("Verbose", True), seed=settings.get("amici_seed"))
+            if dropped:
+                left_out[replicate["Label"]] = dropped
+                print(f"[amici] {replicate['Label']}: not in the SBML, left out: {dropped}")
+            if roadrunner is not None:
+                _print_comparison(replicate["Label"], compare_results(results, roadrunner))
+        else:
+            results = simulate(r, solver_settings, observed_species)
 
 
         results_dict[replicate["Label"]] = {
@@ -114,7 +147,15 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
             "solver_settings": solver_settings,
             "events": events
         }
-    EXPERIMENT_dict["plot"](paths,results_dict)
+    try:
+        EXPERIMENT_dict["plot"](paths,results_dict)
+    except KeyError as e:
+        if not left_out:
+            raise
+        # AMICI does not output reaction rates, so a plot that reads one cannot be drawn from its result.
+        need = str(e.args[0] if e.args else e).split(". Available")[0]
+        print(f"[amici] plot skipped: {need}, a column AMICI does not provide "
+              f"(left out above). Run without --backend amici to draw the figure.")
     return results_dict
 
 def setup_simulation(settings, EXPERIMENT_dict, parameter_overrides=None):

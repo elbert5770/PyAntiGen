@@ -550,7 +550,7 @@ class _SimGradient:
         varying = set()
         for point in probes:
             _v, J0 = ParameterReplay(r, replicate, param_names, plain0).jacobian(point)
-            varying |= {p for p, hit in zip(plain0, np.abs(J0).max(axis=1) > 0) if hit}
+            varying |= {p for p, hit in zip(plain0, np.abs(J0).max(axis=1, initial=0.0) > 0) if hit}
         sbml, self.frozen = freeze_stale_assignments(
             sbml, r, protected=schedule.assigned_variables(), varying=varying, everything=True)
         plain = _plain_parameters(sbml)
@@ -618,6 +618,12 @@ class _SimGradient:
                               TelluriumGen):
         """No schedule on the replicate: read it from the event text, and drop those events from the model."""
         events = model.get("events") or ""
+        if not events.strip() and replicate.get("no_inputs"):
+            # the replicate says nothing is clock-driven (an unperturbed natural-history run): an empty
+            # schedule, and the model as it is, since there are no events to drop from it. Without that
+            # statement an empty replicate is refused below -- it is more likely a forgotten schedule.
+            r = model["r"]
+            return InputSchedule({p: float(r[p]) for p in r.getGlobalParameterIds()}), r
         if "at (" not in events and "at(" not in events:
             raise AnalyticGradientError(
                 "the replicate has no schedule and no events to read one from; "
@@ -664,6 +670,25 @@ class _SimGradient:
         D = np.zeros((len(T), len(self.columns), J.shape[1]))
         D[:, 1:, :] = np.einsum("tcm,mk->tck", SY, Jfree)
         return SimTable(self.columns, data), D
+
+    def trajectory(self, times):
+        """The outputs at *times* (all after the start of the window) with the model as the engine builds it.
+
+        No fitted parameter: this is the simulation, not the objective; the seed (``analytic_gradient['seed']``) still applies. Returns an array
+        ``(len(times), len(self.columns) - 1)``, the columns in ``self.columns[1:]``.
+        """
+        none = np.zeros(0)
+        values = self.replay.values(none)
+        direct = self.replay.direct_species(none)
+        times = np.asarray(times, dtype=float)
+        if (times <= self.t_start).any():
+            raise AnalyticGradientError(
+                f"{self.name}: AMICI reports the end of each segment, so a time at or before the start of the "
+                f"simulation ({self.t_start:g} h) is not available")
+        Y, _ = self.runner.run_outputs(dict(values), self.t_start, float(times.max()), list(times), wrt=[],
+                                       initial={**self.seed, **(direct or {})} or None,
+                                       initial_inputs=self._engine_initial_inputs(dict(values)))
+        return Y
 
     def _engine_initial_inputs(self, theta):
         """What each assigned input holds before its first step, as the engine's model holds it.
