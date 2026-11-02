@@ -90,6 +90,11 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
             raise ValueError("parameter_overrides are not supported with the AMICI backend")
         from pyantigen.engine.Backend import default_cache_dir, explicit_cache_dir
         cache_dir = explicit_cache_dir(settings.get("amici_cache_dir")) or default_cache_dir()
+        # Figures, parity CSVs and caches go to results/<MODEL>_amici, so an AMICI run never overwrites the
+        # RoadRunner figures it is being compared with (and a figure that reads another figure's CSV reads the AMICI one).
+        paths = dict(paths, plot_path=os.path.normpath(paths["plot_path"]) + "_amici", backend="amici")
+        os.makedirs(paths["plot_path"], exist_ok=True)
+        print(f"[amici] figures go to {paths['plot_path']}")
 
     results_dict = {}
     left_out = {}

@@ -252,6 +252,25 @@ def test_fixed_times_too_close_to_tell_apart_are_still_refused():
         s.validate()
 
 
+def test_an_observation_a_rounding_error_from_a_dose_is_put_on_it():
+    s = InputSchedule({"a": 1.0})
+    s.step(3.0, {"x": "1"})
+    with pytest.raises(ScheduleError):                          # the raw pair is too close to separate
+        InputSchedule._check_gaps([(3.0, Breakpoint(3.0)), (3.0 + 1e-10, Breakpoint(3.0 + 1e-10))],
+                                  {Breakpoint(3.0)}, 1e-9)
+    assert s.snap_observations([1.0, 3.0 + 1e-10, 5.0]) == [1.0, 3.0, 5.0]
+    seg = s.segments(0, 5, observation_times=[1.0, 3.0 + 1e-10, 5.0])
+    assert [x.end for x in seg] == [Breakpoint(1.0), Breakpoint(3.0), Breakpoint(5.0)]
+
+
+def test_snapping_keeps_one_row_per_observation():
+    s = InputSchedule({"a": 1.0})
+    s.step(3.0, {"x": "1"})
+    # an observation already exactly on the dose keeps it; the near one is left (and refused), not merged
+    assert s.snap_observations([3.0, 3.0 + 1e-10]) == [3.0, 3.0 + 1e-10]
+    assert s.snap_observations([3.0 + 1e-6]) == [3.0 + 1e-6]       # beyond the tolerance: untouched
+
+
 # --- against RoadRunner and the events the project used to write ------------------
 
 LEGACY_Q_LEAK = ("at (time >= 0.0 ): Q_Leak = 15.0\n"

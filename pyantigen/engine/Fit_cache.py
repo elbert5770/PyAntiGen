@@ -124,10 +124,72 @@ def data_fingerprint(models):
     return h.hexdigest()[:16]
 
 
+def parameter_fingerprint(models, exclude=()):
+    """Hash of every model parameter that is held, not fitted, as each replicate starts a run.
+
+    A project can set values after the model text is read (an ``Update_parameters`` hook, a registry), so neither the model
+    hash nor the spec sees them. The values are read from the baseline each model recorded just after that hook ran, with
+    the fitted parameters left out (their start is in ``x0``) and the assignment-rule parameters left out (they follow
+    from the others).
+    """
+    from pyantigen.engine import Model_cache as _model_cache
+    skip = set(exclude)
+    h = hashlib.sha256()
+    for name in sorted(models or {}, key=str):
+        h.update(str(name).encode("utf-8"))
+        base = _model_cache.get((models[name] or {}).get("r"), "_pyantigen_param_baseline")
+        if base is None:
+            h.update(b"no-baseline")
+            continue
+        ids, idx, vals = base
+        for j, v in zip(idx, vals):
+            if ids[j] not in skip:
+                h.update(f"{ids[j]}={float(v)!r};".encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def loss_fingerprint(groups, replicates):
+    """Hash of the loss configuration of every scored block: observables, declared sigmas, weights.
+
+    ``groups`` carry the key names only in :func:`fit_fingerprint`, but a loss config (a dict, or a function of the
+    replicate that returns one) holds what the fit minimizes -- the declared sigma of a block among it -- so a changed
+    value is a different fit. Functions are hashed by name; whatever cannot be read contributes its type name, which is
+    deterministic and so makes a stale record a miss.
+    """
+    def _norm(v):
+        if isinstance(v, dict):
+            return {str(k): _norm(x) for k, x in sorted(v.items(), key=lambda kv: str(kv[0]))}
+        if isinstance(v, (list, tuple)):
+            return [_norm(x) for x in v]
+        if isinstance(v, (bool, str)) or v is None:
+            return v
+        if isinstance(v, (int, float, np.integer, np.floating)):
+            return round(float(v), 12) if np.isfinite(float(v)) else None
+        if callable(v):
+            return f"<{getattr(v, '__module__', '')}.{getattr(v, '__qualname__', type(v).__name__)}>"
+        return f"<{type(v).__name__}>"
+
+    out = {}
+    for g_name, g in sorted((groups or {}).items(), key=lambda kv: str(kv[0])):
+        elems = []
+        for elem in (g or {}).get("loss_elements", []):
+            e = {k: _norm(v) for k, v in elem.items() if k != "loss_config"}
+            fn = elem.get("loss_config")
+            sims = elem.get("simulations") or [elem.get("data_simulation") or elem.get("simulation")]
+            try:
+                sim = next(s for s in sims if s in (replicates or {}))
+                e["loss_config"] = _norm(fn(replicates[sim]) if callable(fn) else fn)
+            except Exception:
+                e["loss_config"] = _norm(fn)
+            elems.append(e)
+        out[str(g_name)] = elems
+    return hashlib.sha256(json.dumps(out, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
 def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
                     method, optimizer_kwargs, n_starts=1, start_seed=None,
                     search_decades=None, solver_hash=None, data_hash=None,
-                    start_sampler="lhs"):
+                    start_sampler="lhs", parameter_hash=None, loss_hash=None):
     """Hashes identifying a fit *problem*, before it has been solved.
 
     Deliberately distinct from :func:`pyantigen.engine.Profile_checkpoint.spec_fingerprint`,
@@ -188,6 +250,12 @@ def fit_fingerprint(param_names, x0_lin, bounds_lin, scales, groups, model_text,
     }
     if _sigma_mode != "cap":
         key["sigma_floor"] = _sigma_mode
+    # Held parameter values and the loss configuration (see parameter_fingerprint, loss_fingerprint). Left out when not
+    # given, so callers without the replicates in hand keep the hash they had.
+    if parameter_hash is not None:
+        key["held_parameters"] = parameter_hash
+    if loss_hash is not None:
+        key["loss"] = loss_hash
     # Left out at the default so fits cached before the sampler existed keep
     # their hash, and left out at one start, where nothing is sampled, so that
     # a project-wide default of "sobol" does not invalidate single-start fits.

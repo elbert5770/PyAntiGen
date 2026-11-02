@@ -7530,7 +7530,9 @@ def run_optimization_from_groups(
         method = optimization_spec.method
         optimizer_kwargs = optimization_spec.optimizer_kwargs or {}
         selected_group_names = set(optimization_spec.groups.keys())
-        groups_tag = "_".join(sorted(selected_group_names))
+        # The spec's own tag names its files and directories when it has one: two problems that fit the same groups
+        # (a variant that holds one parameter, say) would otherwise write figures and stores under one name.
+        groups_tag = getattr(optimization_spec, "tag", None) or "_".join(sorted(selected_group_names))
 
         # ── Parameter scaling ─────────────────────────────────────────────
         # The optimizer, Hessian, slice and profile all work in "opt space";
@@ -7687,7 +7689,8 @@ def run_optimization_from_groups(
         # x0", and that must stay literally true.
         fit_cache = None
         if fit_mode == "optimize" and reuse_fit:
-            from pyantigen.engine.Fit_cache import FitCache, fit_fingerprint, data_fingerprint
+            from pyantigen.engine.Fit_cache import (
+                FitCache, fit_fingerprint, data_fingerprint, parameter_fingerprint, loss_fingerprint)
             from pyantigen.engine.Profile_checkpoint import solver_fingerprint
             _fit_model_hash, _fit_hash = fit_fingerprint(
                 param_names, x0_lin, bounds_lin, scales,
@@ -7699,6 +7702,9 @@ def run_optimization_from_groups(
                 solver_hash=solver_fingerprint(active_replicates),
                 data_hash=data_fingerprint(
                     {k: models[k] for k in active_replicates}),
+                parameter_hash=parameter_fingerprint(
+                    {k: models[k] for k in active_replicates}, exclude=param_names),
+                loss_hash=loss_fingerprint(optimization_spec.groups, active_replicates),
             )
             fit_cache = FitCache(paths.get("plot_path"), groups_tag,
                                  _fit_model_hash, _fit_hash, len(param_names))

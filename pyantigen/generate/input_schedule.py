@@ -735,6 +735,31 @@ class InputSchedule:
 
     # -- segments ----------------------------------------------------------
 
+    def snap_observations(self, observation_times, tol=1e-9):
+        """*observation_times* with any that miss a fixed switch by less than *tol* h put exactly on it.
+
+        An observation meant for a dose time can land a rounding error away from it (the data time and the
+        dose time are computed differently); the two would be refused as too close to separate. An
+        observation is read after the switch it sits on, so snapping onto the switch reads the same state.
+        Order and length are kept, because the runner returns one row per observation. An observation
+        is left alone if another already sits on that switch, since the two would merge into one row.
+        """
+        times = list(observation_times)
+        fixed = sorted({float(bp.anchor) for bp, _a in self.events() if bp.fixed})
+        if not fixed or not times:
+            return times
+        taken = {float(t) for t in times} & set(fixed)
+        out = []
+        for t in times:
+            t = float(t)
+            i = bisect.bisect_left(fixed, t)
+            near = [f for f in fixed[max(i - 1, 0):i + 1] if f != t and abs(f - t) < tol]
+            if near and (f := min(near, key=lambda f: abs(f - t))) not in taken:
+                taken.add(f)
+                t = f
+            out.append(t)
+        return out
+
     def segments(self, t_start, t_end, observation_times=(), params=None):
         """Cut [t_start, t_end] at every switch and every observation time.
 
@@ -748,6 +773,7 @@ class InputSchedule:
             raise ScheduleError("t_end must be after t_start")
         params = self.params if params is None else params
         self.validate(params)
+        observation_times = self.snap_observations(observation_times)
         extra = {Breakpoint(t_start), Breakpoint(t_end)} | {Breakpoint(t) for t in observation_times}
         timed = self._ordered(set(self.breakpoints()) | extra, params)
         lo, hi = float(t_start), float(t_end)
@@ -926,6 +952,7 @@ class InputSchedule:
         if missing:
             raise ScheduleError(f"no value for parameter(s) {missing}")
         initial = initial or {}
+        observation_times = self.snap_observations(observation_times)
         obs = {Breakpoint(t) for t in observation_times}
         steps = dict(self.events())
 

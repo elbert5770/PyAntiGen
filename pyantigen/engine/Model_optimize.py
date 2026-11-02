@@ -1195,7 +1195,7 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             reuse_fit=settings.get("reuse_fit", True),
         )
 
-        groups_tag = "_".join(opt.get("groups", ["ALL"]))
+        groups_tag = getattr(optimization_settings, "tag", None) or "_".join(opt.get("groups", ["ALL"]))
         # run_label (e.g. "Example4", set by the CLI selection in Model_run.py)
         # distinguishes runs that share the same optimization groups -- e.g.
         # Example4 and Example5 both fit group "Flipflop" -- so their CSVs and

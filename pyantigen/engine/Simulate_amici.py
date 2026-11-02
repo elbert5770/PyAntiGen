@@ -69,6 +69,11 @@ def compare_results(amici_result, roadrunner_result, rel_floor=1e-9):
     Rows where either solver is NaN (the window start) are skipped. The relative figure is scaled by the
     column's own largest value, so a column that is zero throughout does not blow it up. *time*, *a* and *b* are
     where the largest difference is and what AMICI and RoadRunner hold there.
+
+    RoadRunner repeats a time stamp where one simulation block ends and the next begins: the first row is the
+    state before the switches at that time, the second the state after them. AMICI reads a time once, after
+    the switches (a dose given at t shows at t), and puts that value in both rows. Only the last row of such a
+    repeat is compared, so a switch at a block boundary is not reported as a disagreement.
     """
     a_cols, b_cols = list(amici_result.colnames), list(roadrunner_result.colnames)
     a = np.asarray(amici_result)
@@ -76,11 +81,15 @@ def compare_results(amici_result, roadrunner_result, rel_floor=1e-9):
     if a.shape[0] != b.shape[0]:
         raise ValueError(f"the solvers returned {a.shape[0]} and {b.shape[0]} rows")
     rows = []
+    t = b[:, b_cols.index("time")]
+    # a row whose successor has the same time is the pre-switch half of a repeated time stamp
+    before_switch = np.zeros(len(t), dtype=bool)
+    before_switch[:-1] = np.abs(np.diff(t)) <= np.maximum(1e-9, 1e-12 * np.abs(t[1:]))
     for c in a_cols:
         if c == "time" or c not in b_cols:
             continue
         x, y = a[:, a_cols.index(c)], b[:, b_cols.index(c)]
-        ok = np.isfinite(x) & np.isfinite(y)
+        ok = np.isfinite(x) & np.isfinite(y) & ~before_switch
         if not ok.any():
             continue
         gap = np.abs(x[ok] - y[ok])

@@ -714,3 +714,37 @@ def test_start_sampler_sobol_changes_fit_hash_only():
 
 def test_start_sampler_ignored_at_one_start():
     assert _fp(start_sampler="sobol") == _fp()
+
+
+class _Model:
+    """Stands in for a RoadRunner: only carries the parameter baseline the engine records on it."""
+    def __init__(self, **values):
+        from pyantigen.engine import Model_cache
+        ids = list(values)
+        Model_cache.put(self, "_pyantigen_param_baseline",
+                        (ids, np.arange(len(ids)), np.array(list(values.values()), dtype=float)))
+
+
+def test_held_parameter_values_change_the_fit_hash():
+    from pyantigen.engine.Fit_cache import parameter_fingerprint
+    a = parameter_fingerprint({"s": {"r": _Model(k=1.0, held=2.0)}}, exclude=["k"])
+    assert a == parameter_fingerprint({"s": {"r": _Model(k=1.0, held=2.0)}}, exclude=["k"])
+    assert a != parameter_fingerprint({"s": {"r": _Model(k=1.0, held=2.5)}}, exclude=["k"])
+    # a fitted parameter's start is in x0, not here
+    assert a == parameter_fingerprint({"s": {"r": _Model(k=9.0, held=2.0)}}, exclude=["k"])
+    assert _fp(parameter_hash=a) != _fp()
+    assert _fp(parameter_hash=a)[0] == _fp()[0]          # the model hash does not move
+
+
+def test_declared_sigma_changes_the_fit_hash():
+    from pyantigen.engine.Fit_cache import loss_fingerprint
+    def groups(sigma):
+        return {"G": {"loss_elements": [{"simulation": "s", "loss_config": lambda rep: {"sigma_value": sigma}}]}}
+    reps = {"s": {}}
+    a = loss_fingerprint(groups(0.01), reps)
+    assert a == loss_fingerprint(groups(0.01), reps)
+    assert a != loss_fingerprint(groups(0.02), reps)
+    assert _fp(loss_hash=a) != _fp()
+    # a plain dict config is read as it is, and an unreadable function still gives a stable hash
+    g = {"G": {"loss_elements": [{"simulation": "s", "loss_config": {"sigma_value": 1}}]}}
+    assert loss_fingerprint(g, reps) == loss_fingerprint(g, reps)
