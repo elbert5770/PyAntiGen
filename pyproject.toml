@@ -27,6 +27,7 @@ classifiers = [
 ]
 dependencies = [
   "tellurium",
+  "six",       # tellurium.visualization imports it, but recent tellurium releases no longer declare it
   "scipy",
   "numpy",
   "pandas",
