@@ -11,7 +11,8 @@ Slurm array the way the profile sides are. The spec says what the starts are (``
                 unconverged one from where it stopped, so a killed or timed-out task is run again with the same command;
 * ``collect``   fit nothing: read every start, say which are missing or unconverged (``unfinished.txt``, the task ids for
                 ``sbatch --array=``), report the basins, and write ``best.json`` in the shape of a saved fit
-                (``{"complete": {"parameters", "fun", ...}}``), so the winner is read like any other fit.
+                (``{"complete": {"parameters", "fun", ...}}``), so the winner is read like any other fit, and draw ``waterfall.png`` (the
+                starts' final ΔNLL, best to worst; ``Multistart_plot`` redraws it from the directory).
 
 The files live in ``<plot_path>/multistart/<fit id>/``, named for the fit problem like the fit cache, and the fit cache
 itself is never written: a start that is not x0 must not become the cached fit of the problem.
@@ -143,4 +144,10 @@ def collect(directory, param_names, n_starts, cluster_radius=0.15, report_dnll=1
               "gain_over_start_0": gain, "better_than_start_0": bool(better),
               "starts": [{"start": r["start"], "f": r["f"]} for r in sorted(done, key=lambda r: r["f"])]}
     _write(os.path.join(directory, "multistart_report.json"), report)
+    try:
+        from pyantigen.engine.Multistart_plot import plot_directory
+        log(f"[multistart] waterfall plot: {plot_directory(directory, n_starts=n_starts, dnll=report_dnll)}")
+    except Exception as exc:       # the plot is a convenience: a missing matplotlib must not fail the collect
+        log(f"[multistart] waterfall plot not drawn ({type(exc).__name__}: {exc}); "
+            f"draw it later with python -m pyantigen.engine.Multistart_plot {directory}")
     return report

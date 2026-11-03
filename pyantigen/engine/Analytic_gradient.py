@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import tempfile
 
 import numpy as np
@@ -398,20 +399,33 @@ class ParameterReplay:
 # AMICI
 # ---------------------------------------------------------------------------------------
 
+_BUILD_THREAD_LOCKS = {}
+_BUILD_THREAD_LOCKS_GUARD = threading.Lock()
+
+
 @contextlib.contextmanager
 def _build_lock(directory):
-    """Hold an exclusive lock on one model's build, across processes (a Slurm array compiles the same model at once).
+    """Hold an exclusive lock on one model's build, across threads, processes and nodes (a Slurm array compiles the same model at once).
 
     Whoever gets the lock first compiles; the rest wait, then find the finished module and import it. The lock file
-    sits beside the model directory, and ``flock`` is released if the holder dies.
+    sits beside the model directory, and the lock is released if the holder dies.
+
+    It is a POSIX (``lockf``) lock, not ``flock``: on GPFS (Hyak's /mmfs1 and /gscratch) ``flock`` is only local to a node, so
+    array tasks on different nodes all "held" it at once and built into the same directory (measured 2026-11-02: two
+    nodes both acquired an exclusive flock within 0.4 s of each other, while ``lockf`` serialized all six tasks).
+    A POSIX lock belongs to the process, so it does not stop a second thread of the same process; a per-directory thread lock
+    does that.
     """
     os.makedirs(os.path.dirname(directory) or ".", exist_ok=True)
-    with open(directory + ".lock", "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    with _BUILD_THREAD_LOCKS_GUARD:
+        thread_lock = _BUILD_THREAD_LOCKS.setdefault(directory, threading.Lock())
+    with thread_lock:
+        with open(directory + ".lock", "a") as fh:
+            fcntl.lockf(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.lockf(fh, fcntl.LOCK_UN)
 
 
 def _model_directory(cache_dir, name, tag):
