@@ -16,6 +16,12 @@ Slurm array the way the profile sides are. The spec says what the starts are (``
 
 The files live in ``<plot_path>/multistart/<fit id>/``, named for the fit problem like the fit cache, and the fit cache
 itself is never written: a start that is not x0 must not become the cached fit of the problem.
+
+One objective for every start. With ``PYANTIGEN_SIGMA_FLOOR=fixed`` the noise floors are the sigmas, and each is calibrated
+against the model's shape at the first point a process evaluates. Left alone every task would calibrate at its own random start,
+and the starts' f values would be values of different functions. So the first task calibrates at start 0 (the spec's x0) and
+writes ``floors.pkl`` (the way a profile does, ``Profile_amici.use_floors``); every task loads that file before its first
+fit evaluation; each start's record carries the file's stamp; and ``collect`` ranks only the starts that carry it.
 """
 import json
 import math
@@ -75,15 +81,69 @@ def _write(path, obj):
     os.replace(tmp, path)
 
 
+FLOORS_FILE = "floors.pkl"
+
+
+def floors_stamp(directory):
+    """Stamp of the floors file the starts share, or None when no task has written it."""
+    from pyantigen.engine import Floors
+    path = os.path.join(directory, FLOORS_FILE)
+    return Floors.file_sha(path) if os.path.exists(path) else None
+
+
+def use_floors(directory, x0, provider, scales, log=print):
+    """Score this process under the floors every start shares; returns their stamp.
+
+    The file is written once, by whichever task gets there first, from a calibration at *x0* (start 0, the spec's own x0), the
+    point the floors would have in a single fit. Any later task, and a relaunch, loads the file and evaluates nothing here. When
+    two tasks race, ``os.link`` lets one file win and both load that one.
+    """
+    from pyantigen.engine import Floors
+    from pyantigen.engine.Profile_lm import amici_evaluate
+
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, FLOORS_FILE)
+    if not os.path.exists(path):
+        log(f"[multistart] no shared floors yet: calibrating them at start 0 (one evaluation) -> {path}")
+
+        def calibrate_here():
+            if amici_evaluate(provider, scales)(np.asarray(x0, float)) is None:
+                raise RuntimeError("the objective failed at start 0 (the spec's x0), so the noise floors cannot be calibrated; "
+                                   "every start would be scored under a different function. Fix x0 first.")
+
+        snapshot = Floors.calibrate(calibrate_here)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        Floors.save(snapshot, tmp)
+        try:
+            os.link(tmp, path)                  # fails if another task got there first; theirs then wins
+        except FileExistsError:
+            pass
+        finally:
+            os.remove(tmp)
+    _snapshot, stamp = Floors.load(path)           # also seeds this process's cache with the shared floors
+    log(f"[multistart] floors {stamp} ({path})")
+    return stamp
+
+
 def run_task(i, points, provider, bounds, scales, directory, options=None, deadline=None, log=print):
-    """Fit from start *i* (``points[i]``, optimizer space) and write ``start_<i>.json``; returns the record."""
+    """Fit from start *i* (``points[i]``, optimizer space) and write ``start_<i>.json``; returns the record.
+
+    A record written under other floors (or none: a run from before the floors were shared) is not a result of this
+    objective. Such a start is fitted again from its own start point.
+    """
     from pyantigen.engine.Fit_lm import lm_fit
     from pyantigen.engine.Optimize import _to_linear
 
     prev = _read(directory, i)
-    if prev is not None and prev.get("converged"):
+    shared = floors_stamp(directory)
+    if prev is not None and prev.get("converged") and shared is not None and prev.get("floors") == shared:
         log(f"[multistart] start {i} already converged (f {prev['f']:.6f}); nothing to run")
         return prev
+    stamp = use_floors(directory, points[0], provider, scales, log=log)
+    if prev is not None and prev.get("floors") != stamp:
+        log(f"[multistart] start {i}: the saved fit (f {prev['f']:.6f}) was scored under other floors "
+            f"({prev.get('floors')}); fitting again from its start point")
+        prev = None
     x_start = np.asarray(prev["x"] if prev else points[i], float)
     if prev:
         log(f"[multistart] start {i}: continuing an unconverged fit from f {prev['f']:.6f}")
@@ -91,7 +151,8 @@ def run_task(i, points, provider, bounds, scales, directory, options=None, deadl
     rec = {"start": int(i), "x_start": [float(v) for v in points[i]], "x": [float(v) for v in res.x],
            "x_lin": [float(v) for v in _to_linear(np.asarray(res.x, float), scales)], "f": float(res.fun),
            "converged": bool(res.success), "verdict": res.verdict, "pg": None if res.pg is None else float(res.pg),
-           "evals": int(res.nfev) + int(prev["evals"] if prev else 0), "saved": time.strftime("%Y-%m-%d %H:%M:%S")}
+           "evals": int(res.nfev) + int(prev["evals"] if prev else 0), "floors": stamp,
+           "saved": time.strftime("%Y-%m-%d %H:%M:%S")}
     _write(_path(directory, i), rec)
     log(f"[multistart] start {i}: {res.verdict}, f {res.fun:.6f}")
     return rec
@@ -107,6 +168,12 @@ def collect(directory, param_names, n_starts, cluster_radius=0.15, report_dnll=1
     from pyantigen.engine.Multistart import basins
 
     recs = [_read(directory, i) for i in range(int(n_starts))]
+    shared = floors_stamp(directory)
+    stale = [i for i, r in enumerate(recs) if r is not None and r.get("floors") != shared]
+    if stale:
+        log(f"[multistart] start(s) {stale} were scored under other noise floors than the shared {shared}: their f is a value of "
+            "another objective and is not ranked. Relaunch them.")
+    recs = [None if i in stale else r for i, r in enumerate(recs)]
     todo = [i for i, r in enumerate(recs) if r is None or not r.get("converged")]
     from pyantigen.engine import Unfinished
     Unfinished.write(directory, todo)
@@ -138,10 +205,10 @@ def collect(directory, param_names, n_starts, cluster_radius=0.15, report_dnll=1
     else:
         log("[multistart] start 0 stands: no start found a lower optimum.")
     fit = {"complete": {"parameters": dict(zip(param_names, best["x_lin"])), "fun": best["f"], "saved": best["saved"],
-                        "success": True, "start": best["start"]}}
+                        "success": True, "start": best["start"], "floors": shared}}
     _write(os.path.join(directory, "best.json"), fit)
     report = {"n_starts": int(n_starts), "unfinished": todo, "verdict": verdict, "best": best["start"], "f_best": best["f"],
-              "gain_over_start_0": gain, "better_than_start_0": bool(better),
+              "gain_over_start_0": gain, "better_than_start_0": bool(better), "floors": shared,
               "starts": [{"start": r["start"], "f": r["f"]} for r in sorted(done, key=lambda r: r["f"])]}
     _write(os.path.join(directory, "multistart_report.json"), report)
     try:

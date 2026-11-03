@@ -97,3 +97,57 @@ def test_unfinished_list_is_also_written_where_the_submitter_asks(tmp_path, monk
 def test_a_multistart_stage_is_recognised_so_the_fit_cache_cannot_short_circuit_it():
     assert MA.requested({"PYANTIGEN_MULTISTART": "3"}) and MA.requested({"PYANTIGEN_MULTISTART": "collect"})
     assert not MA.requested({}) and not MA.requested({"PYANTIGEN_MULTISTART": "  "})
+
+
+# ---- one objective for every start: the noise floors are calibrated once, at start 0, and shared ----
+
+class Floored:
+    """r = (p - target) / sigma, with sigma calibrated on the FIRST point evaluated and cached (as Noise_floor does)."""
+
+    def linear_residual_jacobian(self, p):
+        from pyantigen.engine import Noise_floor
+        sigma = Noise_floor._FLOOR_CACHE.setdefault(("sigma",), abs(float(p[0])) + 1.0)
+        return (np.asarray(p) - np.array([1.0, -2.0])) / sigma, np.eye(2) / sigma, 0.0
+
+
+@pytest.fixture
+def fresh_floors():
+    from pyantigen.engine import Noise_floor
+    Noise_floor.clear_cache()
+    yield Noise_floor
+    Noise_floor.clear_cache()
+
+
+def test_every_start_is_scored_under_the_floors_calibrated_at_start_0(tmp_path, fresh_floors):
+    d = str(tmp_path)
+    r1 = MA.run_task(1, POINTS, Floored(), BOUNDS, SCALES, d, log=lambda m: None)      # start 1 first: it must still calibrate at start 0
+    assert fresh_floors._FLOOR_CACHE[("sigma",)] == pytest.approx(6.0)                  # |POINTS[0][0]| + 1, not |POINTS[1][0]| + 1
+    fresh_floors.clear_cache()                                                          # a new task is a new process
+    r0 = MA.run_task(0, POINTS, Floored(), BOUNDS, SCALES, d, log=lambda m: None)
+    assert fresh_floors._FLOOR_CACHE[("sigma",)] == pytest.approx(6.0)
+    assert r0["floors"] == r1["floors"] == MA.floors_stamp(d) is not None
+
+
+def test_a_later_task_loads_the_shared_file_and_does_not_calibrate(tmp_path, fresh_floors):
+    d = str(tmp_path)
+    MA.run_task(0, POINTS, Floored(), BOUNDS, SCALES, d, log=lambda m: None)
+    fresh_floors.clear_cache()
+    lines = []
+    MA.run_task(2, POINTS, Floored(), BOUNDS, SCALES, d, log=lines.append)
+    assert not any("calibrating" in m for m in lines) and any("floors " in m for m in lines)
+
+
+def test_a_start_scored_under_other_floors_is_fitted_again_and_not_ranked(tmp_path, fresh_floors):
+    d = str(tmp_path)
+    MA.run_task(0, POINTS, Floored(), BOUNDS, SCALES, d, log=lambda m: None)
+    old = {"start": 1, "x_start": [-5.0, 3.0], "x": [1.0, -2.0], "x_lin": [1.0, -2.0], "f": -99.0, "converged": True,
+           "verdict": "converged", "pg": 0.0, "evals": 4, "saved": "then"}                # no floors stamp: from before they were shared
+    MA._write(MA._path(d, 1), old)
+    lines = []
+    rep = MA.collect(d, NAMES, 2, log=lines.append)
+    assert rep["unfinished"] == [1] and rep["best"] == 0 and any("other noise floors" in m for m in lines)
+    fresh_floors.clear_cache()
+    new = MA.run_task(1, POINTS, Floored(), BOUNDS, SCALES, d, log=lines.append)
+    assert new["floors"] == MA.floors_stamp(d) and new["f"] != -99.0 and new["x_start"] == [-5.0, 3.0]
+    assert any("fitting again" in m for m in lines)
+    assert MA.collect(d, NAMES, 2, log=lambda m: None)["unfinished"] == []

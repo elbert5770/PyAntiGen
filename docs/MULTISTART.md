@@ -65,3 +65,21 @@ themselves and ignore `n_starts` and `start_sampler`.
 This is distinct from `sobol_analysis`, the variance-based sensitivity
 diagnostic (`_SOBOL_ONLY`), which samples the bounds to apportion variance in
 the loss and does not search for a minimum.
+
+## Multi-start on the AMICI route (Slurm array)
+
+With `method="LM"` and `--backend amici` each start is one array task (`PYANTIGEN_MULTISTART=<i>`), followed by a
+`collect` (`PYANTIGEN_MULTISTART=collect`) that writes `best.json`, `multistart_report.json` and `waterfall.png`
+(`python -m pyantigen.engine.Multistart_plot DIR` redraws it). Start 0 is the spec's x0.
+
+**The starts share one set of noise floors.** With `PYANTIGEN_SIGMA_FLOOR=fixed` the floors are the sigmas, and each is
+calibrated against the model's shape at the first point a process evaluates. Tasks are separate processes, so without sharing,
+each would calibrate at its own random start and the f values would belong to different objectives (no ranking would mean
+anything). The first task therefore calibrates at start 0 and writes `floors.pkl` into the start directory; every task loads
+it before its first fit evaluation, each `start_<i>.json` carries its stamp, and `collect` ranks only starts that carry the
+current stamp (others are listed in `unfinished.txt` and are fitted again from their own start point on relaunch). This is
+the AMICI profile's mechanism (`Profile_amici.use_floors`); the Nelder-Mead multi-start gets the same effect by scoring x0
+first and seeding its pool from that calibration.
+
+A fit that starts elsewhere calibrates its floors at its own start, so its f is not comparable with a multi-start's. To compare
+a promoted optimum with the multi-start, evaluate it under `floors.pkl` (`Floors.load`).
