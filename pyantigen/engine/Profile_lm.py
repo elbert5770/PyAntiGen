@@ -118,7 +118,7 @@ def minimize(evaluate: Callable, x0, lb, ub, free, settings: LmSettings = None, 
         return deadline is not None and time.time() > deadline
 
     cur = None
-    for _ in range(6):
+    for attempt in range(6):
         if late():
             raise OutOfTime
         cur = ev(x)
@@ -128,6 +128,12 @@ def minimize(evaluate: Callable, x0, lb, ub, free, settings: LmSettings = None, 
             break
         xs = x.copy()
         x[free] = 0.5 * (x[free] + np.asarray(anchor, float)[free])
+        if not np.abs(x - xs).max() > 0:
+            # The start already is the anchor (the first point of a walk starts from the optimum, which is also its anchor), so
+            # "nearer the anchor" is the same start and fails the same way. An integrator can fail at one value and not at a
+            # neighbour 1e-4 away (k_off_AB42 of aggregation_silk_amici_widebounds, 2026-11-04: six identical failed evaluations
+            # ended the side), so move the free parameters a little, a little more each attempt, inside their limits.
+            x[free] = np.clip(x[free] + 1e-3 * 2.0 ** attempt, lb[free], ub[free])
         say(f"point could not be evaluated; retrying nearer the anchor (dist {np.abs(x - xs).max():.3g})")
     if cur is None:
         return LmResult(x, math.inf, "failed", None, "no evaluable start", evals)

@@ -37,6 +37,17 @@ def test_minimize_reports_a_spent_budget_and_a_failed_start():
     assert L.minimize(lambda x: None, [0, 0, 0], LB, UB, [0, 1, 2]).verdict == "failed"
 
 
+def test_a_start_that_is_its_own_anchor_is_moved_when_it_cannot_be_evaluated():
+    bad = np.array([0.0, 0.0, 0.0])         # the integrator fails at exactly this start and nowhere near it
+
+    def picky(x):
+        return None if np.array_equal(x, bad) else evaluate(x)
+
+    out = L.minimize(picky, bad, LB, UB, [0, 1, 2], anchor=bad)
+    assert out.verdict == "converged" and out.reason != "no evaluable start"
+    assert L.minimize(lambda x: None, bad, LB, UB, [0, 1, 2], anchor=bad).verdict == "failed"
+
+
 def test_deadline_raises_between_evaluations():
     with pytest.raises(L.OutOfTime):
         L.minimize(evaluate, [0, 0, 0], LB, UB, [0, 1, 2], deadline=0.0)
