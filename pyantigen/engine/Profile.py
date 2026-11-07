@@ -52,6 +52,7 @@ class WalkSettings:
     h_max: float = 0.5
     max_decades: float = 4.0        # how far the profiled parameter may travel from the optimum, and how far a bound may be widened
     widen: float = 1.0              # decades a bound is widened by each time a nuisance parameter is found on it
+    no_widen: tuple = ()            # bounds that are never widened: "name" (both) or "name:lower" / "name:upper"; a nuisance on such a bound stays flagged
     level: float = DNLL_95
     fill_tol: float = 0.03          # |dnll - level| at which a bracket end is close enough
     fill_rounds: int = 6
@@ -200,14 +201,19 @@ def side_problem(pr: ProfileProblem, store):
 
 def _widen(pr: ProfileProblem, cur: ProfileProblem, rec, st: WalkSettings):
     """Bounds of *cur* widened by ``st.widen`` for every nuisance *rec* has on one, never past ``st.max_decades`` beyond the
-    declared box of *pr*; None if nothing can move."""
+    declared box of *pr* and never on a bound named in ``st.no_widen``; None if nothing can move."""
     lb, ub, moved = cur.lb.copy(), cur.ub.copy(), False
+    fixed = {str(v) for v in st.no_widen}
     for name in rec.bound_active:
         i = pr.names.index(name)
         u = _unit(pr, i)
         if rec.x[i] - cur.lb[i] <= BOUND_TOL and cur.lb[i] > pr.lb[i] - st.max_decades * u:
+            if name in fixed or f"{name}:lower" in fixed:
+                continue
             lb[i], moved = max(cur.lb[i] - st.widen * u, pr.lb[i] - st.max_decades * u), True
         elif cur.ub[i] - rec.x[i] <= BOUND_TOL and cur.ub[i] < pr.ub[i] + st.max_decades * u:
+            if name in fixed or f"{name}:upper" in fixed:
+                continue
             ub[i], moved = min(cur.ub[i] + st.widen * u, pr.ub[i] + st.max_decades * u), True
     return (lb, ub) if moved else None
 

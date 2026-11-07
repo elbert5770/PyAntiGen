@@ -538,7 +538,7 @@ class _SimGradient:
     """AMICI's view of one simulation: the compiled event-free model, the schedule, the parameter replay."""
 
     def __init__(self, name, replicate, model, models, groups, replicates, param_names, probes, *,
-                 model_text, paths, cache_dir, rtol, atol, max_steps, verbose, seed=None, extra_times=()):
+                 model_text, paths, cache_dir, rtol, atol, max_steps, verbose, seed=None, extra_times=(), retry=None):
         from pyantigen.engine.Optimize import OptRoadRunnerProxy, remember_parameter_baseline
         from pyantigen.engine.Scaled_amici import (AmiciSegmentRunner, _plain_parameters,
                                                    compile_model, concentration_outputs)
@@ -611,7 +611,7 @@ class _SimGradient:
                           f"{len(usable)} output(s) -> {directory}", flush=True)
                 module = compile_model(scaled, module_name, directory, free=self.free, outputs=outputs)
         self.runner = AmiciSegmentRunner(scaled, schedule, module, states=[], rtol=rtol, atol=atol,
-                                         max_steps=max_steps)
+                                         max_steps=max_steps, retry=retry)
         self.t_start, self.t_first, self.t_last = _tracked_window(settings)
         self.seed = {str(k): float(v) for k, v in (seed or {}).items()}
 
@@ -736,14 +736,14 @@ class AmiciGradient:
     points at which the parameter reach is probed). *settings* is the ``analytic_gradient`` dict of the
     spec's ``optimizer_kwargs``: ``rtol``, ``atol``, ``max_steps`` (AMICI), ``rel_step`` (the loss
     differentiation), ``cache_dir`` (compiled models), ``seed`` (``{state: amount}`` given to AMICI at the
-    start of every run on top of the model's own initial state; see the module's docs), ``extra_times``
+    start of every run on top of the model's own initial state; see the module's docs), ``retry`` (``[[rtol, atol], ...]``: tolerances a failed AMICI segment is run again under, in order, until one succeeds), ``priors`` (``[{"param", "ref", "sigma", "side"}]``: log10 penalties on fitted parameters, see :meth:`_parse_priors`), ``extra_times``
     (``{simulation: [t, ...]}``: output rows the loss reads that are not data times, such as a pre-dose
     baseline; AMICI's table has rows only at data times and these).
     """
 
     DEFAULTS = {"provider": "amici", "rtol": 1e-10, "atol": 1e-12, "max_steps": 2_000_000,
                 "rel_step": 1e-5, "cache_dir": None, "verbose": True, "seed": None,
-                "extra_times": None}
+                "extra_times": None, "retry": None, "priors": None}
 
     @classmethod
     def resolve(cls, optimizer_kwargs):
@@ -777,7 +777,7 @@ class AmiciGradient:
                 name, rep, models[name], models, groups, replicates, param_names, probes,
                 model_text=model_text, paths=paths, cache_dir=cache_dir, rtol=settings["rtol"],
                 atol=settings["atol"], max_steps=settings["max_steps"], verbose=settings["verbose"],
-                seed=settings["seed"], extra_times=(settings["extra_times"] or {}).get(name, ()))
+                seed=settings["seed"], extra_times=(settings["extra_times"] or {}).get(name, ()), retry=settings["retry"])
         never = _never_reached(self.param_names, [sim.lost for sim in self.sims.values()])
         if never:
             raise AnalyticGradientError(
@@ -785,6 +785,50 @@ class AmiciGradient:
                 "initial value, or a parameter with an initial assignment?): the analytic gradient "
                 "would be zero for them")
         self.n_calls = 0
+        self.priors = self._parse_priors(settings.get("priors"), self.param_names)
+        self.last_prior_nll = 0.0
+
+    @staticmethod
+    def _parse_priors(priors, param_names):
+        """``[(index, ref, sigma, side)]`` from the settings' ``priors``: ``{"param", "ref" (linear), "sigma" (decades), "side"}``.
+
+        The residual ``max(0, log10(ref / p)) / sigma`` for ``side="below"`` (a penalty on p under ref), ``max(0, log10(p / ref)) / sigma`` for
+        ``"above"``, ``log10(p / ref) / sigma`` for ``"both"`` (a log-normal prior). It joins the data's residual vector, so the loss is
+        ``const + 0.5 r.r`` with the prior's ``0.5 (log10 ratio / sigma)^2`` in it, and the FIM, the Wald intervals and the profile include it.
+        The value is C1 at ``ref`` for the one-sided kinds. A prior on a parameter that is not fitted is an error.
+        """
+        out = []
+        for item in (priors or []):
+            name, ref, sigma = item["param"], float(item["ref"]), float(item["sigma"])
+            side = item.get("side", "both")
+            if side not in ("below", "above", "both"):
+                raise AnalyticGradientError(f"prior on {name}: side must be below, above or both, not {side!r}")
+            if name not in param_names:
+                raise AnalyticGradientError(f"prior on {name}: not a fitted parameter ({list(param_names)})")
+            if not (ref > 0 and sigma > 0):
+                raise AnalyticGradientError(f"prior on {name}: ref and sigma must be positive")
+            out.append((list(param_names).index(name), ref, sigma, side))
+        return out
+
+    def prior_terms(self, p_lin):
+        """``(rp, Jp)``: the priors' residuals and their derivatives with respect to the linear parameters (``Jp`` is len(priors) x K)."""
+        K = len(self.param_names)
+        rp, Jp = np.zeros(len(self.priors)), np.zeros((len(self.priors), K))
+        for m, (k, ref, sigma, side) in enumerate(self.priors):
+            p = float(p_lin[k])
+            if not p > 0:
+                raise AnalyticGradientError(f"prior on {self.param_names[k]}: the parameter is {p}, not positive")
+            x = np.log10(p / ref)                              # > 0 above ref
+            if side == "below":
+                x = max(0.0, -x) * -1.0
+            elif side == "above":
+                x = max(0.0, x)
+            rp[m] = abs(x) / sigma if side != "both" else x / sigma
+            active = (x != 0.0) if side != "both" else True
+            sign = (-1.0 if side == "below" else 1.0)
+            Jp[m, k] = (sign / (p * np.log(10.0) * sigma)) if active else 0.0
+        self.last_prior_nll = 0.5 * float(rp @ rp)
+        return rp, Jp
 
     @staticmethod
     def _probe_points(x0_lin, bounds_lin):
@@ -816,7 +860,11 @@ class AmiciGradient:
                            "replicate": self.replicates[name]}
             dirs[name] = D
         self.n_calls += 1
-        return self.loss.gradient(items, dirs, p_lin)
+        nll, g = self.loss.gradient(items, dirs, p_lin)
+        if self.priors:
+            rp, Jp = self.prior_terms(p_lin)
+            nll, g = nll + 0.5 * float(rp @ rp), g + Jp.T @ rp
+        return nll, g
 
     def linear_residual_jacobian(self, p_lin):
         """``(r, J, const)`` on AMICI's own simulation; see :meth:`LossGradient.residual_jacobian`."""
@@ -827,7 +875,11 @@ class AmiciGradient:
                            "replicate": self.replicates[name]}
             dirs[name] = D
         self.n_calls += 1
-        return self.loss.residual_jacobian(items, dirs, p_lin)
+        r, J, const = self.loss.residual_jacobian(items, dirs, p_lin)
+        if self.priors:
+            rp, Jp = self.prior_terms(p_lin)
+            r, J = np.concatenate([r, rp]), np.vstack([J, Jp])
+        return r, J, const
 
     def __call__(self, x_opt):
         """The gradient in optimizer space (a log10 parameter's derivative is taken with respect to log10 p)."""

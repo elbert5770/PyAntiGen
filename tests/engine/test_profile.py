@@ -318,3 +318,23 @@ def test_densify_does_not_bisect_a_jump_between_neighbouring_values():
     store.append("fill", dataclasses.replace(end, x_fixed=end.x_fixed - 1e-5, dnll=1.0, nll=1.0))
     added = PR.densify(pr, 0, +1, st, store)
     assert added and not [r for r in added if end.x_fixed - 1e-5 < r.x_fixed < end.x_fixed]        # the sliver is left alone
+
+
+def test_a_bound_named_in_no_widen_stays_where_it_was_declared():
+    """Same walk as test_widening_stops_at_max_decades...: b rides a curve to 8.8 at the crossing, b's ceiling is 5 here; widening it
+    is allowed unless no_widen names it, and then the point stays flagged on the bound and the bound never moves."""
+    base = problem(lb=(-9.0, -99.0, -9.0), ub=(9.0, 5.0, 9.0))
+    widen_ok, _ = PR.walk(base, 0, +1, PR.WalkSettings(max_decades=4.0, widen=1.0), PR.MemoryStore())
+    store = PR.MemoryStore()
+    pts, _ = PR.walk(base, 0, +1, PR.WalkSettings(max_decades=4.0, widen=1.0, no_widen=("b:upper",)), store)
+    assert any(p.box_limited and "b" in p.bound_active for p in pts)
+    saved = store.state("bounds")
+    assert saved is None or saved["ub"][1] == 5.0
+    assert not any(p.box_limited for p in widen_ok)                      # without no_widen the same walk widens b and is clean
+    # the other side of the same parameter is not covered by "b:upper"
+    st = PR.WalkSettings(no_widen=("b:lower",))
+    cur = PR.ProfileProblem(**{**base.__dict__})
+    rec = P.PointRecord(param="a", x_fixed=3.0, nll=1.0, dnll=1.0, verdict="converged", x=[3.0, 5.0, 3.0], bound_active=["b"])
+    assert PR._widen(base, cur, rec, st) is not None                      # an upper hit is widened: only the lower side is protected
+    assert PR._widen(base, cur, rec, PR.WalkSettings(no_widen=("b",))) is None
+    assert PR._widen(base, cur, rec, PR.WalkSettings(no_widen=("b:upper",))) is None

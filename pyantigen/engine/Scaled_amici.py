@@ -116,8 +116,11 @@ class AmiciSegmentRunner:
         AMICI had to rename (``y`` -> ``amici_y``) is found either way.
     """
 
-    def __init__(self, scaled, schedule, module, states, rtol=1e-12, atol=1e-14, max_steps=100000):
+    def __init__(self, scaled, schedule, module, states, rtol=1e-12, atol=1e-14, max_steps=100000, retry=None):
         amici, sundials, _ = _amici()
+        self.retry = [(float(r), float(t)) for r, t in (retry or ())]
+        self.retries_used = 0       # segments that needed a retry, over the life of the runner (the caller may report it)
+        self._tol = (rtol, atol)
         self._sundials = sundials
         self.scaled, self.schedule, self.module = scaled, schedule, module
         self.model = module.get_model()
@@ -143,6 +146,12 @@ class AmiciSegmentRunner:
         self.output_names = self._read_output_names(module)
         observables = list(self.model.get_observable_ids())
         self._output_index = [observables.index(f"{_OUTPUT_PREFIX}{i}") for i in range(len(self.output_names))]
+
+    def _set_tolerances(self, rtol, atol):
+        self.solver.set_relative_tolerance(rtol)
+        self.solver.set_absolute_tolerance(atol)
+        self.solver.set_relative_tolerance_fsa(rtol)
+        self.solver.set_absolute_tolerance_fsa(atol)
 
     @staticmethod
     def _read_output_names(module):
@@ -254,6 +263,17 @@ class AmiciSegmentRunner:
             # a time read right after the switch that opens this segment is its t = 0 output
             model.set_timepoints([0.0, 1.0] if seg.observed_start else [1.0])
             rdata = self._sundials.run_simulation(model, solver)
+            if int(rdata.status) != self._sundials.AMICI_SUCCESS and self.retry:
+                # CVODES's error test can fail at a step of ~1e-8 h right after a bolus at some parameter values and not at the next ones, whether the
+                # tolerances are tight or loose, so the segment is run again under the other tolerances of ``retry`` (state and sensitivity alike)
+                # until one succeeds; the solver goes back to its own tolerances afterwards.
+                for rtol_r, atol_r in self.retry:
+                    self._set_tolerances(rtol_r, atol_r)
+                    rdata = self._sundials.run_simulation(model, solver)
+                    if int(rdata.status) == self._sundials.AMICI_SUCCESS:
+                        self.retries_used += 1
+                        break
+                self._set_tolerances(*self._tol)
             if int(rdata.status) != self._sundials.AMICI_SUCCESS:
                 raise RuntimeError(f"AMICI failed on the segment [{seg.t0:.6g}, {seg.t1:.6g}] h: "
                                    f"status {int(rdata.status)}; {list(rdata.messages)[:2]}")

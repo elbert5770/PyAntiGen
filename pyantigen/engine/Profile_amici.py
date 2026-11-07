@@ -36,6 +36,7 @@ KINDS = ("profile", "pins", "relax", "confirm", "fill", "dense", "recheck", "bac
 MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins | fim | collect (walks nothing: reports what the sides left)
 ANCHOR_TOL = 1e-4                            # optimizer-space distance at which a refit is a different anchor
 BACKFILL_ENV = "PYANTIGEN_PROFILE_BACKFILL"  # converged points wanted inside the level on each side; 0 turns the last pass off
+NO_WIDEN_ENV = "PYANTIGEN_PROFILE_NO_WIDEN"  # comma-separated bounds the walk never widens: name, name:lower or name:upper (also the spec's profile_no_widen)
 PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
 FAILURE_VALUE = 1e10
 
@@ -63,6 +64,8 @@ def settings_from_env(env=None):
         st.pins = tuple(float(v) for v in env[PINS_ENV].split(",") if v.strip())
     if env.get(BACKFILL_ENV, "").strip():
         st.backfill_points = int(env[BACKFILL_ENV])
+    if env.get(NO_WIDEN_ENV, "").strip():
+        st.no_widen = tuple(v.strip() for v in env[NO_WIDEN_ENV].split(",") if v.strip())
     return mode, st
 
 

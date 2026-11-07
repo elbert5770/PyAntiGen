@@ -6185,6 +6185,11 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     budget = RunBudget(deadline=resolve_deadline())
     print(f"[profile] {budget.describe()}")
     mode, settings = PA.settings_from_env()
+    # The spec's ``standard["profile_no_widen"]``: bounds the walk must not widen ("name", "name:lower", "name:upper"), added to the environment's.
+    declared = [str(v) for v in ((optimizer_kwargs or {}).get("profile_no_widen") or [])]
+    settings.no_widen = tuple(dict.fromkeys(list(settings.no_widen) + declared))
+    if settings.no_widen:
+        print(f"[profile] bounds that are never widened: {', '.join(settings.no_widen)}")
     provider = None
     if mode != "collect":                    # a collect run evaluates nothing, so it does not load the AMICI models
         kw = dict(optimizer_kwargs or {})
