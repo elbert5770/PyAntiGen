@@ -158,8 +158,10 @@ class BandDrawer:
                 me._fill(ax, b["t"], b["lo"], b["hi"], color=ln.get_color(), alpha=0.25, lw=0, zorder=max(ln.get_zorder() - 1, 0))
                 me.drawn += 1
                 try:
-                    dev = float(np.max(np.abs(np.interp(b["t"], np.asarray(ln.get_xdata(), float), np.asarray(ln.get_ydata(), float)) - b["opt"])))
-                    me.offcenter.append((key, dev / (float(np.ptp(b["opt"])) or 1.0)))
+                    xs, ys = thin(np.asarray(ln.get_xdata(), float), np.asarray(ln.get_ydata(), float))     # as the recorder thinned it
+                    if len(xs) != len(b["t"]) or not np.allclose(xs, b["t"]):
+                        ys = np.interp(b["t"], xs, ys)                  # another grid: interpolate (a line with repeated times, a step, is only compared exactly on its own grid)
+                    me.offcenter.append((key, float(np.max(np.abs(ys - b["opt"]))) / (float(np.ptp(b["opt"])) or 1.0)))
                 except (TypeError, ValueError):
                     pass
                 if key.split(".")[0] in me.edges:

@@ -293,3 +293,23 @@ def test_the_drawer_reports_a_line_that_is_not_the_optimum_the_band_was_built_ar
     with PR.BandDrawer(band) as other:                       # a line at other parameter values
         plt.close(figure_with_two_axes(1.5))
     assert max(d for k, d in other.offcenter if k == "M0.0") > 0.1
+
+
+def test_a_line_with_a_step_at_a_repeated_time_is_not_reported_as_off_center(tmp_path):
+    import matplotlib.pyplot as plt
+    t = np.concatenate([np.linspace(0, 5, 30), np.linspace(5, 10, 30)])           # the time 5 appears twice: the value before and after a switch
+    y = np.where(np.arange(len(t)) < 30, 1.0, 3.0)
+    files = []
+    for i, s in enumerate((1.0, 1.1)):
+        with PR.LineRecorder() as rec:
+            fig, ax = plt.subplots()
+            ax.plot(t, s * y)
+            plt.close(fig)
+        np.savez_compressed(tmp_path / f"member_{i}.npz", **rec.arrays())
+        files.append(str(tmp_path / f"member_{i}.npz"))
+    band = PE.build_band(files)
+    with PR.BandDrawer(band) as d:
+        fig, ax = plt.subplots()
+        ax.plot(t, y)
+        plt.close(fig)
+    assert d.drawn == 1 and max(v for _, v in d.offcenter) < 1e-12
