@@ -1,6 +1,7 @@
 
 import os
 import sys
+import numpy as np
 import pandas as pd
 
 from pyantigen.generate.AntimonyGen import AntimonyGen
@@ -76,7 +77,34 @@ def _print_comparison(label, rows, show=8):
         print(f"    {name:<48s} max|diff| {diff:.3e}   relative {rel:.3e}   at {at:.6g} h: AMICI {a:.6g}, RoadRunner {b:.6g}")
 
 
-def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=None):
+def apply_member(r, replicate, member, label=""):
+    """Give the RoadRunner model *r* the parameter vector *member* (``{name: linear value}``) as the fit would.
+
+    This is ``ParameterReplay.apply``: reset, restore the baseline, ``Update_parameters``, the values, then the
+    replicate's ``parameter_hooks`` and ``Update_opt_parameters``. Unlike ``parameter_overrides`` it reaches
+    names that only a hook understands, and it refuses a name that changes nothing in the model (a misspelt
+    one), which would otherwise leave a prediction equal to the optimum without any message. The check is run
+    once per replicate and set of names.
+    """
+    from pyantigen.engine.Parameter_replay import ParameterReplay, unreached
+    names = list(member)
+    values = np.array([float(member[n]) for n in names])
+    replay = ParameterReplay(r, replicate, names, [])
+    key = (id(replicate), tuple(names))
+    if key not in _MEMBER_CHECKED:
+        dead = unreached(replay, values)
+        if dead:
+            raise ValueError(
+                f"{label or replicate.get('Label', '?')}: the member's parameter(s) {dead} change nothing in the model "
+                f"(not a model parameter and no parameter hook reads them); check the names against the fit's")
+        _MEMBER_CHECKED.add(key)
+    replay.apply(values)
+
+
+_MEMBER_CHECKED = set()
+
+
+def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=None, member=None):
 
     data_path = paths["data_path"]
     repo_root = paths["repo_root"]
@@ -85,9 +113,13 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
     save_path = os.path.join(repo_root, "generated", MODEL_NAME, MODEL_NAME + "_events.txt")
 
     use_amici = str(settings.get("backend") or "roadrunner").lower() == "amici"
+    if member and parameter_overrides:
+        raise ValueError("give either member (a fitted parameter vector, applied as the fit does) or parameter_overrides, not both")
     if use_amici:
         if parameter_overrides:
             raise ValueError("parameter_overrides are not supported with the AMICI backend")
+        if member:
+            raise ValueError("member is not supported with the AMICI backend (a prediction runs on RoadRunner)")
         from pyantigen.engine.Backend import default_cache_dir, explicit_cache_dir
         cache_dir = explicit_cache_dir(settings.get("amici_cache_dir")) or default_cache_dir()
         # Figures, parity CSVs and caches go to results/<MODEL>_amici, so an AMICI run never overwrites the
@@ -115,7 +147,12 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
             from pyantigen.engine.Optimize import remember_parameter_baseline
             remember_parameter_baseline(r)
 
+        if member:
+            from pyantigen.engine.Optimize import remember_parameter_baseline
+            remember_parameter_baseline(r)
         replicate["Update_parameters"](r, replicate)
+        if member:
+            apply_member(r, replicate, member, label)
         if parameter_overrides:
             for p_name, p_val in parameter_overrides.items():
                 try:
@@ -163,7 +200,7 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
               f"(left out above). Run without --backend amici to draw the figure.")
     return results_dict
 
-def setup_simulation(settings, EXPERIMENT_dict, parameter_overrides=None):
+def setup_simulation(settings, EXPERIMENT_dict, parameter_overrides=None, member=None):
     MODEL_NAME, REPO_ROOT = _project(settings)
     print("setup_simulation", MODEL_NAME)
 
@@ -172,6 +209,6 @@ def setup_simulation(settings, EXPERIMENT_dict, parameter_overrides=None):
     if settings["run_steady_state_first"]:
         run_steady_state(model_text, paths, settings)
 
-    results_dict = run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=parameter_overrides)
+    results_dict = run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overrides=parameter_overrides, member=member)
 
 

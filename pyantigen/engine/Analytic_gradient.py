@@ -44,6 +44,7 @@ import tempfile
 import numpy as np
 
 from pyantigen.engine.Multistart import GradientSetupError
+from pyantigen.engine.Parameter_replay import ParameterReplay  # noqa: F401  (moved to its own module; the name stays importable from here)
 from pyantigen.generate.input_schedule import InputSchedule, ScheduleError
 
 
@@ -319,80 +320,6 @@ class LossGradient:
                     return (self.value(items, up) - self.value(items, dn)) / (2.0 * s)
                 g[k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
         return f0, g
-
-
-# ---------------------------------------------------------------------------------------
-# theta -> model parameters, the way the engine applies them
-# ---------------------------------------------------------------------------------------
-
-class ParameterReplay:
-    """Apply fitted parameters to a RoadRunner model exactly as ``Optimize.run_all`` does, and read the result.
-
-    The engine resets the model, restores the parameter baseline, runs the replicate's
-    ``Update_parameters``, sets the fitted values, then the ``parameter_hooks`` and
-    ``Update_opt_parameters``. Replaying that and reading every plain parameter back
-    gives the model parameters AMICI needs, and (by differencing the replay) the
-    Jacobian of the model parameters with respect to the fitted ones -- whatever the
-    hooks do in between.
-    """
-
-    def __init__(self, r, replicate, param_names, plain):
-        self.r, self.replicate = r, replicate
-        self.param_names, self.plain = list(param_names), list(plain)
-        self.species = list(r.model.getFloatingSpeciesIds())
-
-    def apply(self, p_lin):
-        from pyantigen.engine.Optimize import restore_parameter_baseline, set_parameters_from_dict
-        r, rep = self.r, self.replicate
-        params = dict(zip(self.param_names, np.asarray(p_lin, dtype=float).tolist()))
-        r.reset()
-        restore_parameter_baseline(r)
-        if rep.get("Update_parameters") is not None:
-            rep["Update_parameters"](r, rep)
-        set_parameters_from_dict(r, params)
-        for hook in rep.get("parameter_hooks", []):
-            hook(r, params)
-        if rep.get("Update_opt_parameters") is not None:
-            rep["Update_opt_parameters"](r, rep, params)
-
-    def read(self, names):
-        return np.array([float(self.r[n]) for n in names])
-
-    def values(self, p_lin):
-        """``{plain parameter: value}`` after the engine's updates."""
-        self.apply(p_lin)
-        return dict(zip(self.plain, self.read(self.plain)))
-
-    def jacobian(self, p_lin, h_rel=1e-6):
-        """``(values, J)``: J[m, k] = d(plain parameter m)/d(theta_k), central differences of the replay."""
-        p_lin = np.asarray(p_lin, dtype=float)
-        base = self.values(p_lin)
-        J = np.zeros((len(self.plain), len(p_lin)))
-        for k in range(len(p_lin)):
-            h = h_rel * max(abs(p_lin[k]), 1e-8)
-            up, dn = p_lin.copy(), p_lin.copy()
-            up[k] += h
-            dn[k] -= h
-            vu = np.array(list(self.values(up).values()))
-            vd = np.array(list(self.values(dn).values()))
-            J[:, k] = (vu - vd) / (2.0 * h)
-        self.apply(p_lin)
-        return base, J
-
-    def direct_species(self, p_lin, rtol=1e-9):
-        """Species a hook set directly: ``{name: amount}`` where the model differs from what ``reset()`` derives.
-
-        ``reset()`` re-evaluates a species' initial assignment from the current parameters,
-        so those need no help; a value a hook wrote over that does, because AMICI never sees the hook.
-        """
-        self.apply(p_lin)
-        mine = np.array(self.r.model.getFloatingSpeciesAmounts(), dtype=float)
-        self.r.reset()
-        derived = np.array(self.r.model.getFloatingSpeciesAmounts(), dtype=float)
-        tol = rtol * np.maximum(np.maximum(np.abs(mine), np.abs(derived)), 1e-300)
-        off = np.flatnonzero(np.abs(mine - derived) > tol)
-        self.apply(p_lin)
-        return {self.species[i]: float(mine[i]) for i in off}
 
 
 # ---------------------------------------------------------------------------------------

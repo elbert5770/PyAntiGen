@@ -36,6 +36,10 @@ project can name/organize that implementation however it likes — but Engine
 does require the callables they produce to be reachable through the
 replicate dict contract below.
 
+**Optional: `Modules/Predict_hooks.py`.** `Prediction.run_predict` (`Model_run.py --predict ensemble`, see `docs/PREDICTION.md`) imports this
+module if the project has one, and only this module; it may define `before_member(member)` and `prepare_tree(root)`. Its absence is not an error.
+The prediction stages simulate through the same `EXPERIMENT_dict[KEY]["plot"]` and replicate contract as `--simulate`.
+
 ## `EXPERIMENT_dict` contract
 
 Passed by the project into `Model_optimize.setup_optimization_from_groups`

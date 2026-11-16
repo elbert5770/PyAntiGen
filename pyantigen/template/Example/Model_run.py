@@ -198,21 +198,33 @@ if __name__ == "__main__":
                         choices=list(DIAGNOSTICS_PRESETS.keys()),
                         help="Diagnostics settings preset to run (default: _NO_DIAGNOSTICS)")
     parser.add_argument("--backend", type=str, default=None, choices=["auto", "roadrunner", "amici"],
-                        help="Solver for the optimization: roadrunner, amici (needs `pip install "
-                             "pyantigen[amici]`, not on native Windows), or auto. Overrides "
+                        help="Solver for the optimization (or, with --simulate, amici or roadrunner): roadrunner, "
+                             "amici (needs `pip install pyantigen[amici]`, not on native Windows), or auto. Overrides "
                              "Solver_settings.BACKEND and the PYANTIGEN_BACKEND environment variable. "
                              "Run `pyantigen-setup` to see whether AMICI can run here.")
+    parser.add_argument("--compare", action="store_true", dest="compare",
+                        help="With --simulate --backend amici: also run RoadRunner and print the largest "
+                             "difference between the two trajectories, column by column.")
     parser.add_argument("--no-fit", action="store_true", dest="no_fit",
                         help="Skip the optimizer and evaluate the spec's x0 instead, "
                              "then run the requested diagnostics against it.")
+
+    from pyantigen.engine import Prediction
+    Prediction.add_arguments(parser)
 
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
         parser.error("No arguments provided.")
 
-    if args.simulate and args.backend == "amici":
-        parser.error("--simulate always runs on RoadRunner; --backend amici applies to --optimize")
+    if args.compare and not (args.simulate and args.backend == "amici"):
+        parser.error("--compare needs --simulate with --backend amici")
+
+    Prediction.check_arguments(args, parser)
+    if args.predict == "ensemble" and args.predict_stage not in ("run", "plot"):
+        # these stages read and write files only: no model is generated or simulated
+        Prediction.run_predict(args, EXPERIMENT_dict, {"MODEL_NAME": MODEL_NAME, "REPO_ROOT": REPO_ROOT})
+        sys.exit(0)
 
     update_antimony_model()
 
@@ -288,8 +300,19 @@ if __name__ == "__main__":
             "save_SBML?": False,
             "MODEL_NAME": model_name_to_use,
             "REPO_ROOT": REPO_ROOT,
+            # --simulate is RoadRunner unless --backend amici is given (not "auto": nothing is fitted here)
+            "backend": args.backend if args.backend == "amici" else "roadrunner",
+            "compare_backends": args.compare,
         }
+        if args.backend == "amici":
+            from Modules import Solver_settings as _solver_settings
+            run_settings["amici_cache_dir"] = getattr(_solver_settings, "AMICI_CACHE_DIR", None)
+            run_settings["amici_seed"] = getattr(_solver_settings, "AMICI_SEED", None)
 
-        setup_simulation(run_settings, fig_config)
+        if args.predict == "ensemble":
+            # the profile ensemble: simulate KEY once per member (run) or once with the bands drawn (plot), on RoadRunner
+            Prediction.run_predict(args, EXPERIMENT_dict, run_settings)
+        else:
+            setup_simulation(run_settings, fig_config)
 
 

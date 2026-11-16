@@ -6,7 +6,7 @@
 | platforms | Linux, macOS, Windows | Linux, macOS; **Windows only through WSL** |
 | start-up | seconds | each model is compiled to C++ once (minutes to tens of minutes), then cached |
 | run time | slower; no sensitivities | much faster per evaluation, with exact sensitivities |
-| use for | simulate, quick fits | multistart, profile likelihood, FIM |
+| use for | simulate, quick fits, `--predict ensemble` | multistart, profile likelihood, FIM |
 
 AMICI needs g++ >= 10.1 (or Apple clang), cmake and swig. `pyantigen-setup` checks all of these and
 prints the fix for anything missing (it never uses sudo). `pyantigen-setup --install-amici` pip-installs
@@ -26,7 +26,8 @@ Per stage (`simulate`, `fit`, `multistart`, `profile`, `fim`), first match wins:
 with the reason and the fix. Only the stage default falls back to RoadRunner, with a note.
 
 `--backend amici` on `--optimize` switches on `analytic_gradient` for a spec that lacks it;
-`--backend roadrunner` removes it. `--simulate` is always RoadRunner.
+`--backend roadrunner` removes it. `--simulate` is RoadRunner unless `--backend amici` is given (add `--compare` to also run RoadRunner and print the
+largest difference per column). `--predict ensemble` simulates on RoadRunner whatever the profile ran on, and refuses `--backend amici`; see `docs/PREDICTION.md`.
 
 ## Compiled-model cache
 
