@@ -313,3 +313,15 @@ def test_a_line_with_a_step_at_a_repeated_time_is_not_reported_as_off_center(tmp
         ax.plot(t, y)
         plt.close(fig)
     assert d.drawn == 1 and max(v for _, v in d.offcenter) < 1e-12
+
+
+def test_a_band_built_on_a_finer_grid_than_the_recorder_now_keeps_is_still_compared_with_the_full_line(tmp_path):
+    import matplotlib.pyplot as plt
+    t = np.linspace(0, 10, 6001)                                                   # more points than MAXPTS: the recorder thins it
+    y = np.where((t > 4.0) & (t < 4.002), 5.0, np.sin(t))                          # a narrow feature that a thinned line can miss
+    fine = {"M0.0": {"t": t, "lo": y - 0.1, "hi": y + 0.1, "opt": y}}             # as a band made before thinning stored it
+    with PR.BandDrawer(fine) as d:
+        fig, ax = plt.subplots()
+        ax.plot(t, y)
+        plt.close(fig)
+    assert d.drawn == 1 and max(v for _, v in d.offcenter) < 1e-12

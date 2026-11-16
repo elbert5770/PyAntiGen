@@ -158,9 +158,14 @@ class BandDrawer:
                 me._fill(ax, b["t"], b["lo"], b["hi"], color=ln.get_color(), alpha=0.25, lw=0, zorder=max(ln.get_zorder() - 1, 0))
                 me.drawn += 1
                 try:
-                    xs, ys = thin(np.asarray(ln.get_xdata(), float), np.asarray(ln.get_ydata(), float))     # as the recorder thinned it
-                    if len(xs) != len(b["t"]) or not np.allclose(xs, b["t"]):
-                        ys = np.interp(b["t"], xs, ys)                  # another grid: interpolate (a line with repeated times, a step, is only compared exactly on its own grid)
+                    x, y = np.asarray(ln.get_xdata(), float), np.asarray(ln.get_ydata(), float)
+                    xs, ys = thin(x, y)                                 # as the recorder thinned it
+                    if len(xs) == len(b["t"]) and np.allclose(xs, b["t"]):
+                        pass
+                    elif len(x) == len(b["t"]) and np.allclose(x, b["t"]):
+                        ys = y                                          # a band made before lines were thinned, or of a short line
+                    else:
+                        ys = np.interp(b["t"], x, y)                    # another grid: interpolate the full line (a step at a repeated time is only exact on its own grid)
                     me.offcenter.append((key, float(np.max(np.abs(ys - b["opt"]))) / (float(np.ptp(b["opt"])) or 1.0)))
                 except (TypeError, ValueError):
                     pass
