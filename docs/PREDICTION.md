@@ -70,11 +70,15 @@ is the second figure, `F2_`, `F3_` ... the later ones; `.f<n>` is the upper boun
 
 ## Project hooks (optional)
 
-If `Modules/Predict_hooks.py` exists it may define
+If `Modules/Predict_hooks.py` exists it may define any of these (each optional; a missing file is not an error, an error inside it is raised):
 
-- `before_member(member) -> dict of extra arrays or None`: run before a member is simulated, for a project that must do something per member (refit a
-  nuisance factor, say). The arrays are saved into the member's file.
-- `prepare_tree(root)`: called with the private results tree before anything is simulated in it.
+| Hook | Called | Use |
+|---|---|---|
+| `prepare_tree(root, stage)` | with the private results tree, before anything is simulated in it (`stage` is `run` or `plot`) | redirect what the project writes through its own paths; copy a cache the plot function reads |
+| `member_values(member)` | per member, before it is applied | return the vector the engine applies when it is not `member["values"]`: a value the project consumes itself and that is not a model parameter |
+| `before_member(member)` | per member, before it is simulated | per-member work (refit a nuisance factor, say); return a dict of arrays to save into the member's file |
+| `after_band(files, band_path)` | after `band` writes the band | summarise what `before_member` saved; `files` maps member id to file |
+| `before_plot(band_path)` | before `plot` simulates | set what the figure needs to match member 0 |
 
 `member` is the entry of the members file: `id`, `param`, `side`, `x_fixed`, `dnll`, `verdict`, `values` (linear parameter values).
 

@@ -20,9 +20,15 @@ The stages, in the order they are run. Options carry the prefix ``--predict-`` s
 A member is simulated on RoadRunner, the solver the figures are drawn with, and its parameter vector is applied as the fit applies it
 (``Model_simulate.run_simulation(member=...)``). The vectors come from an AMICI profile; the difference between the solvers is not part of the band.
 
-An optional ``Modules/Predict_hooks.py`` of the project may define ``before_member(member) -> dict of extra arrays or None`` (run before a member is simulated; the
-arrays are saved into its file) and ``prepare_tree(root)`` (called with the private results tree before anything is simulated in it). Lists in options use ':' or ';'
-because a ',' is split by the job systems that pass options through an environment list.
+An optional ``Modules/Predict_hooks.py`` of the project may define, every name optional:
+
+    prepare_tree(root, stage)        called with the private results tree before anything is simulated in it (stage is 'run' or 'plot')
+    member_values(member) -> dict    the parameter vector the engine applies to the model, when it is not ``member['values']`` (a value the project consumes itself)
+    before_member(member) -> dict    run before a member is simulated; the arrays returned are saved into its file
+    after_band(files, band_path)     after the band is written; *files* maps member id to file
+    before_plot(band_path)           before the plot stage simulates
+
+Lists in options use ':' or ';' because a ',' is split by the job systems that pass options through an environment list.
 """
 import importlib
 import json
@@ -92,6 +98,12 @@ def project_hooks():
         raise
 
 
+def _call(hooks, name, *args):
+    """The project hook *name* called with *args* (its result), or None when the project has no hooks module or the hook."""
+    fn = getattr(hooks, name, None) if hooks is not None else None
+    return fn(*args) if fn is not None else None
+
+
 def private_tree(repo_root, name):
     """A results tree of its own under ``<repo_root>/results/predict/<name>`` that shares the project's models and data by links, so a plot function's side files
     (csv, caches) do not touch the project's results. Returns its root. The ``generated`` folder is shared, so tasks run at the same time write the same events text to it."""
@@ -136,8 +148,7 @@ def stage_run(a, experiment_dict, run_settings, hooks):
     mine = chosen[a.predict_task::a.predict_ntasks]
     os.makedirs(a.predict_out, exist_ok=True)
     root = private_tree(run_settings["REPO_ROOT"], f"{a.predict_tree}_{a.predict_task}")
-    if hooks is not None and hasattr(hooks, "prepare_tree"):
-        hooks.prepare_tree(root)
+    _call(hooks, "prepare_tree", root, "run")
     settings = dict(run_settings, REPO_ROOT=root, backend="roadrunner", Verbose=False)
     fig_config = experiment_dict[a.simulate]
     done = 0
@@ -145,15 +156,17 @@ def stage_run(a, experiment_dict, run_settings, hooks):
         if os.path.exists(os.path.join(a.predict_out, f"member_{m['id']}.npz")):
             continue
         print(f"[ensemble] member {m['id']} ({m['param']} {m['side']} dnll {m['dnll']:.3f})", flush=True)
-        extra = hooks.before_member(m) if hooks is not None and hasattr(hooks, "before_member") else None
+        extra = _call(hooks, "before_member", m)
+        values = _call(hooks, "member_values", m)
         recorder = PRec.record_member(a.predict_out, m, fig_config["plot"], extra)
-        setup_simulation(settings, dict(fig_config, plot=recorder), member=m["values"])
+        setup_simulation(settings, dict(fig_config, plot=recorder), member=m["values"] if values is None else values)
         done += 1
     print(f"[ensemble] task {a.predict_task}: {done} member(s) run, {len(mine) - done} already present", flush=True)
 
 
-def stage_band(a):
-    files = list(PE.member_files(a.predict_out).values())
+def stage_band(a, hooks=None):
+    by_id = PE.member_files(a.predict_out)
+    files = list(by_id.values())
     if not files:
         raise SystemExit(f"no member files in {a.predict_out}")
     band = PE.build_band(files)
@@ -169,6 +182,7 @@ def stage_band(a):
         for key, v in sorted(notes.items(), key=lambda kv: PE.curve_order(kv[0])):
             print(f"  {key:10s} text {v['label']:>8s}   optimum {v['x0']:9.3f}   range {v['lo']:9.3f} to {v['hi']:9.3f}   ({v['n']} members)")
         json.dump(notes, open(a.predict_band + ".notes.json", "w"), indent=1)
+    _call(hooks, "after_band", by_id, a.predict_band)
 
 
 def stage_plot(a, experiment_dict, run_settings, hooks):
@@ -176,8 +190,8 @@ def stage_plot(a, experiment_dict, run_settings, hooks):
     band = PE.read_band(a.predict_band)
     note = a.predict_note or "Shaded: pointwise 95% band from the profile likelihood (parameter sets of the stored profile with dnll <= 1.92; bands narrower than the line are hidden by it)"
     root = private_tree(run_settings["REPO_ROOT"], a.predict_tree)
-    if hooks is not None and hasattr(hooks, "prepare_tree"):
-        hooks.prepare_tree(root)
+    _call(hooks, "prepare_tree", root, "plot")
+    _call(hooks, "before_plot", a.predict_band)
     settings = dict(run_settings, REPO_ROOT=root, backend="roadrunner")
     edges = [v for v in re.split(r"[,:;]", a.predict_edges) if v.strip()]
     with PRec.BandDrawer(band, note=note, edges=edges) as drawer:
@@ -242,7 +256,7 @@ def run_predict(args, experiment_dict, run_settings):
     elif stage == "run":
         stage_run(args, experiment_dict, run_settings, hooks)
     elif stage == "band":
-        stage_band(args)
+        stage_band(args, hooks)
     elif stage == "plot":
         stage_plot(args, experiment_dict, run_settings, hooks)
     elif stage == "delta":
