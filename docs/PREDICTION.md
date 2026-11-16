@@ -41,6 +41,12 @@ A member's parameter vector is applied exactly as the fit applied it (`pyantigen
 hook understands is therefore fine. A name that changes **nothing** in the model is an error, because the fit's own setter ignores unknown names and a
 member would silently equal the optimum.
 
+**One difference from a fit, and it matters for figures.** A fit applies its parameters to the replicates it fits. A figure also draws arms that are not
+fitted, and such an arm may pin a fitted parameter on purpose (an amyloid-negative arm with its oligomerization rates set to zero). By default a member
+is applied to every replicate of the figure and so overrides that pin. Only the project knows which parameters an arm pins, so say so in
+`member_values(member, label, replicate)` (below). The `plot` stage is the check: it compares every drawn line with the optimum member's curve and prints a
+`WARNING` when they differ, which is what an unrecognised pin looks like.
+
 ## Stages
 
 Options carry the prefix `--predict-`. Lists use `:` or `;`, because a `,` is split by job systems that pass options through an environment list.
@@ -75,7 +81,7 @@ If `Modules/Predict_hooks.py` exists it may define any of these (each optional; 
 | Hook | Called | Use |
 |---|---|---|
 | `prepare_tree(root, stage)` | with the private results tree, before anything is simulated in it (`stage` is `run` or `plot`) | redirect what the project writes through its own paths; copy a cache the plot function reads |
-| `member_values(member)` | per member, before it is applied | return the vector the engine applies when it is not `member["values"]`: a value the project consumes itself and that is not a model parameter |
+| `member_values(member, label, replicate)` | per member and replicate, before it is applied | return the vector applied to that replicate when it is not `member["values"]`: leave out a parameter the replicate pins on purpose, or one the project consumes itself and that is not a model parameter; an empty dict leaves the replicate as built |
 | `before_member(member)` | per member, before it is simulated | per-member work (refit a nuisance factor, say); return a dict of arrays to save into the member's file |
 | `after_band(files, band_path)` | after `band` writes the band | summarise what `before_member` saved; `files` maps member id to file |
 | `before_plot(band_path)` | before `plot` simulates | set what the figure needs to match member 0 |

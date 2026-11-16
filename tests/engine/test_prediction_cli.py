@@ -129,7 +129,7 @@ def test_the_projects_hooks_run_in_order_and_what_they_return_is_used(project):
     hooks.write_text(
         "import os\nimport numpy as np\n\n"
         "def prepare_tree(root, stage):\n    open(os.path.join(root, 'prepared_' + stage), 'w').close()\n\n"
-        "def member_values(member):\n    v = dict(member['values'])\n    if member['id'] == 3:\n        v['SF'] = 2.0\n    return v\n\n"
+        "def member_values(member, label, replicate):\n    v = dict(member['values'])\n    if member['id'] == 3:\n        v['SF'] = 2.0\n    return v\n\n"
         "def before_member(member):\n    return {'extra:v': np.array([float(member['id']), 42.0])}\n\n"
         "def after_band(files, band_path):\n    open(band_path + '.after', 'w').write(str(sorted(files)))\n\n"
         "def before_plot(band_path):\n    open(band_path + '.before_plot', 'w').write('x')\n")
@@ -149,3 +149,21 @@ def test_the_projects_hooks_run_in_order_and_what_they_return_is_used(project):
     assert open(w / "hooked.npz.after").read() == "[0, 3]" and (w / "hooked.npz.before_plot").exists()
     # member 3 differs from the optimum only in SF; member_values put SF back to the optimum's 2.0, so its curve is the optimum's
     assert line(files, 3, "[B] ADpos_Early")[-1] == pytest.approx(line(files, 0, "[B] ADpos_Early")[-1], rel=1e-9)
+
+
+def test_a_replicate_that_pins_a_fitted_parameter_can_say_so_per_replicate(project):
+    w = project["work"]
+    model_run(project, "--predict", "ensemble", "--predict-stage", "members", "--predict-store", str(project["store"]), "--predict-out", str(w / "members_p.json"))
+    data = json.load(open(w / "members_p.json"))
+    sf_up = next(m["id"] for m in data["members"][1:] if m["param"] == "SF" and m["side"] == "up")
+    hooks = project["dir"] / "Modules" / "Predict_hooks.py"
+    hooks.write_text("def member_values(member, label, replicate):\n    v = dict(member['values'])\n    if label.startswith('ADneg'):\n        v.pop('SF')          # the neg arms keep their own SF\n    return v\n")
+    try:
+        model_run(project, "--simulate", "Example", "--predict", "ensemble", "--predict-stage", "run", "--predict-members", str(w / "members_p.json"),
+                  "--predict-out", str(w / "pinned"), "--predict-only", f"0:{sf_up}", "--predict-tree", "pinned")
+    finally:
+        hooks.unlink()
+    files = PE.member_files(str(w / "pinned"))
+    # SF moves only the arms that were not pinned: ADneg lines equal the optimum's, ADpos lines do not
+    assert np.array_equal(line(files, sf_up, "[B] ADneg_Early"), line(files, 0, "[B] ADneg_Early"))
+    assert not np.allclose(line(files, sf_up, "[B] ADpos_Early"), line(files, 0, "[B] ADpos_Early"))

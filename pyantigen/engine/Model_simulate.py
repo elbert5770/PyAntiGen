@@ -85,6 +85,10 @@ def apply_member(r, replicate, member, label=""):
     names that only a hook understands, and it refuses a name that changes nothing in the model (a misspelt
     one), which would otherwise leave a prediction equal to the optimum without any message. The check is run
     once per replicate and set of names.
+
+    A fit applies its parameters to the replicates it fits. A figure also draws arms that are not fitted, and one of them may pin a fitted parameter on purpose
+    (an amyloid-negative arm with no oligomerization). *member* of ``run_simulation`` may therefore be a callable ``(label, replicate) -> {name: value}`` (an empty
+    result leaves that replicate as ``Update_parameters`` made it); only the project knows which parameters an arm pins.
     """
     from pyantigen.engine.Parameter_replay import ParameterReplay, unreached
     names = list(member)
@@ -151,8 +155,9 @@ def run_simulation(model_text, paths, settings, EXPERIMENT_dict, parameter_overr
             from pyantigen.engine.Optimize import remember_parameter_baseline
             remember_parameter_baseline(r)
         replicate["Update_parameters"](r, replicate)
-        if member:
-            apply_member(r, replicate, member, label)
+        values = member(replicate["Label"], replicate) if callable(member) else member
+        if values:
+            apply_member(r, replicate, values, label)
         if parameter_overrides:
             for p_name, p_val in parameter_overrides.items():
                 try:

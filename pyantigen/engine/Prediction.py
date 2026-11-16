@@ -23,7 +23,9 @@ A member is simulated on RoadRunner, the solver the figures are drawn with, and 
 An optional ``Modules/Predict_hooks.py`` of the project may define, every name optional:
 
     prepare_tree(root, stage)        called with the private results tree before anything is simulated in it (stage is 'run' or 'plot')
-    member_values(member) -> dict    the parameter vector the engine applies to the model, when it is not ``member['values']`` (a value the project consumes itself)
+    member_values(member, label, replicate) -> dict
+                                     the parameter vector applied to that replicate, when it is not ``member['values']``: leave out a parameter the replicate pins
+                                     on purpose (an arm that is not fitted) or that the project consumes itself; an empty dict leaves the replicate as built
     before_member(member) -> dict    run before a member is simulated; the arrays returned are saved into its file
     after_band(files, band_path)     after the band is written; *files* maps member id to file
     before_plot(band_path)           before the plot stage simulates
@@ -104,6 +106,14 @@ def _call(hooks, name, *args):
     return fn(*args) if fn is not None else None
 
 
+def _values_for(hooks, member):
+    """The *member* argument of ``setup_simulation`` for one member: its vector for every replicate, or the project's per-replicate choice (``member_values``)."""
+    fn = getattr(hooks, "member_values", None) if hooks is not None else None
+    if fn is None:
+        return member["values"]
+    return lambda label, replicate: fn(member, label, replicate)
+
+
 def private_tree(repo_root, name):
     """A results tree of its own under ``<repo_root>/results/predict/<name>`` that shares the project's models and data by links, so a plot function's side files
     (csv, caches) do not touch the project's results. Returns its root. The ``generated`` folder is shared, so tasks run at the same time write the same events text to it."""
@@ -157,9 +167,8 @@ def stage_run(a, experiment_dict, run_settings, hooks):
             continue
         print(f"[ensemble] member {m['id']} ({m['param']} {m['side']} dnll {m['dnll']:.3f})", flush=True)
         extra = _call(hooks, "before_member", m)
-        values = _call(hooks, "member_values", m)
         recorder = PRec.record_member(a.predict_out, m, fig_config["plot"], extra)
-        setup_simulation(settings, dict(fig_config, plot=recorder), member=m["values"] if values is None else values)
+        setup_simulation(settings, dict(fig_config, plot=recorder), member=_values_for(hooks, m))
         done += 1
     print(f"[ensemble] task {a.predict_task}: {done} member(s) run, {len(mine) - done} already present", flush=True)
 
@@ -202,7 +211,8 @@ def stage_plot(a, experiment_dict, run_settings, hooks):
         worst = max(off, key=lambda kd: kd[1])
         print(f"[ensemble] WARNING: {len(off)} of {len(drawer.offcenter)} drawn line(s) differ from the optimum curve the band was built around by more than "
               f"{OFFCENTER_TOL:g} of its range (largest: {worst[0]}, {worst[1]:.3g}). The band is about the stored profile's optimum, so the project's own parameters "
-              f"are not that optimum, or the plot function draws something that changed since the members were run.")
+              f"are not that optimum, the plot function draws something that changed since the members were run, or an arm pins a fitted parameter on purpose "
+              f"and member_values does not say so (see docs/PREDICTION.md).")
 
 
 def stage_delta(a):
