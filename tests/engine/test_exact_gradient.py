@@ -2,12 +2,14 @@
 
 Run from the repository root: python -m pytest tests/engine/test_exact_gradient.py
 
-``LossGradient.gradient`` used to difference the whole Python loss along every sensitivity direction. When every scored
-observable is a bare result column the chain rule does it in closed form, from the engine's own traversal (masks, weights,
-pooling, sigma rules). These tests check that the two routes agree wherever the shortcut applies -- declared, profiled and
-pooled sigmas, masked data, data outside the simulated times, weights -- that an expression observable still takes the old
-route, that the shortcut evaluates the loss once, and that ``concentrated_nll_dsse`` is the derivative of
-``concentrated_nll`` in each of its branches. The last tests are the throttle on the progress figure.
+``LossGradient.gradient`` used to difference the whole Python loss along every sensitivity direction. It now takes the chain
+rule from the engine's own traversal (masks, weights, pooling, sigma rules): exact for a bare result column; for an
+expression, a callable or a composite (one simulation subtracted from another, a normalised aggregate) only the observable --
+and the aggregation -- is differenced. These tests check that the two routes agree in each case, over declared, profiled
+and pooled sigmas, masked data, data outside the simulated times and weights; that an observable the closure cannot
+reproduce hands the gradient back to the old route; that the loss is evaluated once rather than hundreds of times; and that
+``concentrated_nll_dsse`` is the derivative of ``concentrated_nll`` in each of its branches. The last tests are the throttle
+on the progress figure.
 """
 import os
 import time
@@ -128,23 +130,6 @@ def test_a_column_with_a_huge_sensitivity_that_is_not_read_does_not_matter():
 
 # --- when it does not apply ------------------------------------------------------------------------------
 
-def test_an_expression_observable_takes_the_finite_difference_route():
-    loss, items = make([obs("2*p1", "y1")])
-    it, dirs = items(THETA)
-    assert loss._exact_gradient(it, dirs, THETA) is None
-    f, g = loss.gradient(it, dirs, THETA)                          # still works, by finite differences
-    loss.exact = False
-    f2, g2 = loss.gradient(it, dirs, THETA)
-    loss.exact = True
-    assert f == pytest.approx(f2) and np.allclose(g, g2)
-
-
-def test_a_callable_observable_takes_the_finite_difference_route():
-    loss, items = make([obs(lambda r: r["p1"], "y1")])
-    it, dirs = items(THETA)
-    assert loss._exact_gradient(it, dirs, THETA) is None
-
-
 def test_the_shortcut_evaluates_the_loss_once_and_the_old_route_hundreds_of_times():
     loss, items = make([obs(), obs("p2", "y2")])
     calls = {"n": 0}
@@ -160,6 +145,156 @@ def test_the_shortcut_evaluates_the_loss_once_and_the_old_route_hundreds_of_time
     loss.exact = False
     loss.gradient(it, dirs, THETA)
     assert calls["n"] >= 8
+
+
+# --- observables that are not bare columns ---------------------------------------------------------------
+
+def test_expressions_over_one_or_several_columns():
+    for expr in ("2*p1", "p1 - 0.5*p2", "np.log10(np.maximum(p1, 1e-12))", "p1/(1 + p1*p2)"):
+        agree(*both(*make([obs(expr, "y1")])))
+
+
+def test_a_callable_observable():
+    agree(*both(*make([obs(lambda r: r["p1"] - r["p2"], "y1")])))
+    agree(*both(*make([obs(lambda r: r["p1"] - r["p2"], "y1", reads_parameters=[])])))
+
+
+def test_a_callable_that_does_read_a_parameter_by_name_can_say_so():
+    """It reads `a` itself (not through a table column): the declared name brings its partial back, and only its."""
+    loss, items = make([obs(lambda r: 0.7 * r["p1"], "y1", reads_parameters=["k"])])
+    assert loss.explicit == {1}
+
+
+def test_an_expression_with_a_known_sigma_and_a_pooled_sigma():
+    agree(*both(*make([obs("p1 - p2", "y1", sigma_pool="s"), obs("p2*3", "y2", sigma_pool="s")])))
+
+
+def test_the_jacobian_of_an_expression_observable_agrees_with_central_differences():
+    agree_j(*both_j(*make([known("p1 - 0.5*p2", "y1"), known(lambda r: 3 * r["p2"], "y2", 0.02)])))
+
+
+def test_an_expression_that_names_a_fitted_parameter_gets_its_partial_too():
+    loss, items = make([obs("a*p1", "y1")])                    # `a` is a fitted parameter the loss reads by name
+    assert 0 in loss.explicit
+    agree(*both(loss, items))
+
+
+def test_the_closure_must_reproduce_the_loss_or_the_gradient_is_handed_back(monkeypatch):
+    calls = {"n": 0}
+
+    def drifting(r):                                           # not a function of the table alone
+        calls["n"] += 1
+        return r["p1"] * (1.0 if calls["n"] == 1 else 1.001)
+    loss, items = make([obs(drifting, "y1")])
+    it, dirs = items(THETA)
+    assert loss._exact_gradient(it, dirs, THETA) is None
+    f, g = loss.gradient(it, dirs, THETA)                      # still answers, by the old route
+    assert np.isfinite(f) and np.all(np.isfinite(g))
+
+
+def test_an_undeclared_callable_could_read_any_parameter_so_each_gets_a_partial():
+    loss, items = make([obs(lambda r: r["p2"], "y2")])
+    assert loss.explicit == {0, 1}
+    calls = {"n": 0}
+    real = loss.value
+
+    def counted(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+    loss.value = counted
+    it, dirs = items(THETA)
+    loss.gradient(it, dirs, THETA)
+    assert calls["n"] == 4 * 2                                     # four passes of the loss per parameter
+
+
+def test_a_callable_that_declares_what_it_reads_costs_no_loss_evaluations():
+    loss, items = make([obs("p1 - 0.5*p2", "y1"), obs(lambda r: r["p2"], "y2", reads_parameters=[])])
+    assert loss.explicit == set()
+    calls = {"n": 0}
+    real = loss.value
+
+    def counted(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+    loss.value = counted
+    it, dirs = items(THETA)
+    loss.gradient(it, dirs, THETA)
+    assert calls["n"] == 0
+
+
+# --- composites: one simulation subtracted from another ----------------------------------------------------
+
+def table2(theta, t=T_SIM):
+    """The comparator arm: the same system with its own scale (0.4 x a) and a shifted time grid."""
+    a, k = theta
+    e = np.exp(-k * t)
+    data = np.stack([t, 0.4 * a * e, 0.12 * a * e, 1e3 + a * e], axis=1)
+    D = np.zeros((len(t), 4, 2))
+    D[:, 1, :] = 0.4 * np.stack([e, -a * t * e], axis=-1)
+    D[:, 2, :] = 0.3 * D[:, 1, :]
+    D[:, 3, :] = 1e12 * D[:, 1, :]
+    return SimTable(["time", "p1", "p2", "junk"], data), D
+
+
+def make_composite(aggregation, observed="p1", observed_b=None, noise=None):
+    """drug (s1) minus comparator (s2), scored against one data table, as in a placebo-subtracted endpoint."""
+    replicates = {"s1": {"Label": "s1"}, "s2": {"Label": "s2"}}
+    o = obs(observed, "y1", **(noise or {}))
+    lc_fn = (lambda rep: {"observables": [obs(observed_b if rep["Label"] == "s2" and observed_b else observed, "y1",
+                                              **(noise or {}))]})
+    elem = {"type": "composite", "simulations": ["s1", "s2"], "data_simulation": "s1", "aggregation": aggregation,
+            "loss_config": lc_fn}
+    groups = {"g": {"loss_elements": [elem]}}
+    rng = np.random.default_rng(9)
+    diff = table(THETA, T_DATA)[0].data[:, 1] - table2(THETA, T_DATA)[0].data[:, 1]
+    df = pd.DataFrame({"time": T_DATA, "y1": diff * (1 + 0.05 * rng.standard_normal(len(T_DATA))),
+                       "w": np.linspace(0.5, 1.5, len(T_DATA))})
+    loss = LossGradient(groups, replicates, NAMES)
+
+    def items(theta):
+        (t1, D1), (t2, D2) = table(theta), table2(theta, T_SIM + 0.07)
+        return ({"s1": {"results": t1, "data": {"s1": df, "s2": df}, "replicate": replicates["s1"]},
+                 "s2": {"results": t2, "data": {"s1": df, "s2": df}, "replicate": replicates["s2"]}},
+                {"s1": D1, "s2": D2})
+    return loss, items
+
+
+def test_a_subtraction_of_two_simulations():
+    agree(*both(*make_composite(lambda subs: subs[0] - subs[1])))
+
+
+def test_a_subtraction_where_each_arm_is_an_expression():
+    agree(*both(*make_composite(lambda subs: subs[0] - subs[1], observed="p1 + 0.2*p2", observed_b="2*p1 - p2")))
+
+
+def test_the_linear_aggregations():
+    agree(*both(*make_composite("mean")))
+    agree(*both(*make_composite("sum")))
+
+
+def test_a_median_and_a_nonlinear_aggregation():
+    agree(*both(*make_composite("median")))
+    agree(*both(*make_composite(lambda subs: subs[0] / (1.0 + np.abs(subs[1])))))
+
+
+def test_a_composite_with_a_declared_sigma_and_a_jacobian():
+    loss, items = make_composite(lambda subs: subs[0] - subs[1], noise={"sigma_method": "fixed", "sigma_value": 0.1})
+    agree(*both(loss, items))
+    agree_j(*both_j(loss, items))
+
+
+def test_a_composite_costs_no_loss_evaluations():
+    loss, items = make_composite(lambda subs: subs[0] - subs[1])
+    calls = {"n": 0}
+    real = loss.value
+
+    def counted(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+    loss.value = counted
+    it, dirs = items(THETA)
+    loss.gradient(it, dirs, THETA)
+    assert calls["n"] == 0
 
 
 # --- the residual Jacobian (Levenberg-Marquardt) -----------------------------------------------------------
@@ -207,14 +342,6 @@ def test_jacobian_transpose_residual_is_the_gradient_of_the_loss():
     f, g = loss.gradient(it, dirs, theta)
     np.testing.assert_allclose(J.T @ r, g, rtol=1e-6)
     assert f == pytest.approx(const + 0.5 * float(r @ r))
-
-
-def test_the_jacobian_of_an_expression_observable_takes_the_finite_difference_route():
-    loss, items = make([known("2*p1", "y1")])
-    it, dirs = items(THETA)
-    assert loss._exact_residual_jacobian(it, dirs, THETA) is None
-    r, J, _ = loss.residual_jacobian(it, dirs, THETA)
-    assert J.shape == (r.size, 2) and np.all(np.isfinite(J))
 
 
 def test_a_profiled_sigma_still_cannot_be_a_least_squares_problem():

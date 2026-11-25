@@ -325,6 +325,39 @@ def _pool_label_source(obs, obs_cfg):
     return pool if pool else obs
 
 
+def _observable_series(obs, result, param_dict):
+    """One observable evaluated on one result table, as the loss does it: a callable of the table, a column name, or an
+    expression over the columns (``[X]`` and ``X`` both work), the parameters and ``np``.
+
+    ``LossGradient`` calls this on tables shifted along sensitivity directions, so that only the (cheap) observable is
+    differentiated by finite differences and not the whole loss. It must stay equivalent to the evaluation inside
+    ``loss_function_evaluated``; the gradient checks it against the loss's own prediction before it trusts it.
+    """
+    if callable(obs):
+        return np.asarray(obs(result))
+    if not isinstance(obs, str):
+        raise ValueError(f"Invalid observable type: {type(obs)}")
+    if hasattr(result, "colnames"):
+        cols = result.colnames
+    elif hasattr(result, "dtype") and result.dtype.names:
+        cols = result.dtype.names
+    else:
+        cols = []
+    if obs in cols:
+        return np.asarray(result[obs])
+    local_dict = {"np": np, "time": np.asarray(result["time"])}
+    for col in cols:
+        local_dict[col] = np.asarray(result[col])
+        if col.startswith('[') and col.endswith(']'):
+            local_dict[col[1:-1]] = np.asarray(result[col])
+    local_dict.update(param_dict)
+    expr = obs
+    for col in cols:
+        if col.startswith('[') and col.endswith(']'):
+            expr = expr.replace(col, col[1:-1])
+    return np.asarray(eval(expr, {}, local_dict))
+
+
 class OptRoadRunnerProxy:
     def __init__(self, r, opt_param_names):
         self._r = r
@@ -1231,7 +1264,8 @@ def loss_function_evaluated(
                           known_sigma=known_sigma, sigma_floor=sigma_floor)
             if _PREDICTION_SINK is not None:      # Analytic_gradient.LossGradient._exact_gradient
                 _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "result": result, "column": obs_col,
-                                         "t_data": t_data, "valid": valid, "weights": obs_weights_v,
+                                         "predict": (lambda tab, _o=obs, _p=param_dict: _observable_series(_o, tab, _p)),
+                                         "y_pred": y_pred, "t_data": t_data, "valid": valid, "weights": obs_weights_v,
                                          "residuals": residuals})
             if seen is not None:
                 # Pre-pooling identity. Block count cannot measure data coverage
@@ -1378,6 +1412,7 @@ def loss_function_composite(
         t_data = np.asarray(obs_df[t_col])
 
         y_pred_subs = []
+        subs_info = []              # per contributing simulation: what LossGradient needs to differentiate its prediction
         for item in results_list:
             if isinstance(item, dict) and "results" in item:
                 result = item["results"]
@@ -1430,12 +1465,14 @@ def loss_function_composite(
                 _eval_cache["cols"] = cols
                 return local_dict, cols
 
+            obs_col_s = None
             try:
                 if callable(obs_s):
                     y_sim = np.asarray(obs_s(result))
                 elif isinstance(obs_s, str):
                     local_dict, cols = _ensure_eval_context()
                     if obs_s in cols:
+                        obs_col_s = obs_s
                         y_sim = np.asarray(result[obs_s])
                     else:
                         eval_obs = str(obs_s)
@@ -1450,6 +1487,8 @@ def loss_function_composite(
 
             y_pred_sub = np.interp(t_data_s, t_sim, y_sim)
             y_pred_subs.append(y_pred_sub)
+            subs_info.append({"result": result, "column": obs_col_s, "t_data": t_data_s, "y_pred": y_pred_sub,
+                              "predict": (lambda tab, _o=obs_s, _p=param_dict: _observable_series(_o, tab, _p))})
 
         if not y_pred_subs:
             continue
@@ -1497,8 +1536,12 @@ def loss_function_composite(
         _record_block(blocks, block_id,
                       pobs, residuals, obs_weights_v,
                       known_sigma=known_sigma, sigma_floor=sigma_floor)
-        if _PREDICTION_SINK is not None:          # an aggregate of simulations: no single column to differentiate
-            _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "column": None})
+        if _PREDICTION_SINK is not None:          # an aggregate of simulations: differentiated sub by sub, then through the aggregation
+            _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "column": None, "result": None,
+                                     "composite": {"subs": subs_info, "aggregation": aggregation,
+                                                   "y_pred_subs": y_pred_subs},
+                                     "y_pred": y_pred, "t_data": t_data, "valid": valid, "weights": obs_weights_v,
+                                     "residuals": residuals})
         if seen is not None:
             seen.add((str(exp_id), _short_obs_label(obs)))
 
@@ -7584,7 +7627,8 @@ def run_optimization_from_groups(
     reuse_fit=True,
 ):
     """
-    Optimize shared parameters using ``experiment.opt_groups`` or ``optimization_spec``.
+    Optimize shared parameters as ``optimization_spec`` describes: its ``groups`` choose the simulations and weight
+    their losses. (The older route that picked replicates by an ``Opt_group`` key is gone.)
 
     fit_mode : "optimize" (default) runs the optimizer; "evaluate_x0" skips the
         fit and evaluates the starting point, so diagnostics can be run against

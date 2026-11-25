@@ -4,6 +4,11 @@
 #                                 (PEtab's single noise parameter for several observables)
 # Pooling the same observable across simulations is "sigma_block" on the loss ELEMENT
 # in Optimizer_settings.py; the two compose.
+#   "reads_parameters": [names]   for a CALLABLE observed_variable only: the fitted parameters it reads by name.
+#                                 Default: all of them (a callable could read anything), which costs four extra passes of
+#                                 the loss per parameter in every AMICI gradient. A callable of the table alone reads none:
+#                                 say "reads_parameters": [] and the gradient costs no extra passes. (An expression string
+#                                 needs no declaration: its names are found in it.)
 
 def no_optimization(replicate):
     return {}

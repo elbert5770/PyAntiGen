@@ -1174,7 +1174,8 @@ def setup_optimization(settings, optimization_settings, experiment_dict):
 
 def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_dict):
     """
-    Run parameter optimization using Experiment.opt_groups.
+    Run the parameter optimization that ``optimization_settings`` (an Optimization) describes: its ``groups`` choose
+    the simulations and weight their losses.
 
     Loss_config is read from each replicate's ``Loss_config`` key.
     Replicates whose Loss_config is ``no_optimization()`` are simulated at the

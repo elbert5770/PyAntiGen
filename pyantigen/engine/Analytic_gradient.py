@@ -105,8 +105,10 @@ class LossGradient:
         """Indices of the fitted parameters the loss names itself (``SF*predicted_B``).
 
         Those enter the loss a second way, besides through the simulation, and need
-        their own partial derivative. A callable observable could read anything: then
-        every parameter counts.
+        their own partial derivative (four passes of the loss each). A callable observable could read anything: then
+        every parameter counts -- unless its loss_config entry says what it reads with ``"reads_parameters": [names]``
+        (``[]`` for a callable of the table alone, which sees a fitted parameter only through a table column, and
+        that the sensitivities already carry). The default stays conservative; a wrong declaration would drop a partial.
         """
         found, names = set(), set(self.param_names)
         for g in self.groups.values():
@@ -120,8 +122,13 @@ class LossGradient:
                     for obs in (lc or {}).get("observables", []):
                         ov = obs.get("observed_variable")
                         if callable(ov):
-                            return set(range(len(self.param_names)))
-                        texts = [str(ov), str(obs.get("noise_formula") or "")]
+                            declared = obs.get("reads_parameters")
+                            if declared is None:
+                                return set(range(len(self.param_names)))
+                            found |= set(declared) & names
+                            texts = [str(obs.get("noise_formula") or "")]
+                        else:
+                            texts = [str(ov), str(obs.get("noise_formula") or "")]
                         for t in texts:
                             found |= set(_NAME.findall(t)) & names
         return {self.param_names.index(n) for n in found}
@@ -185,32 +192,18 @@ class LossGradient:
         return r, const
 
     def _exact_residual_jacobian(self, items, directions, p_lin):
-        """``(r, J, const)`` by the chain rule, or ``None`` when some scored observable is not a bare result column.
+        """``(r, J, const)`` by the chain rule (see :meth:`_exact_gradient`), or ``None`` when some scored observable cannot
+        be differentiated that way.
 
-        A residual is ``sqrt(w) (y - interp(t, t_sim, column)) / sigma``, so its row of J is
-        ``-sqrt(w) / sigma * interp(t, t_sim, D[:, column, :])`` -- see :meth:`_exact_gradient`.
+        A residual is ``sqrt(w) (y - prediction) / sigma``, so its row of J is ``-sqrt(w) / sigma * d prediction / d theta``.
         """
         p_lin = np.asarray(p_lin, dtype=float)
-        K = len(self.param_names)
         r0, const, records = self._residual_pass(items, p_lin, with_predictions=True)
-        if any(rec["column"] is None for rec, _ in records):
+        jac = self._prediction_jacobians(items, directions, [rec for rec, _sigma in records])
+        if jac is None:
             return None
-        owner = {id(item["results"]): sim for sim, item in items.items()}
-        rows = []
-        for rec, sigma in records:
-            sim = owner.get(id(rec["result"]))
-            if sim is None:
-                return None
-            D = directions.get(sim)
-            n = int(np.count_nonzero(rec["valid"]))
-            if D is None or not D.size:
-                rows.append(np.zeros((n, K)))
-                continue
-            table = rec["result"]
-            Dc = D[:, table.colnames.index(rec["column"]), :]
-            t_sim = np.asarray(table["time"])
-            dy = np.stack([np.interp(rec["t_data"], t_sim, Dc[:, k]) for k in range(K)], axis=1)
-            rows.append(-np.sqrt(rec["weights"])[:, None] * dy[rec["valid"]] / sigma)
+        rows = [-np.sqrt(rec["weights"])[:, None] * dy[rec["valid"]] / sigma
+                for (rec, sigma), dy in zip(records, jac)]
         J = np.vstack(rows)
         if J.shape[0] != r0.size:
             return None
@@ -228,8 +221,8 @@ class LossGradient:
     def residual_jacobian(self, items, directions, p_lin):
         """``(r, J, const)``: residuals, ``J[i, k] = d r_i / d theta_k`` (linear units), and ``sum n ln sigma``.
 
-        When every scored observable is a bare result column the derivative is the chain rule
-        (:meth:`_exact_residual_jacobian`); otherwise it is taken the way :meth:`gradient` takes the loss's: central
+        By the chain rule where the observables allow it (:meth:`_exact_residual_jacobian`: exact for a bare column, only
+        the observable differenced otherwise); failing that it is taken the way :meth:`gradient` takes the loss's: central
         differences of the residual vector along the sensitivity tables (Richardson), plus a partial for each parameter
         the loss names itself. ``J.T @ r`` is then the gradient of ``const + 0.5 r.r`` and ``J.T @ J`` its Gauss-Newton Hessian.
         """
@@ -351,17 +344,138 @@ class LossGradient:
             out[sim] = {**items[sim], "results": type(table)(table.colnames, data)}
         return out
 
-    # When every scored observable is a bare result column, the chain rule needs no finite differences at all:
-    #   prediction_i = interp(t_i, t_sim, column)        so      d prediction_i / d theta = interp(t_i, t_sim, D[:, column, :])
-    #   dSSE_b / d theta = sum_i -2 w_i r_i d prediction_i / d theta,        dNLL / d theta = sum_b (dNLL_b / dSSE_b) dSSE_b / d theta
-    # One traversal of the loss, with the engine's own masks, weights, pooling and sigma rules, and a few small matrix
-    # products. The finite-difference route below re-evaluates the whole Python loss ~600 times per gradient (1.9 s on Zheng's
-    # 80 columns, against 123 ms for AMICI's own likelihood and gradient); an expression, a callable or an aggregate
-    # observable still takes it. ``exact`` turns the shortcut off, to compare the two.
+    # The chain rule, without differencing the whole loss.
+    #   prediction_i = interp(t_i, t_sim, h(table))     h = the observable: a column, an expression, a callable
+    #   d prediction_i / d theta = interp(t_i, t_sim, d h(table) / d theta)
+    #   dSSE_b / d theta = sum_i -2 w_i r_i d prediction_i / d theta,    dNLL / d theta = sum_b (dNLL_b / dSSE_b) dSSE_b / d theta
+    # One traversal of the loss, with the engine's own masks, weights, pooling and sigma rules. d h / d theta is exact for a
+    # bare column (the sensitivity table itself). For anything else only h is differenced, along the sensitivity directions,
+    # which costs a few numpy evaluations of h per step group instead of a pass of the Python/pandas loss (~600 passes per
+    # gradient before, 1.9 s on Zheng's 80 columns). A composite (one simulation subtracted from another, a normalised
+    # aggregate) is differentiated simulation by simulation and then through its aggregation. Every differenced h is first
+    # checked against the prediction the loss itself made; a mismatch hands the whole gradient back to the old route.
+    # ``exact`` turns all of this off, to compare the two.
     exact = True
+    #: relative size of the step in prediction space when an aggregation is differenced
+    AGG_STEP = 1e-6
+
+    def _fd_series(self, items, directions, reqs):
+        """``[dy]`` for ``reqs = [(sim, predict, t_data)]``: d predict(table)/d theta_k interpolated onto ``t_data``.
+
+        Central differences with Richardson extrapolation along each sensitivity direction, a step per group of
+        (simulation, column) units (``_step_groups``), exactly as the loss was differenced before -- but of ``predict``,
+        which is a few numpy operations, rather than of the whole loss.
+        """
+        from collections import defaultdict
+        K = len(self.param_names)
+        out = [np.zeros((len(t), K)) for _s, _p, t in reqs]
+        by_sim = defaultdict(list)
+        for i, (sim, _p, _t) in enumerate(reqs):
+            by_sim[sim].append(i)
+        for sim, idxs in by_sim.items():
+            D = directions.get(sim)
+            if D is None or not D.size:
+                continue
+            sub_items, sub_dirs = {sim: items[sim]}, {sim: D}
+            for k in range(K):
+                for units, h in self._step_groups(sub_items, sub_dirs, k):
+                    for x, wt in ((h / 2.0, 4.0 / 3.0), (h, -1.0 / 3.0)):
+                        up = self._shift_units(sub_items, sub_dirs, units, k, x)[sim]["results"]
+                        dn = self._shift_units(sub_items, sub_dirs, units, k, -x)[sim]["results"]
+                        t_up, t_dn = np.asarray(up["time"]), np.asarray(dn["time"])
+                        for i in idxs:
+                            _s, predict, t_data = reqs[i]
+                            out[i][:, k] += wt * (np.interp(t_data, t_up, predict(up))
+                                                  - np.interp(t_data, t_dn, predict(dn))) / (2.0 * x)
+        return out
+
+    @staticmethod
+    def _column_jacobian(table, D, column, t_data):
+        """d interp(t_data, t_sim, table[column]) / d theta, exactly: the sensitivity column, interpolated."""
+        Dc = D[:, table.colnames.index(column), :]
+        t_sim = np.asarray(table["time"])
+        return np.stack([np.interp(t_data, t_sim, Dc[:, k]) for k in range(Dc.shape[1])], axis=1)
+
+    def _aggregate_jacobian(self, aggregation, y_subs, dy_subs):
+        """d aggregation(y_subs) / d theta, given d y_sub / d theta for each simulation (``dy_subs[s]`` is (n, K))."""
+        if isinstance(aggregation, str) and aggregation in ("mean", "sum"):
+            return (np.mean if aggregation == "mean" else np.sum)(np.asarray(dy_subs), axis=0)
+        if isinstance(aggregation, str):
+            if aggregation != "median":
+                return None
+            aggregation = lambda subs: np.median(subs, axis=0)           # noqa: E731
+        n, K = dy_subs[0].shape
+        out = np.zeros((n, K))
+        scale = max(float(np.max(np.abs(y_subs))), 1e-300)
+        for k in range(K):
+            d = [dy[:, k] for dy in dy_subs]
+            dmax = float(np.max(np.abs(d)))
+            if dmax == 0.0:
+                continue
+            eps = self.AGG_STEP * scale / dmax
+            up = np.asarray(aggregation([y + eps * dd for y, dd in zip(y_subs, d)]), dtype=float)
+            dn = np.asarray(aggregation([y - eps * dd for y, dd in zip(y_subs, d)]), dtype=float)
+            out[:, k] = (up - dn) / (2.0 * eps)
+        return out
+
+    def _prediction_jacobians(self, items, directions, records):
+        """``[d prediction / d theta]`` for every record the engine's traversal reported (each ``(len(t_data), K)``), or
+        ``None`` when one of them cannot be differentiated this way (the caller then takes the old route)."""
+        owner = {id(item["results"]): sim for sim, item in items.items()}
+        out = [None] * len(records)
+        reqs, plan = [], []               # reqs: (sim, predict, t_data) to difference; plan: where each result goes
+
+        def table(sim):
+            return items[sim]["results"]
+
+        def column_or_request(sim, column, predict, t_data, y_pred):
+            """An exact Jacobian for a bare column; else a request to difference ``predict`` (checked first)."""
+            D = directions.get(sim)
+            if D is None or not D.size:
+                return ("zero", np.zeros((len(t_data), len(self.param_names))))
+            if column is not None:
+                return ("done", self._column_jacobian(table(sim), D, column, t_data))
+            base = np.interp(t_data, np.asarray(table(sim)["time"]), predict(table(sim)))
+            if not np.allclose(base, y_pred, rtol=1e-8, atol=1e-12, equal_nan=True):
+                return None               # the closure does not reproduce the loss's own prediction: do not trust it
+            reqs.append((sim, predict, t_data))
+            return ("fd", len(reqs) - 1)
+
+        for i, rec in enumerate(records):
+            comp = rec.get("composite")
+            if comp is None:
+                sim = owner.get(id(rec["result"]))
+                if sim is None:
+                    return None
+                got = column_or_request(sim, rec["column"], rec["predict"], rec["t_data"], rec["y_pred"])
+                if got is None:
+                    return None
+                plan.append((i, None, [got]))
+            else:
+                parts = []
+                for sub in comp["subs"]:
+                    sim = owner.get(id(sub["result"]))
+                    if sim is None:
+                        return None
+                    got = column_or_request(sim, sub["column"], sub["predict"], sub["t_data"], sub["y_pred"])
+                    if got is None:
+                        return None
+                    parts.append(got)
+                plan.append((i, comp, parts))
+
+        fd = self._fd_series(items, directions, reqs)
+        for i, comp, parts in plan:
+            dys = [p[1] if p[0] != "fd" else fd[p[1]] for p in parts]
+            if comp is None:
+                out[i] = dys[0]
+            else:
+                out[i] = self._aggregate_jacobian(comp["aggregation"], comp["y_pred_subs"], dys)
+                if out[i] is None:
+                    return None
+        return out
 
     def _exact_gradient(self, items, directions, p_lin):
-        """``(nll, grad)`` by the chain rule, or ``None`` when some scored observable is not a bare result column."""
+        """``(nll, grad)`` by the chain rule, or ``None`` when some scored observable cannot be differentiated that way."""
         from pyantigen.engine import Optimize as O
         p_lin = np.asarray(p_lin, dtype=float)
         p_dict = dict(zip(self.param_names, p_lin.tolist()))
@@ -374,26 +488,15 @@ class LossGradient:
             O._PREDICTION_SINK = None
         if not blocks:
             raise AnalyticGradientError("the loss has no data to score")
-        if any(rec["column"] is None for rec in sink):
+        jac = self._prediction_jacobians(items, directions, sink)
+        if jac is None:
             return None
         f0 = O.concentrated_nll(blocks)
         if not np.isfinite(f0):
             raise AnalyticGradientError("the loss is not finite")
         dsse = O.concentrated_nll_dsse(blocks)
-        K = len(self.param_names)
-        owner = {id(item["results"]): sim for sim, item in items.items()}
-        g = np.zeros(K)
-        for rec in sink:
-            sim = owner.get(id(rec["result"]))
-            if sim is None:
-                return None                              # a table this object cannot trace to its sensitivities
-            D = directions.get(sim)
-            if D is None or not D.size:
-                continue                                 # no sensitivities: the prediction does not move with theta
-            table = rec["result"]
-            Dc = D[:, table.colnames.index(rec["column"]), :]
-            t_sim = np.asarray(table["time"])
-            dy = np.stack([np.interp(rec["t_data"], t_sim, Dc[:, k]) for k in range(K)], axis=1)
+        g = np.zeros(len(self.param_names))
+        for rec, dy in zip(sink, jac):
             g += dsse[rec["block"]] * (-2.0 * (rec["weights"] * rec["residuals"]) @ dy[rec["valid"]])
         for k in self.explicit:                         # the loss names this parameter itself: its own partial, as below
             d = 1e-6 * max(abs(p_lin[k]), 1e-8)
