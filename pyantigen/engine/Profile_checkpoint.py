@@ -433,8 +433,12 @@ def default_run_id(tag, model_hash, spec_hash):
     never resume, which defeats the entire mechanism. Identity comes from *what
     is being profiled*, so relaunching the same problem finds its own results
     and a different problem gets a different directory.
+
+    ``PYANTIGEN_PROFILE_STORE_TAG`` appends ``_<tag>``: a second profile of the same problem (other walk settings, another stepping
+    algorithm) gets its own directory and leaves the first untouched.
     """
-    return f"{_safe_name(tag)}_{model_hash[:8]}_{spec_hash[:8]}"
+    suffix = (os.environ.get("PYANTIGEN_PROFILE_STORE_TAG") or "").strip()
+    return f"{_safe_name(tag)}_{model_hash[:8]}_{spec_hash[:8]}" + (f"_{_safe_name(suffix)}" if suffix else "")
 
 
 class ProfileCheckpoint:

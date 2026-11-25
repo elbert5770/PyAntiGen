@@ -8,8 +8,13 @@ Passes, each resumable from its JSONL file and run in this order for one side (a
 
 * :func:`walk` leaves the optimum in one direction. The step follows the profile's own curvature: from the last point
   (``dnll`` at distance ``d``) it assumes ``dnll = c d^2`` and takes the step that raises ``dnll`` by ``df_step``, capped by
-  ``h_max`` and by three times the previous step. The nuisance parameters start from a linear predictor through the last
-  two points. A nuisance on a bound is widened (``widen`` decades at a time, kept per side) and the point re-solved. The
+  ``h_max`` and by three times the previous step. The nuisance parameters start from :func:`predict_start`: the secant
+  of the last two usable points, and for the first hop (there is nothing to extrapolate along yet) the tangent of the
+  profile at the optimum, :func:`tangent_matrix`, from the Gauss-Newton Hessian of the optimum (the AMICI profile
+  computes it from the Jacobian it already evaluates there). Before 2026-11-20 the first hop started from the optimum's own
+  vector, which on a ridge lands far from the valley and, with the 40-evaluation budget, on a worse branch that every
+  later step was chained from. A point that stopped far from stationary (projected gradient above ``predict_pg_ok``) is not
+  used as a start. A nuisance on a bound is widened (``widen`` decades at a time, kept per side) and the point re-solved. The
   walk stops once ``dnll > df_stop`` (``level + stop_margin``, so the crossing is bracketed), when the profiled parameter
   has travelled ``max_decades`` from the optimum without a crossing (the side is open), or when a point cannot be
   evaluated. The profiled parameter is not held to the declared box. A last point over the stop level is first re-fitted
@@ -19,13 +24,18 @@ Passes, each resumable from its JSONL file and run in this order for one side (a
   value, the point is fitted from both bracketing points' nuisance vectors (strict convergence), the lower is kept, and
   the bracket shrinks until ``|dnll - level| <= tol``.
 * :func:`densify` bisects the gaps between the optimum and the crossing that are wider than ``max_gap`` (in the parameter)
-  or ``max_dgap`` (in dnll).
+  or ``max_dgap`` (in dnll); each new point starts from :func:`predict_start` (the mean of its neighbours when both are
+  usable).
 * :func:`recheck` (optional) refits each point from its neighbours' vectors, forward then backward, keeping the lowest. A
   first pass warm-started into the wrong valley shows up as a decrease.
 * :func:`backfill` (optional, ``backfill_points`` > 0) adds warm-started points in the widest gaps until the side has that
   many converged points between the optimum and the crossing (or where the walk gave up).
 
 :func:`pins` and :func:`relax` are the older grid route: a fixed list of values, with nuisance bounds widened afterwards.
+
+A point the solver gave up on ("no model decrease available") at a projected gradient below ``stall_pg`` nats is *stalled*
+(:meth:`Profile_record.PointRecord.stalled`): its dnll is at most that far above the profile and more evaluations reproduce
+it. It is ``not_converged`` for the strict test, but the reports count it apart from the points that ran out of evaluations.
 
 Every record carries its verdict, its ``lower`` flag (better than the "optimum": the optimum was not global) and, from
 the solver, ``bound_active`` (see :func:`Profile_record.flag_bounds`); :func:`Profile_record.side_verdicts` turns the
@@ -41,7 +51,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from pyantigen.engine.Profile_lm import OutOfTime
-from pyantigen.engine.Profile_record import BOUND_TOL, DNLL_95, PointRecord, PointRequest, curve, read_jsonl, validate_result
+from pyantigen.engine.Profile_record import BOUND_TOL, DNLL_95, STALL_PG, PointRecord, PointRequest, curve, read_jsonl, validate_result
 
 
 @dataclass
@@ -68,6 +78,15 @@ class WalkSettings:
     confirm_tol: float = 0.05       # ... and keeps the re-fit, and goes on walking, when it is lower by more than this (nats)
     backfill_points: int = 0        # backfill: converged points wanted between the optimum and the crossing (0: no backfill pass)
     backfill_rounds: int = 12
+    use_tangent: bool = True        # start the first hop (and any step with no pair of usable points to extrapolate from) along the tangent of the profile at the optimum
+    tangent_damping: float = 0.5    # ... moving each nuisance this fraction of the tangent's displacement ...
+    tangent_clip: float = 0.5       # ... and by at most this many "decades" (``_unit``): the quadratic model at the optimum is only trustworthy for small hops (stored microglia profile: see docs)
+    first_hop_max: Optional[float] = None   # cap on the first hop, in "decades" (``_unit``); None: 4 x the Wald sd as before. The stored microglia sides say 0.15
+    predict_pg_ok: float = 1.0      # a point that did not converge is a usable start only when its projected gradient (nats) is below this: wrong-branch points are not
+    stall_pg: float = STALL_PG      # a point the solver gave up on below this projected gradient (nats) is "stalled", not "capped" (see PointRecord.stalled)
+    plateau_window: int = 0         # 0: off. The nuisance LM stops a point that gained less than ``plateau_tol`` nats in the last ``plateau_window`` evaluations ...
+    plateau_tol: float = 0.005
+    plateau_pg: float = 0.05        # ... with a projected gradient under this (nats): stalled after the window instead of after ``point_max_evals`` (see Profile_lm.plateau_reached)
 
     @property
     def df_stop(self):
@@ -86,6 +105,7 @@ class ProfileProblem:
     best_value: Callable = None     # k -> linear best-fit value of parameter k
     sd_first: Optional[np.ndarray] = None   # per-parameter scale of the first step (e.g. the Wald lower bound)
     floors_sha256: Optional[str] = None
+    tangent: Optional[np.ndarray] = None    # n x n: column k is d(x_i)/d(x_k) along the profile of parameter k at the optimum (see :func:`tangent_matrix`)
 
     def request(self, k, x_fixed, x_start, direction, **kw):
         bv = self.best_value(k) if self.best_value else None
@@ -156,16 +176,95 @@ class MemoryStore:
         self.flags[kind] = text
 
 
-def plan_step(records, best_xk, sd_first, st: WalkSettings):
+def plan_step(records, best_xk, sd_first, st: WalkSettings, unit=1.0):
     """Size of the next step (optimizer space, positive) from the points so far (index 0 is the optimum)."""
     last = records[-1]
     d = abs(last.x_fixed - best_xk)
     if len(records) == 1:
-        return float(np.clip(4.0 * (sd_first if sd_first is not None else st.h_min), st.h_min, st.h_max))
+        h = float(np.clip(4.0 * (sd_first if sd_first is not None else st.h_min), st.h_min, st.h_max))
+        return min(h, st.first_hop_max * unit) if st.first_hop_max is not None else h
     c = max(last.dnll, 1e-6) / d ** 2
     h = math.sqrt((max(last.dnll, 0.0) + st.df_step) / c) - d
     d_prev = abs(records[-2].x_fixed - best_xk) if len(records) > 1 else 0.0
     return float(np.clip(h, st.h_min, min(st.h_max, 3.0 * max(d - d_prev, st.h_min))))
+
+
+def tangent_matrix(J, x, lb, ub, ridge=1e-9, tol=BOUND_TOL):
+    """Direction in which the nuisance parameters move when parameter *k* is moved away from the optimum, for every k: an n x n matrix T, column k.
+
+    From the Gauss-Newton Hessian H = J'J at the optimum (J the residual Jacobian in the optimizer space): minimizing 0.5 d'H d over the nuisance
+    part d_N with d_k = 1 gives d_N = -H_NN^-1 H_Nk (the implicit function theorem for the constrained minimum), T[k, k] = 1. A nuisance on a bound at the
+    optimum is held there (a zero row). H_NN is regularized by ``ridge`` x its mean diagonal, which keeps a parameter that is flat on its own
+    from blowing the step up; a ridge that involves k itself (the two clearance rates and the gain of the microglia fit enter as products, so the
+    profile of one moves the others 1:1 along it) is exactly what this recovers, because H_NN is regular once k is taken out of it.
+    """
+    J = np.asarray(J, float)
+    x = np.asarray(x, float)
+    H = J.T @ J
+    n = len(x)
+    free = ~(((x - np.asarray(lb, float)) <= tol) | ((np.asarray(ub, float) - x) <= tol))
+    T = np.zeros((n, n))
+    for k in range(n):
+        T[k, k] = 1.0
+        N = [i for i in range(n) if i != k and free[i]]
+        if not N:
+            continue
+        Hnn = H[np.ix_(N, N)]
+        lam = ridge * float(np.mean(np.diag(Hnn))) if len(N) else 0.0
+        T[N, k] = np.linalg.solve(Hnn + lam * np.eye(len(N)), -H[N, k])
+    return T
+
+
+def _usable_start(rec, st):
+    """A record that can seed a neighbour: it has a vector and a finite dnll and either converged, is the optimum, has no projected gradient to judge by, or is close to stationary."""
+    if rec.x is None or not rec.usable:
+        return False
+    if rec.verdict == "converged" or rec.source == "optimum" or rec.pg is None:
+        return True
+    return float(rec.pg) < st.predict_pg_ok
+
+
+def predict_start(pr: ProfileProblem, k, val, pts, direction, st: WalkSettings = None):
+    """Start vector for the nuisance fit at ``x_k = val``, from the points so far (*pts*, the optimum included).
+
+    * a usable point at *val*: its own vector;
+    * *val* between two usable points: linear interpolation between the two nearest;
+    * beyond the last usable point: the secant of the last two when they are apart, else the tangent of the profile at the optimum (``pr.tangent``) from the
+      last one, damped by ``tangent_damping`` and clipped to ``tangent_clip`` "decades" per nuisance, else the last vector as it is (what the walk did before).
+      The damping and the clip come from the stored microglia profile (193 points, every side, against the FIM at the optimum): the quadratic model is right for
+      the parameters on the ridge (two clearance rates and the gain: 1:1 over more than a decade) and overshoots the ones that saturate (the dwell time: -3.8 per
+      decade of the profiled parameter against -1.9 observed), so the full tangent is worse than the optimum's own vector for hops beyond 0.3 decades; half of it,
+      clipped to 0.5, cuts the median error of the start by 3x for hops under 0.3 and 1.4x up to 1.3.
+    A point that stopped far from stationary (``predict_pg_ok``) is not a start: it is on a worse branch of the nuisance fit and everything chained from it
+    inherits that. Entry k is *val*; the others are clipped into the bounds.
+    """
+    st = st or WalkSettings()
+    use = sorted((p for p in pts if _usable_start(p, st)), key=lambda p: direction * p.x_fixed)
+    if not use:
+        raise ValueError("no usable point to start from")
+    before = [p for p in use if direction * p.x_fixed < direction * val - 1e-12]
+    after = [p for p in use if direction * p.x_fixed > direction * val + 1e-12]
+    at = [p for p in use if abs(p.x_fixed - val) <= 1e-12]
+    if at:
+        x = np.array(at[0].x, float)
+    elif before and after:
+        a, b = before[-1], after[0]
+        w = (val - a.x_fixed) / (b.x_fixed - a.x_fixed)
+        x = (1.0 - w) * np.array(a.x, float) + w * np.array(b.x, float)
+    elif before:
+        a = before[-1]
+        x = np.array(a.x, float)
+        if len(before) >= 2 and abs(a.x_fixed - before[-2].x_fixed) > 0:
+            x = x + (x - np.array(before[-2].x, float)) / (a.x_fixed - before[-2].x_fixed) * (val - a.x_fixed)
+        elif st.use_tangent and pr.tangent is not None:
+            disp = st.tangent_damping * np.asarray(pr.tangent, float)[:, k] * (val - a.x_fixed)
+            cap = st.tangent_clip * np.array([_unit(pr, i) for i in range(len(x))])
+            x = x + np.clip(disp, -cap, cap)
+    else:
+        x = np.array(after[0].x, float)
+    x = np.clip(x, pr.lb, pr.ub)
+    x[k] = val                              # the profiled parameter is not held to the box
+    return x
 
 
 def _optimum_record(pr: ProfileProblem, k):
@@ -334,15 +433,14 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
             store.finish(kind, reason)
             say(f"{pr.names[k]} {'up' if direction > 0 else 'down'}: finished: {reason}")
             return pts, reason
-        h = plan_step(pts, bk, sd, st)
+        h = plan_step(pts, bk, sd, st, _unit(pr, k))
         val = float(np.clip(last.x_fixed + direction * h, min(bk, stop_at), max(bk, stop_at)))
         x_prev = np.array(last.x, float)
-        x_init = x_prev.copy()
-        if len(pts) > 1 and abs(last.x_fixed - pts[-2].x_fixed) > 0:
-            slope = (x_prev - np.array(pts[-2].x, float)) / (last.x_fixed - pts[-2].x_fixed)
-            x_init = x_prev + slope * (val - last.x_fixed)
-        x_init = np.clip(x_init, pr.lb, pr.ub)
-        x_init[k] = val                       # the profiled parameter is not held to the box
+        try:
+            x_init = predict_start(pr, k, val, pts, direction, st)
+        except ValueError:                    # nothing usable (cannot happen: the optimum is one): the last vector
+            x_init = np.clip(x_prev, pr.lb, pr.ub)
+            x_init[k] = val
         req = pr.request(k, val, x_init, direction, anchor_x=tuple(x_prev), deadline=deadline,
                          max_evals=st.point_max_evals, source=f"walk:{len(pts)}")
         say(f"{pr.names[k]} point {len(pts)}: x = {val:.5g} (step {val - last.x_fixed:+.4g})")
@@ -632,7 +730,10 @@ def densify(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=Non
                 break
             a, b = pts[i], pts[i + 1]
             val = 0.5 * (a.x_fixed + b.x_fixed)
-            x_init = 0.5 * (np.array(a.x, float) + np.array(b.x, float))
+            try:
+                x_init = predict_start(pr, k, val, pts, direction, st)     # between its two neighbours, or between the nearest usable ones when a neighbour is a wrong-branch point
+            except ValueError:
+                x_init = 0.5 * (np.array(a.x, float) + np.array(b.x, float))
             x_init[k] = val
             req = pr.request(k, val, np.clip(x_init, pr.lb, pr.ub), direction, anchor_x=tuple(a.x), deadline=deadline,
                              max_evals=st.point_max_evals, strict=True, source=f"dense:{rnd}")
@@ -733,7 +834,14 @@ def backfill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=No
 
 
 def recheck(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, walk_kind="profile"):
-    """Refit every walk point from other starts (itself, the previous, then the next point), keeping the lowest nll."""
+    """Refit every walk point from other starts (itself, the previous, then the next point), keeping the lowest nll.
+
+    With ``PYANTIGEN_PROFILE_RECHECK=rewalk`` the pass is :func:`pyantigen.engine.Profile_rewalk.rewalk` instead: a warm re-walk in small steps of a
+    side whose crossing the standard passes left unresolved, box-limited or behind a gap.
+    """
+    if os.environ.get("PYANTIGEN_PROFILE_RECHECK") == "rewalk":
+        from pyantigen.engine.Profile_rewalk import rewalk
+        return rewalk(pr, k, direction, st, store, deadline, log, walk_kind)
     st = st or WalkSettings()
     store = store or MemoryStore()
     say = log or (lambda *_: None)

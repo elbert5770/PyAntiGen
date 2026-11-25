@@ -37,6 +37,11 @@ MODE_ENV = "PYANTIGEN_PROFILE_MODE"          # walk (default) | pins | fim | col
 ANCHOR_TOL = 1e-4                            # optimizer-space distance at which a refit is a different anchor
 BACKFILL_ENV = "PYANTIGEN_PROFILE_BACKFILL"  # converged points wanted inside the level on each side; 0 turns the last pass off
 NO_WIDEN_ENV = "PYANTIGEN_PROFILE_NO_WIDEN"  # comma-separated bounds the walk never widens: name, name:lower or name:upper (also the spec's profile_no_widen)
+FIRST_HOP_ENV = "PYANTIGEN_PROFILE_FIRST_HOP"            # cap on the walk's first hop, in decades (WalkSettings.first_hop_max)
+POINT_EVALS_ENV = "PYANTIGEN_PROFILE_POINT_EVALS"        # evaluations per profile point (WalkSettings.point_max_evals, default 40)
+PLATEAU_ENV = "PYANTIGEN_PROFILE_PLATEAU"                # window, in evaluations, of the plateau stop of a profile point (WalkSettings.plateau_window; 0 = off)
+PLATEAU_TOL_ENV = "PYANTIGEN_PROFILE_PLATEAU_TOL"        # nats gained in the window below which the point has plateaued (default 0.005)
+PLATEAU_PG_ENV = "PYANTIGEN_PROFILE_PLATEAU_PG"          # projected gradient (nats) under which a plateaued point is stalled (default 0.05)
 PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
 FAILURE_VALUE = 1e10
 
@@ -54,7 +59,7 @@ def side_from_env(n_params, env=None):
 
 
 def settings_from_env(env=None):
-    """``(mode, WalkSettings)`` from ``PYANTIGEN_PROFILE_MODE`` and ``PYANTIGEN_PROFILE_PINS``."""
+    """``(mode, WalkSettings)`` from ``PYANTIGEN_PROFILE_MODE``, ``PYANTIGEN_PROFILE_PINS``, ``..._BACKFILL``, ``..._NO_WIDEN``, ``..._FIRST_HOP`` and ``..._POINT_EVALS``."""
     env = os.environ if env is None else env
     mode = (env.get(MODE_ENV) or "walk").strip().lower()
     if mode not in ("walk", "pins", "fim", "collect"):
@@ -66,6 +71,16 @@ def settings_from_env(env=None):
         st.backfill_points = int(env[BACKFILL_ENV])
     if env.get(NO_WIDEN_ENV, "").strip():
         st.no_widen = tuple(v.strip() for v in env[NO_WIDEN_ENV].split(",") if v.strip())
+    if env.get(FIRST_HOP_ENV, "").strip():
+        st.first_hop_max = float(env[FIRST_HOP_ENV])
+    if env.get(POINT_EVALS_ENV, "").strip():
+        st.point_max_evals = int(env[POINT_EVALS_ENV])
+    if env.get(PLATEAU_ENV, "").strip():
+        st.plateau_window = int(env[PLATEAU_ENV])
+    if env.get(PLATEAU_TOL_ENV, "").strip():
+        st.plateau_tol = float(env[PLATEAU_TOL_ENV])
+    if env.get(PLATEAU_PG_ENV, "").strip():
+        st.plateau_pg = float(env[PLATEAU_PG_ENV])
     return mode, st
 
 
@@ -159,6 +174,11 @@ def use_floors(store_dir, log=print):
 def optimum_state(evaluate, x, lb, ub, failures=()):
     """``(f, sd, worst_gain)`` at the optimum *x*: the objective, the Wald lower bound on each sd (optimizer space) from
     ``J'J``, and the largest expected gain, in nats, from the projected gradient (about 0 at a stationary point)."""
+    return optimum_state_full(evaluate, x, lb, ub, failures)[:3]
+
+
+def optimum_state_full(evaluate, x, lb, ub, failures=()):
+    """:func:`optimum_state` and, as a fourth value, the tangent matrix of the profile at the optimum (``Profile.tangent_matrix``), from the same evaluation."""
     out = evaluate(np.asarray(x, float))
     if out is None:
         why = f": {failures[-1]}" if failures else ""
@@ -169,7 +189,11 @@ def optimum_state(evaluate, x, lb, ub, failures=()):
     g = J.T @ r
     xa = np.asarray(x, float)
     g = np.where((xa <= lb + 1e-12) & (g > 0), 0.0, np.where((xa >= ub - 1e-12) & (g < 0), 0.0, g))
-    return float(f), sd, float(np.max(np.abs(g) * sd))
+    try:
+        T = PR.tangent_matrix(J, xa, lb, ub)
+    except np.linalg.LinAlgError:
+        T = None
+    return float(f), sd, float(np.max(np.abs(g) * sd)), T
 
 
 def record_to_raw(rec, names, scales):
@@ -179,7 +203,7 @@ def record_to_raw(rec, names, scales):
     value = rec.value if rec.value is not None else (10.0 ** rec.x_fixed if scales[k] == "log10" else rec.x_fixed)
     return {"param_name": rec.param, "param_idx": k, "x_fixed": float(rec.x_fixed), "x_fixed_linear": float(value),
             "nll": rec.nll, "dnll": rec.dnll, "status": "ok", "converged": rec.verdict == "converged",
-            "interrupted": bool(rec.interrupted), "nuisance_x": nuis, "n_evals": rec.evals or 0,
+            "interrupted": bool(rec.interrupted), "stalled": rec.stalled(), "nuisance_x": nuis, "n_evals": rec.evals or 0,
             "wall_s": rec.seconds or 0.0, "direction": rec.direction, "pass_label": rec.source,
             "backend": "amici", "solver": rec.solver, "bound_active": list(rec.bound_active),
             "pin_outside": bool(rec.pin_outside)}
@@ -332,17 +356,18 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         path = Fim.save_fim(rep, os.path.join(store_dir, "fim"), "fim", out[0])
         log(f"[fim] written to {path} (and fim.npz)")
         return {"anchor": float(out[0]), "floors": stamp, "ran": [], "fim": path}
-    f0, sd, worst = optimum_state(evaluate, xb, lb, ub, failures)
+    f0, sd, worst, tangent = optimum_state_full(evaluate, xb, lb, ub, failures)
     record_anchor(store_dir, f0)
     log(f"[profile] AMICI objective at the optimum: f {f0:.6f}; largest projected-gradient gain {worst:.3g} nats")
     if worst > 0.05:
         log("[profile] *** the optimum is not stationary under these floors; a LOWER point is likely and the profile "
             "is measured from a point that is not the minimum ***")
-    solver = LM.LmSolver(evaluate, names, scales, lb, ub, floors_sha256=stamp, log=None)
+    st = settings or PR.WalkSettings()
+    solver = LM.LmSolver(evaluate, names, scales, lb, ub, floors_sha256=stamp, log=None,
+                         settings=LM.LmSettings(plateau_window=st.plateau_window, plateau_tol=st.plateau_tol, plateau_pg=st.plateau_pg))
     to_lin = lambda i: float(10.0 ** xb[i]) if scales[i] == "log10" else float(xb[i])
     pr = PR.ProfileProblem(names=list(names), lb=lb, ub=ub, best_x=xb, anchor_nll=f0, solver=solver, best_value=to_lin,
-                           sd_first=sd, floors_sha256=stamp)
-    st = settings or PR.WalkSettings()
+                           sd_first=sd, floors_sha256=stamp, tangent=tangent)
     deadline = budget.work_deadline() if budget is not None else None
     todo = all_sides(n) if side is None else [side]
     ran = []

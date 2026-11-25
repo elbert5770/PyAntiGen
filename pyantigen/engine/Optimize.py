@@ -91,6 +91,51 @@ def _block_title_stats(tr, blocks):
     return n, sigma_used, term, tag
 
 
+def _write_progress_json(plot_path, stem, timestamp, param_names, param_values, total_loss, eval_n,
+                         model_name=None, experiment_id=None, method=None):
+    """Write ``<stem>_<timestamp>.json``: the best point so far of a fit that is still running (parameters and loss).
+
+    The RoadRunner objective writes it with the progress plot; the AMICI LM fit, which has no per-evaluation traces to
+    plot, writes only this file, each time an evaluation improves the best (``on_best`` of ``Fit_lm.lm_fit``).
+    """
+    import json
+    from datetime import datetime
+
+    parameters_dict = {}
+    for name, val in zip(param_names, np.atleast_1d(param_values).tolist()):
+        try:
+            v = float(val)
+            parameters_dict[name] = v if np.isfinite(v) else None
+        except (TypeError, ValueError):
+            parameters_dict[name] = None
+
+    progress_json = {
+        "metadata": {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model_name": model_name or "",
+            "experiment_id": experiment_id or "",
+            "method": method or "",
+            "success": False,
+            "message": "Optimization in progress",
+            "total_loss": float(total_loss) if np.isfinite(total_loss) else None,
+            "nll_proper": None,
+            "aic": None,
+            "bic": None,
+            "n_iterations": None,
+            "n_fevals": int(eval_n),
+        },
+        "parameters": parameters_dict
+    }
+
+    json_out = os.path.join(plot_path, f"{stem}_{timestamp}.json")
+    try:
+        with open(json_out, "w", encoding="utf-8") as f:
+            json.dump(progress_json, f, indent=2)
+        print(f"  [opt] Saved progress JSON to {json_out}")
+    except Exception as e:
+        print(f"  [opt] Warning: failed to save progress JSON: {e}")
+
+
 def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
                              plot_path, min_interval_s=2.0,
                              param_names=None, param_values=None,
@@ -124,42 +169,8 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
         _progress_overlay_state["timestamp"] = opt_timestamp
 
     if is_improved and param_names is not None and param_values is not None:
-        import json
-        from datetime import datetime
-        
-        parameters_dict = {}
-        for name, val in zip(param_names, np.atleast_1d(param_values).tolist()):
-            try:
-                v = float(val)
-                parameters_dict[name] = v if np.isfinite(v) else None
-            except (TypeError, ValueError):
-                parameters_dict[name] = None
-        
-        progress_json = {
-            "metadata": {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "model_name": model_name or "",
-                "experiment_id": experiment_id or "",
-                "method": method or "",
-                "success": False,
-                "message": "Optimization in progress",
-                "total_loss": float(total_loss) if np.isfinite(total_loss) else None,
-                "nll_proper": None,
-                "aic": None,
-                "bic": None,
-                "n_iterations": None,
-                "n_fevals": int(eval_n),
-            },
-            "parameters": parameters_dict
-        }
-        
-        json_out = os.path.join(plot_path, f"{stem}_{opt_timestamp}.json")
-        try:
-            with open(json_out, "w", encoding="utf-8") as f:
-                json.dump(progress_json, f, indent=2)
-            print(f"  [opt] Saved progress JSON to {json_out}")
-        except Exception as e:
-            print(f"  [opt] Warning: failed to save progress JSON: {e}")
+        _write_progress_json(plot_path, stem, opt_timestamp, param_names, param_values, total_loss, eval_n,
+                             model_name, experiment_id, method)
 
 
     from matplotlib.figure import Figure
@@ -3776,6 +3787,7 @@ def _run_global_optimization(objective, x0, bounds, method, kwargs):
 # ---------------------------------------------------------------------------
 
 _PROFILE_THRESHOLD = 1.9207  # chi2(df=1, p=0.95) / 2
+from pyantigen.engine.Profile_record import STALL_PG as _STALL_PG   # noqa: E402  (projected gradient, nats, under which a gave-up point counts as stalled)
 
 
 def _profile_nuisance_defaults(method, n_nuisance=None):
@@ -6638,9 +6650,9 @@ def profile_convergence_report(param_names, completed):
     would defeat the point of measuring it.
     """
     per_param = {}
-    n_total = n_bad = n_unknown = n_running = 0
+    n_total = n_bad = n_unknown = n_running = n_stalled_total = 0
     for name in param_names:
-        total = bad = unknown = running = 0
+        total = bad = unknown = running = stalled = 0
         # The largest amount the warm pass lowered any point, and the largest
         # among the points that are near enough to the threshold to set the
         # bound. The second is the one that matters: a 40-nat drop out in the
@@ -6667,17 +6679,22 @@ def profile_convergence_report(param_names, completed):
             elif "converged" not in r:
                 unknown += 1
             elif not r["converged"]:
-                bad += 1
-        per_param[name] = {"n": total, "n_not_converged": bad,
+                if r.get("stalled"):
+                    # the solver gave up at a stationary point it could not certify (projected gradient under STALL_PG nats): not an unfinished fit
+                    stalled += 1
+                else:
+                    bad += 1
+        per_param[name] = {"n": total, "n_not_converged": bad, "n_stalled": stalled,
                            "n_unknown": unknown, "n_interrupted": running,
                            "n_warm_measured": n_warm,
                            "warm_gain_max": gain_max,
                            "warm_gain_near": gain_near}
         n_total += total
         n_bad += bad
+        n_stalled_total += stalled
         n_unknown += unknown
         n_running += running
-    return {"n_points": n_total, "n_not_converged": n_bad,
+    return {"n_points": n_total, "n_not_converged": n_bad, "n_stalled": n_stalled_total,
             "n_unknown": n_unknown, "n_interrupted": n_running,
             "per_param": per_param}
 
@@ -6705,12 +6722,16 @@ def _print_profile_convergence(report):
             print(f"      {name}: {d['n_not_converged']}/{d['n']} point(s)")
         if len(offenders) > 10:
             print(f"      ... and {len(offenders) - 10} more parameter(s)")
+    n_stalled = report.get("n_stalled", 0)
+    if n_stalled:
+        print(f"\n[profile] {n_stalled} point(s) are stalled, not capped: the solver gave up at a point with a projected gradient under {_STALL_PG:g} nats "
+              f"(\"no model decrease available\"), so each is within that far of the profile; more evaluations do not change it.")
     if n_unknown:
         print(f"\n[profile] {n_unknown} point(s) were checkpointed before "
               f"convergence was recorded; their convergence is unknown. Delete "
               f"the checkpoint directory to re-measure them.")
     if n and not n_bad and not n_unknown:
-        print(f"\n[profile] all {n} nuisance optimization(s) converged.")
+        print(f"\n[profile] all {n - n_stalled} nuisance optimization(s) converged" + (f", {n_stalled} stalled within {_STALL_PG:g} nats." if n_stalled else "."))
 
 
 def profile_anchor_gap(completed):
@@ -8000,6 +8021,14 @@ def run_optimization_from_groups(
             def _save_best(x, f, n):
                 if fit_cache is not None:
                     fit_cache.save_partial(_to_linear(x, scales), f, n_evals=n)
+                # The progress file of a RoadRunner fit, without its plot (an AMICI fit has no traces to draw): the best point and
+                # loss so far, for watching a long fit.
+                _plot_path = paths.get("plot_path")
+                if _plot_path and _progress_overlay_state["enabled"]:
+                    _write_progress_json(_plot_path, _progress_stem(paths.get("MODEL_NAME", ""), groups_tag),
+                                         _progress_overlay_state.get("timestamp") or datetime.now().strftime("%Y%m%d_%H%M%S"),
+                                         param_names, _to_linear(x, scales), f, n,
+                                         model_name=paths.get("MODEL_NAME", ""), experiment_id=groups_tag, method=method)
 
             res = lm_fit(_analytic, x_start, bounds, scales, options=(opt_kw or {}).get("options"),
                          deadline=resolve_deadline(), on_best=_save_best, log=lambda m: print(m, flush=True))
@@ -8359,6 +8388,25 @@ def run_optimization_from_groups(
             tag = _states.get((block_key, obs_label), "estimated")
             print(f"    sigma[{block_key} · {obs_label}] = {sig:.4g}  "
                   f"(n={n_b:.0f}, {tag})")
+
+        # PYANTIGEN_NLL_TERMS=1: the per-block contributions to the concentrated NLL at the optimum (the formula of describe_nll_terms), so two fits can be
+        # compared block by block: one NLLTERM line per block (n, sigma, rms residual, contribution); NLLTERM_SUM adds them up.
+        if os.environ.get("PYANTIGEN_NLL_TERMS"):
+            _sum_terms = 0.0
+            for (block_key, obs_label), _v in sorted(opt_blocks.items()):
+                _sse, _n_t, _known_t, _floor_t = _unpack_block(_v)
+                if _n_t <= 0:
+                    continue
+                _sg, _cost_t, _st = _block_sigma_resolution(_sse, _n_t, _known_t, _floor_t)
+                if _st == "declared":
+                    _c = _sse / (2.0 * _sg * _sg)
+                elif _st in ("floored_binding", "floored_free"):
+                    _c = _n_t * np.log(_sg) + _sse / (2.0 * _sg * _sg)
+                else:
+                    _c = 0.5 * _n_t * np.log(max(_sg * _sg, _SIGMA2_FLOOR))
+                _sum_terms += float(_c)
+                print(f"    NLLTERM|{block_key} · {obs_label}|n={_n_t:.0f}|sigma={_sg:.6g}|rms={np.sqrt(_sse / _n_t):.6g}|contrib={float(_c):.6f}")
+            print(f"    NLLTERM_SUM|{_sum_terms:.6f}")
 
         # Estimating a variance from very few points is the one failure mode the
         # concentrated form introduces: a block's contribution is

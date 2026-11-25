@@ -240,6 +240,20 @@ _PROFILE_GRID_SETTINGS = {
 }
 
 
+def _is_profile_side_run(opt):
+    """True for an array task that walks one side of the AMICI profile from a fit reused out of the cache.
+
+    Every such task re-runs the whole ``--optimize`` command, so each would append a row to the results CSV and write a
+    snapshot JSON whose profile content is only the sides finished when that task ended: dozens of near-copies of the fit.
+    The same goes for the profile plots and summary, which such a task would write from its partial walk. The collect stage
+    (no ``PYANTIGEN_PROFILE_SIDE``) writes the ones that have every side. A run that fitted in its own
+    process, and the FIM and collect stages, still log.
+    """
+    from pyantigen.engine.Profile_amici import MODE_ENV, SIDE_ENV
+    return (bool(opt.get("fit_source")) and bool(os.environ.get(SIDE_ENV))
+            and os.environ.get(MODE_ENV, "walk") not in ("collect", "fim"))
+
+
 def _profile_kwargs(settings, optimization_spec=None):
     """Profile grid arguments for this run, from the settings and the spec.
 
@@ -506,7 +520,8 @@ def _profile_report_text(opt, param_names, params_estimated, profile_ci,
     _running = conv.get("n_interrupted", 0)
     L.append(f"Profile points     {conv.get('n_points', 0)} total, "
              f"{conv.get('n_not_converged', 0)} hit the optimizer cap, "
-             f"{conv.get('n_unknown', 0)} unknown"
+             + (f"{conv.get('n_stalled', 0)} stalled (gave up within a few hundredths of a nat of the profile), " if conv.get('n_stalled') else "")
+             + f"{conv.get('n_unknown', 0)} unknown"
              + (f", {_running} still in progress" if _running else ""))
     if _running:
         L.append(f"*** INCOMPLETE: {_running} point(s) were stopped by the "
@@ -684,8 +699,12 @@ def _profile_report_text(opt, param_names, params_estimated, profile_ci,
 
 
 def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name,
-                                  tag="ALL", profile_kwargs=None):
+                                  tag="ALL", profile_kwargs=None, write_files=True):
     """Run profile likelihood once per parameter, extract CIs, and save plot.
+
+    This is where the profile is computed, not only drawn. ``write_files=False`` (one side of the AMICI profile, see
+    :func:`_is_profile_side_run`) still runs the profile and fills ``opt['stats']``, and returns before the figures and
+    the summary report, which the collect stage writes for every side.
 
     Parallelises across parameters on Linux / macOS via fork-based
     multiprocessing.Process (inherits the closure, including non-picklable
@@ -889,10 +908,15 @@ def _save_profile_likelihood_plot(opt, param_names, plot_path, model_name,
         if conv and conv.get("n_not_converged"):
             note += (f"   [{conv['n_not_converged']}/{conv['n']} point(s) hit "
                      f"the optimizer cap — interval is too narrow]")
+        if conv and conv.get("n_stalled"):
+            note += f"   [{conv['n_stalled']}/{conv['n']} point(s) stalled within a projected gradient of the profile]"
         print(f"    {pname}: [{lo:.4g}, {hi:.4g}]{note}")
     opt["stats"]["profile_ci"] = profile_ci
     opt["stats"]["profile_ci_status"] = profile_ci_state
     opt["stats"]["profile_traces"] = profile_traces
+    if not write_files:
+        print("[opt] one side of the AMICI profile: no profile plots or summary (the collect stage writes them).")
+        return
 
     # One panel per parameter (Profile_plot): the optimizer scale on x (log10 for a log10 parameter), converged points filled and the
     # rest hollow, the optimum marked, the cut dashed; a full-range figure and one limited to a dNLL of 5.
@@ -1210,11 +1234,13 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
                                         MODEL_NAME, tag=groups_tag,
                                         slice_settings=getattr(optimization_settings,
                                                                "slice_settings", None))
+        _profile_side = _is_profile_side_run(opt)
         if (settings.get("profile_likelihood_analysis") or settings.get("fast_profile_likelihood_analysis")) and opt.get("stats", {}).get("profile_likelihood"):
             _save_profile_likelihood_plot(
                 opt, optimization_settings.param_names, paths["plot_path"],
                 MODEL_NAME, tag=groups_tag,
-                profile_kwargs=_profile_kwargs(settings, optimization_settings))
+                profile_kwargs=_profile_kwargs(settings, optimization_settings),
+                write_files=not _profile_side)
         if settings.get("fast_profile_likelihood_analysis") and opt.get("stats", {}).get("fast_profile_all"):
             _run_fast_profile_report(opt, settings, optimization_settings)
         if settings.get("sobol_analysis") and opt.get("stats", {}).get("sobol"):
@@ -1225,8 +1251,12 @@ def setup_optimization_from_groups(settings, optimization_settings, EXPERIMENT_d
             paths["plot_path"],
             f"{MODEL_NAME}_{groups_tag}_optimization_results.csv",
         )
-        log_optimization_results(opt, optimization_settings.param_names, csv_path,
-                                 model_name=MODEL_NAME, experiment_id=groups_tag, method=optimization_settings.method)
+        if _profile_side:
+            print("[opt] one side of the AMICI profile on a reused optimum: no results CSV row or snapshot JSON "
+                  "(the collect stage writes them, with every side's result).")
+        else:
+            log_optimization_results(opt, optimization_settings.param_names, csv_path,
+                                     model_name=MODEL_NAME, experiment_id=groups_tag, method=optimization_settings.method)
 
         if opt.get("results_dict") is not None and plot_function:
             # plot_tag is what Modules/Plots.py reads to tag the fit-curve

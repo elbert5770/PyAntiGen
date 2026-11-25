@@ -36,6 +36,26 @@ class LmSettings:
     max_evals: int = 40
     strict_newton_tol: float = 1e-6
     strict_pg_loose: float = 0.05
+    plateau_window: int = 0         # 0: off. Stop a point that has bought less than ``plateau_tol`` nats in the last ``plateau_window`` evaluations ...
+    plateau_tol: float = 0.005
+    plateau_pg: float = 0.05        # ... while its projected gradient is under this (nats): it is stalled, within that far of the profile
+
+
+def plateau_reached(history, evals, window, tol, pg, pg_max):
+    """``(reached, gained)``: the objective has gained less than *tol* nats over the last *window* evaluations while the projected gradient *pg* is under *pg_max*.
+
+    *history* is ``[(evals, f)]``, one entry per accepted step, oldest first, the start included. The reference is the entry that
+    was current *window* evaluations ago (the last one at or before ``evals - window``); with no such entry yet the point has not
+    had a window to plateau in. A point whose projected gradient is above *pg_max* is never stopped here: it may be crawling, but
+    it is not near a stationary point, so the budget is what ends it.
+    """
+    if not window or pg is None or not pg < pg_max or evals < window:
+        return False, None
+    then = [f for (e, f) in history if e <= evals - window]
+    if not then:
+        return False, None
+    gained = then[-1] - history[-1][1]
+    return gained < tol, gained
 
 
 def judge(x, g, lb, ub, pg_tol):
@@ -142,6 +162,7 @@ def minimize(evaluate: Callable, x0, lb, ub, free, settings: LmSettings = None, 
     g = Jf.T @ r
     lam, nu, cap = st.lam0, 2.0, st.step0
     verdict, pg, reason = "not_converged", None, "evaluation budget spent"
+    history = [(evals, f)]
     while True:
         verdict, pg = judge(x[free], g, lb[free], ub[free], st.pg_tol)
         if verdict == "converged":
@@ -152,6 +173,11 @@ def minimize(evaluate: Callable, x0, lb, ub, free, settings: LmSettings = None, 
             verdict, reason = "converged", f"newton decrement {nd:.2g} < {newton_tol} (projected gradient {pg:.3g})"
             break
         if evals >= st.max_evals:
+            break
+        plateau, gained = plateau_reached(history, evals, st.plateau_window, st.plateau_tol, pg, st.plateau_pg)
+        if plateau:
+            reason = (f"no model decrease available (plateau: {gained:.2g} nats in the last {st.plateau_window} evaluations, "
+                      f"projected gradient {pg:.3g})")
             break
         if late():
             raise OutOfTime
@@ -174,6 +200,7 @@ def minimize(evaluate: Callable, x0, lb, ub, free, settings: LmSettings = None, 
             f"{'FAILED' if en is None else f'rho {rho:.3g}'} -> {'accept' if ok else 'reject'}")
         if ok:
             x, (f, r, J) = xn, en
+            history.append((evals, f))
             Jf = J[:, free]
             g = Jf.T @ r
             lam = max(lam * max(1 / 3, 1 - (2 * rho - 1) ** 3), st.lam_min)

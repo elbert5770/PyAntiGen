@@ -41,6 +41,7 @@ VERDICTS = ("converged", "not_converged", "failed")
 BOUND_TOL = 0.002         # optimizer-space (decades for a log parameter) distance that counts as on a bound
 LOWER_TOL = 0.05          # a point this far below the optimum (in nll) is flagged ``lower``
 DNLL_95 = 1.9207          # chi2(1, 0.95) / 2: the one-parameter 95% level
+STALL_PG = 0.1             # nats: a stalled point (the solver gave up) with a projected gradient below this is within that far of the profile
 
 
 @dataclass
@@ -85,6 +86,16 @@ class PointRecord:
     def usable(self):
         """Has a finite dnll: it is an upper bound on the profile whether or not it converged."""
         return self.dnll is not None and math.isfinite(self.dnll)
+
+    def stalled(self, pg_max=STALL_PG):
+        """The solver gave up at a stationary point it could not certify: "no model decrease available" with a projected gradient below *pg_max* nats.
+
+        That is not an unfinished fit. The projected gradient is the decrease a gradient step could still buy, in nats, so the point's dnll is at most that far
+        above the profile, and fitting again from the same vector reproduces it (a budget does not help: the solver's damping has run away on a flat or noisy
+        stretch). It counts as ``not_converged`` for the strict test, and the reports keep it apart from the points that ran out of evaluations.
+        """
+        return (self.verdict == "not_converged" and self.usable and self.pg is not None and math.isfinite(self.pg) and self.pg < pg_max
+                and "no model decrease" in str(self.reason or ""))
 
     def check(self):
         """Problems with the record, as strings; empty if it is well formed."""
