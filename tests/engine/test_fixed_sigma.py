@@ -210,6 +210,7 @@ def test_gradient_gives_a_column_with_a_huge_sensitivity_its_own_step():
     items = {"a": {"results": table}}
     lg = LossGradient.__new__(LossGradient)
     lg.rel_step, lg.explicit, lg.param_names, lg.frozen_sigmas = 1e-5, set(), ["p"], None
+    lg.exact = False                                    # this is about the finite-difference route's steps
     lg.value = lambda it, p: float(2.5e4 + 0.5 * np.sum((it["a"]["results"].data[:, 2] - np.array([11.0, 19.0, 33.0])) ** 2))
     groups = lg._step_groups(items, {"a": D}, 0)
     assert len(groups) == 2 and {("a", 2)} in [g[0] for g in groups]       # the observable column is its own group

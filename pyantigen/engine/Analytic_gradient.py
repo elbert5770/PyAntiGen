@@ -140,22 +140,22 @@ class LossGradient:
             raise AnalyticGradientError("the loss is not finite")
         return v
 
-    def residual_vector(self, items, p_lin):
-        """``(r, const)``: the scaled residuals ``sqrt(w) (y - yhat) / sigma`` of every datum, and ``sum n ln sigma``.
+    def _residual_pass(self, items, p_lin, with_predictions=False):
+        """``(r, const, records)``: the scaled residuals, ``sum n ln sigma``, and (if asked) what the chain rule needs.
 
-        With every block's sigma known (``PYANTIGEN_SIGMA_FLOOR=fixed`` and declared sigmas) the loss is exactly
-        ``const + 0.5 * r.r``, a nonlinear least-squares problem. Raises if any block still profiles its sigma.
+        ``records[i]`` is ``(prediction record, sigma)`` for the i-th run of ``r``: one entry per scored observable, in the
+        order the engine's own traversal produced them, so the Jacobian rows built from it line up with ``r``.
         """
         from pyantigen.engine import Optimize as O
         p_lin = np.asarray(p_lin, dtype=float)
         p_dict = dict(zip(self.param_names, p_lin.tolist()))
-        sink = []
-        O._RESIDUAL_SINK = sink
+        sink, psink = [], ([] if with_predictions else None)
+        O._RESIDUAL_SINK, O._PREDICTION_SINK = sink, psink
         try:
             blocks = O.collect_loss_blocks(items, self.groups, self.replicates, self.param_names, p_lin, p_dict,
                                            frozen_sigmas=self.frozen_sigmas)
         finally:
-            O._RESIDUAL_SINK = None
+            O._RESIDUAL_SINK = O._PREDICTION_SINK = None
         sig, const = {}, 0.0
         for key, v in blocks.items():
             sse, n, ks, fl = O._unpack_block(v)
@@ -168,18 +168,75 @@ class LossGradient:
                     "(set PYANTIGEN_SIGMA_FLOOR=fixed)")
             sig[key] = s
             const += n * np.log(max(s, 1e-300))
-        parts = [v / sig[key] for key, v in sink if key in sig and v.size]
-        if not parts:
+        keep = [i for i, (key, v) in enumerate(sink) if key in sig and v.size]
+        if not keep:
             raise AnalyticGradientError("the loss has no data to score")
-        return np.concatenate(parts), float(const)
+        r = np.concatenate([sink[i][1] / sig[sink[i][0]] for i in keep])
+        records = [(psink[i], sig[sink[i][0]]) for i in keep] if with_predictions else None
+        return r, float(const), records
+
+    def residual_vector(self, items, p_lin):
+        """``(r, const)``: the scaled residuals ``sqrt(w) (y - yhat) / sigma`` of every datum, and ``sum n ln sigma``.
+
+        With every block's sigma known (``PYANTIGEN_SIGMA_FLOOR=fixed`` and declared sigmas) the loss is exactly
+        ``const + 0.5 * r.r``, a nonlinear least-squares problem. Raises if any block still profiles its sigma.
+        """
+        r, const, _ = self._residual_pass(items, p_lin)
+        return r, const
+
+    def _exact_residual_jacobian(self, items, directions, p_lin):
+        """``(r, J, const)`` by the chain rule, or ``None`` when some scored observable is not a bare result column.
+
+        A residual is ``sqrt(w) (y - interp(t, t_sim, column)) / sigma``, so its row of J is
+        ``-sqrt(w) / sigma * interp(t, t_sim, D[:, column, :])`` -- see :meth:`_exact_gradient`.
+        """
+        p_lin = np.asarray(p_lin, dtype=float)
+        K = len(self.param_names)
+        r0, const, records = self._residual_pass(items, p_lin, with_predictions=True)
+        if any(rec["column"] is None for rec, _ in records):
+            return None
+        owner = {id(item["results"]): sim for sim, item in items.items()}
+        rows = []
+        for rec, sigma in records:
+            sim = owner.get(id(rec["result"]))
+            if sim is None:
+                return None
+            D = directions.get(sim)
+            n = int(np.count_nonzero(rec["valid"]))
+            if D is None or not D.size:
+                rows.append(np.zeros((n, K)))
+                continue
+            table = rec["result"]
+            Dc = D[:, table.colnames.index(rec["column"]), :]
+            t_sim = np.asarray(table["time"])
+            dy = np.stack([np.interp(rec["t_data"], t_sim, Dc[:, k]) for k in range(K)], axis=1)
+            rows.append(-np.sqrt(rec["weights"])[:, None] * dy[rec["valid"]] / sigma)
+        J = np.vstack(rows)
+        if J.shape[0] != r0.size:
+            return None
+        for k in self.explicit:                         # the loss names this parameter itself: its own partial
+            d = 1e-6 * max(abs(p_lin[k]), 1e-8)
+
+            def partial(sh, k=k):
+                up, dn = p_lin.copy(), p_lin.copy()
+                up[k] += sh
+                dn[k] -= sh
+                return (self.residual_vector(items, up)[0] - self.residual_vector(items, dn)[0]) / (2.0 * sh)
+            J[:, k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+        return r0, J, const
 
     def residual_jacobian(self, items, directions, p_lin):
         """``(r, J, const)``: residuals, ``J[i, k] = d r_i / d theta_k`` (linear units), and ``sum n ln sigma``.
 
-        The derivative is taken the way :meth:`gradient` takes the loss's: central differences of the residual
-        vector along the sensitivity tables (Richardson), plus a partial for each parameter the loss names itself.
-        ``J.T @ r`` is then the gradient of ``const + 0.5 r.r`` and ``J.T @ J`` its Gauss-Newton Hessian.
+        When every scored observable is a bare result column the derivative is the chain rule
+        (:meth:`_exact_residual_jacobian`); otherwise it is taken the way :meth:`gradient` takes the loss's: central
+        differences of the residual vector along the sensitivity tables (Richardson), plus a partial for each parameter
+        the loss names itself. ``J.T @ r`` is then the gradient of ``const + 0.5 r.r`` and ``J.T @ J`` its Gauss-Newton Hessian.
         """
+        if self.exact:
+            got = self._exact_residual_jacobian(items, directions, p_lin)
+            if got is not None:
+                return got
         p_lin = np.asarray(p_lin, dtype=float)
         K = len(self.param_names)
         r0, const = self.residual_vector(items, p_lin)
@@ -294,12 +351,71 @@ class LossGradient:
             out[sim] = {**items[sim], "results": type(table)(table.colnames, data)}
         return out
 
+    # When every scored observable is a bare result column, the chain rule needs no finite differences at all:
+    #   prediction_i = interp(t_i, t_sim, column)        so      d prediction_i / d theta = interp(t_i, t_sim, D[:, column, :])
+    #   dSSE_b / d theta = sum_i -2 w_i r_i d prediction_i / d theta,        dNLL / d theta = sum_b (dNLL_b / dSSE_b) dSSE_b / d theta
+    # One traversal of the loss, with the engine's own masks, weights, pooling and sigma rules, and a few small matrix
+    # products. The finite-difference route below re-evaluates the whole Python loss ~600 times per gradient (1.9 s on Zheng's
+    # 80 columns, against 123 ms for AMICI's own likelihood and gradient); an expression, a callable or an aggregate
+    # observable still takes it. ``exact`` turns the shortcut off, to compare the two.
+    exact = True
+
+    def _exact_gradient(self, items, directions, p_lin):
+        """``(nll, grad)`` by the chain rule, or ``None`` when some scored observable is not a bare result column."""
+        from pyantigen.engine import Optimize as O
+        p_lin = np.asarray(p_lin, dtype=float)
+        p_dict = dict(zip(self.param_names, p_lin.tolist()))
+        sink = []
+        O._PREDICTION_SINK = sink
+        try:
+            blocks = O.collect_loss_blocks(items, self.groups, self.replicates, self.param_names, p_lin, p_dict,
+                                           frozen_sigmas=self.frozen_sigmas)
+        finally:
+            O._PREDICTION_SINK = None
+        if not blocks:
+            raise AnalyticGradientError("the loss has no data to score")
+        if any(rec["column"] is None for rec in sink):
+            return None
+        f0 = O.concentrated_nll(blocks)
+        if not np.isfinite(f0):
+            raise AnalyticGradientError("the loss is not finite")
+        dsse = O.concentrated_nll_dsse(blocks)
+        K = len(self.param_names)
+        owner = {id(item["results"]): sim for sim, item in items.items()}
+        g = np.zeros(K)
+        for rec in sink:
+            sim = owner.get(id(rec["result"]))
+            if sim is None:
+                return None                              # a table this object cannot trace to its sensitivities
+            D = directions.get(sim)
+            if D is None or not D.size:
+                continue                                 # no sensitivities: the prediction does not move with theta
+            table = rec["result"]
+            Dc = D[:, table.colnames.index(rec["column"]), :]
+            t_sim = np.asarray(table["time"])
+            dy = np.stack([np.interp(rec["t_data"], t_sim, Dc[:, k]) for k in range(K)], axis=1)
+            g += dsse[rec["block"]] * (-2.0 * (rec["weights"] * rec["residuals"]) @ dy[rec["valid"]])
+        for k in self.explicit:                         # the loss names this parameter itself: its own partial, as below
+            d = 1e-6 * max(abs(p_lin[k]), 1e-8)
+
+            def partial(s, k=k):
+                up, dn = p_lin.copy(), p_lin.copy()
+                up[k] += s
+                dn[k] -= s
+                return (self.value(items, up) - self.value(items, dn)) / (2.0 * s)
+            g[k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+        return f0, g
+
     def gradient(self, items, directions, p_lin):
         """``(nll, grad)`` at *p_lin*.
 
         items : ``{sim: {"results": SimTable, "data": df_dict, "replicate": ...}}``.
         directions : ``{sim: array (rows, columns, K)}``, d(table)/d(theta_k) in linear units.
         """
+        if self.exact:
+            got = self._exact_gradient(items, directions, p_lin)
+            if got is not None:
+                return got
         p_lin = np.asarray(p_lin, dtype=float)
         K = len(self.param_names)
         f0 = self.value(items, p_lin)

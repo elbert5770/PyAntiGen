@@ -34,7 +34,18 @@ _progress_overlay_state = {
     "last_render": 0.0,
     "timestamp":   None,
     "enabled":     True,
+    "last_cost":   0.0,      # seconds the last figure took to draw
+    "pending":     None,     # the plotting inputs of the best point so far, drawn when the fit ends (figure mode "final")
+    # "final": one figure, of the best point, when the fit ends. "live": redrawn during the fit, within _OVERLAY_DUTY.
+    "figure":      os.environ.get("PYANTIGEN_PROGRESS_FIGURE", "final").strip().lower(),
 }
+
+# The figure is the expensive part of the progress overlay (about 0.5 s for fifteen panels), and a gradient method improves
+# at nearly every evaluation. Redrawing at each one took half the wall-clock of a fit whose evaluations cost 1 s. So the
+# figure is drawn ONCE, of the best point, when the fit ends (flush_progress_overlay); during the fit only the progress JSON
+# is written, which is cheap, at every improvement. PYANTIGEN_PROGRESS_FIGURE=live brings back the figure that refreshes during
+# the fit, limited to _OVERLAY_DUTY times its own cost between redraws (about 20% of the run).
+_OVERLAY_DUTY = 4.0
 
 
 def _progress_stem(model_name=None, experiment_id=None):
@@ -140,7 +151,7 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
                              plot_path, min_interval_s=2.0,
                              param_names=None, param_values=None,
                              model_name=None, experiment_id=None, method=None,
-                             blocks=None):
+                             blocks=None, force=False):
     """Save a multi-panel overlay (model curve + data points) per (replicate,
     observable) traced during an optimization eval. Reuses one Figure and
     overwrites a single PNG so the file refreshes in place.
@@ -172,6 +183,18 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
         _write_progress_json(plot_path, stem, opt_timestamp, param_names, param_values, total_loss, eval_n,
                              model_name, experiment_id, method)
 
+
+    if not force:
+        if _progress_overlay_state["figure"] != "live":
+            if is_improved:                      # remembered, drawn by flush_progress_overlay when the fit ends
+                _progress_overlay_state["pending"] = dict(
+                    trace_collector=trace_collector, total_loss=total_loss, best_loss=best_loss, eval_n=eval_n,
+                    plot_path=plot_path, min_interval_s=min_interval_s, param_names=param_names,
+                    param_values=param_values, model_name=model_name, experiment_id=experiment_id, method=method,
+                    blocks=blocks)
+            return
+        if (now - _progress_overlay_state["last_render"]) < _OVERLAY_DUTY * _progress_overlay_state["last_cost"]:
+            return
 
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -259,7 +282,16 @@ def _render_progress_overlay(trace_collector, total_loss, best_loss, eval_n,
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     out = os.path.join(plot_path, f"{stem}_{opt_timestamp}.png")
     fig.savefig(out, dpi=100, bbox_inches="tight")
-    _progress_overlay_state["last_render"] = now
+    done = time.time()
+    _progress_overlay_state["last_render"] = done
+    _progress_overlay_state["last_cost"] = done - now
+
+
+def flush_progress_overlay():
+    """Draw the progress figure of the best point of the fit that just ended (figure mode "final"); a no-op otherwise."""
+    pending, _progress_overlay_state["pending"] = _progress_overlay_state["pending"], None
+    if pending is not None and _progress_overlay_state["enabled"]:
+        _render_progress_overlay(force=True, **pending)
 
 
 def _short_obs_label(obs, max_len=32):
@@ -725,6 +757,7 @@ def _apply_n_eff_scale(weights, n_eff_scale):
 
 
 _RESIDUAL_SINK = None      # a list while LossGradient collects per-datum residuals sqrt(w)*r; None otherwise
+_PREDICTION_SINK = None    # a list while LossGradient.gradient collects, per scored observable, what the chain rule needs
 
 
 def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
@@ -858,6 +891,27 @@ def concentrated_nll(blocks, include_constant=False):
             if include_constant:
                 total += 0.5 * n * (1.0 + np.log(2.0 * np.pi))
     return float(total)
+
+
+def concentrated_nll_dsse(blocks):
+    """``{block: dNLL/dSSE}``: how each block's term in :func:`concentrated_nll` moves with its weighted SSE.
+
+    Mirrors ``concentrated_nll`` branch by branch, so the two cannot drift apart silently (tests compare them):
+    a declared sigma gives ``1/(2 sigma^2)``; a profiled sigma ``n/(2 SSE)`` (zero on the ``_SIGMA2_FLOOR`` plateau);
+    a floored block is profiled until the cap binds, and ``1/(2 floor^2)`` from then on.
+    """
+    out = {}
+    for key, v in blocks.items():
+        sse, n, ks, floor = _unpack_block(v)
+        if n <= 0:
+            out[key] = 0.0
+        elif ks is not None:
+            out[key] = 1.0 / (2.0 * max(float(ks), 1e-300) ** 2)
+        elif floor is not None and np.sqrt(max(sse / n, _SIGMA2_FLOOR)) > max(float(floor), 1e-300):
+            out[key] = 1.0 / (2.0 * max(float(floor), 1e-300) ** 2)
+        else:
+            out[key] = n / (2.0 * sse) if sse / n > _SIGMA2_FLOOR else 0.0
+    return out
 
 
 def block_sigmas(blocks):
@@ -1122,12 +1176,14 @@ def loss_function_evaluated(
             y_data = np.asarray(obs_df[d_col])
             t_data = np.asarray(obs_df[t_col])
 
+            obs_col = None      # the result column, when the observable IS one (then d(prediction)/d(theta) is that column's)
             try:
                 if callable(obs):
                     y_sim = np.asarray(obs(result))
                 elif isinstance(obs, str):
                     local_dict, cols = _ensure_eval_context()
                     if obs in cols:
+                        obs_col = obs
                         y_sim = np.asarray(result[obs])
                     else:
                         eval_obs = str(obs)
@@ -1173,6 +1229,10 @@ def loss_function_evaluated(
             _record_block(blocks, block_id,
                           pobs, residuals, obs_weights_v,
                           known_sigma=known_sigma, sigma_floor=sigma_floor)
+            if _PREDICTION_SINK is not None:      # Analytic_gradient.LossGradient._exact_gradient
+                _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "result": result, "column": obs_col,
+                                         "t_data": t_data, "valid": valid, "weights": obs_weights_v,
+                                         "residuals": residuals})
             if seen is not None:
                 # Pre-pooling identity. Block count cannot measure data coverage
                 # once several elements share a sigma_block, so record which
@@ -1437,6 +1497,8 @@ def loss_function_composite(
         _record_block(blocks, block_id,
                       pobs, residuals, obs_weights_v,
                       known_sigma=known_sigma, sigma_floor=sigma_floor)
+        if _PREDICTION_SINK is not None:          # an aggregate of simulations: no single column to differentiate
+            _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "column": None})
         if seen is not None:
             seen.add((str(exp_id), _short_obs_label(obs)))
 
@@ -8244,6 +8306,7 @@ def run_optimization_from_groups(
                     res = _local_minimize(objective, x0, method, bounds, opt_kw,
                                           _analytic, scales)
 
+        flush_progress_overlay()      # the one progress figure of this fit, at its best point
         if _debug_calls[0] > 3:
             elapsed = time.time() - _progress["t0"]
             print(f"\n  [opt] done — {_debug_calls[0]} evals in {elapsed:.0f}s"
