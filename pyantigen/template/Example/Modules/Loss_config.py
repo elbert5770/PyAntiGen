@@ -1,3 +1,10 @@
+# Noise in a loss_config entry (all optional; by default each observable estimates its own sigma):
+#   "sigma_method"/"sigma_value"  a declared sigma ("fixed"), or a heuristic for the fit
+#   "sigma_pool": "<name>"        observables with the same name share ONE estimated sigma
+#                                 (PEtab's single noise parameter for several observables)
+# Pooling the same observable across simulations is "sigma_block" on the loss ELEMENT
+# in Optimizer_settings.py; the two compose.
+
 def no_optimization(replicate):
     return {}
     

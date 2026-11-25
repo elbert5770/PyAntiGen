@@ -280,6 +280,19 @@ def _short_obs_label(obs, max_len=32):
     return f"{text[:keep]}...{text[-keep:]}"
 
 
+def _pool_label_source(obs, obs_cfg):
+    """What names this observable's likelihood block: its ``"sigma_pool"`` if it has one, else the observable.
+
+    A block is keyed ``(simulation or sigma_block, label)``, so by default every observable estimates its own
+    sigma. Observables whose loss_config entries carry the same ``"sigma_pool"`` string get the same label and
+    therefore ONE sigma, estimated from all their residuals together -- the PEtab case of a single noise
+    parameter shared by every observable. Pass the result to ``_short_obs_label`` wherever a block key is
+    built, so every site agrees on the key.
+    """
+    pool = obs_cfg.get("sigma_pool")
+    return pool if pool else obs
+
+
 class OptRoadRunnerProxy:
     def __init__(self, r, opt_param_names):
         self._r = r
@@ -961,6 +974,17 @@ def collect_loss_blocks(
     Pooling arms that genuinely share a noise process fixes both at once, and is
     the more defensible model besides.
 
+    **Pooling observables.** The same applies to observables of one simulation:
+    each observable entry of a loss_config is its own block (its own sigma) unless
+    it declares ``"sigma_pool": "<name>"``. Entries with the same name -- within
+    a loss_config, or across the elements of one ``sigma_block`` -- share ONE
+    sigma, estimated from all their residuals together. That is PEtab's single
+    noise parameter in every ``noiseFormula``, and the fix for many observables
+    with a handful of points each. The two options compose: ``sigma_block`` pools
+    one observable across simulations, ``sigma_pool`` pools observables, and
+    both together pool everything. Blocks are keyed ``(element or sigma_block,
+    pool name or observable)``; see :func:`_pool_label_source`.
+
     If *seen* is a set, the pre-pooling ``(element, observable)`` identity of
     every contributing block is added to it. Block count cannot measure data
     coverage once elements share a sigma_block, so coverage checks must count
@@ -1141,12 +1165,13 @@ def loss_function_evaluated(
             sigma_floor, floor_obj = (
                 _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
                 if known_sigma is None else (None, None))
-            frozen_value = (frozen_sigmas.get((block_id, _short_obs_label(obs)))
+            pobs = _pool_label_source(obs, obs_cfg)
+            frozen_value = (frozen_sigmas.get((block_id, _short_obs_label(pobs)))
                            if frozen_sigmas else None)
             known_sigma, sigma_floor = _freeze_floor(
                 known_sigma, sigma_floor, frozen_value)
             _record_block(blocks, block_id,
-                          obs, residuals, obs_weights_v,
+                          pobs, residuals, obs_weights_v,
                           known_sigma=known_sigma, sigma_floor=sigma_floor)
             if seen is not None:
                 # Pre-pooling identity. Block count cannot measure data coverage
@@ -1215,7 +1240,7 @@ def loss_function_evaluated(
                     # _record_block keys it, so the overlay can show the
                     # block's real term rather than the legacy contrib.
                     "block":   (block_key if block_key is not None else exp_id,
-                                obs_label),
+                                _short_obs_label(pobs)),
                     "floor":   floor_obj,
                 }
 
@@ -1404,12 +1429,13 @@ def loss_function_composite(
         sigma_floor, floor_obj = (
             _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
             if known_sigma is None else (None, None))
-        frozen_value = (frozen_sigmas.get((block_id, _short_obs_label(obs)))
+        pobs = _pool_label_source(obs, obs_cfg)
+        frozen_value = (frozen_sigmas.get((block_id, _short_obs_label(pobs)))
                        if frozen_sigmas else None)
         known_sigma, sigma_floor = _freeze_floor(
             known_sigma, sigma_floor, frozen_value)
         _record_block(blocks, block_id,
-                      obs, residuals, obs_weights_v,
+                      pobs, residuals, obs_weights_v,
                       known_sigma=known_sigma, sigma_floor=sigma_floor)
         if seen is not None:
             seen.add((str(exp_id), _short_obs_label(obs)))
@@ -1487,7 +1513,7 @@ def loss_function_composite(
                 "y_sim":   np.interp(t_sim_first, t_data, y_pred),
                 "contrib": float(contrib),
                 "block":   (block_key if block_key is not None else exp_id,
-                            obs_label),
+                            _short_obs_label(pobs)),
                 "floor":   floor_obj,
             }
 
@@ -1837,7 +1863,7 @@ def describe_nll_terms(p_vec, models, replicates, param_names, scales, groups,
             lc_fn = elem.get("loss_config")
             lc = lc_fn(replicates[sim]) if callable(lc_fn) else lc_fn
             for oc in (lc or {}).get("observables", []):
-                expected.add((sim, _short_obs_label(oc["observed_variable"])))
+                expected.add((sim, _short_obs_label(_pool_label_source(oc["observed_variable"], oc))))
     for key in sorted(expected - set(blocks)):
         rows.append({"block": key[0], "obs": key[1], "n": 0,
                      "status": "unresolved-data"})
@@ -8341,7 +8367,7 @@ def run_optimization_from_groups(
                         _lcf = _e.get("loss_config")
                         _lc = _lcf(replicates[block_key]) if callable(_lcf) else _lcf
                         for _oc in (_lc or {}).get("observables", []):
-                            if _short_obs_label(_oc["observed_variable"]) == _obs_label:
+                            if _short_obs_label(_pool_label_source(_oc["observed_variable"], _oc)) == _obs_label:
                                 fixed_sigmas[(block_key, _oc["observed_variable"])] = sig
 
         _n_active_obs = 0
@@ -8431,8 +8457,9 @@ def run_optimization_from_groups(
             for bk, ob, n in _degen:
                 print(f"      {bk} · {ob}  (n={n:.0f})")
             print('    Fix by pooling: give these elements a shared '
-                  '"sigma_block": "<name>" in the spec so they estimate one sigma '
-                  'together, or supply a known sigma for them.')
+                  '"sigma_block": "<name>" in the spec (or, for observables of one '
+                  'simulation, "sigma_pool": "<name>" in the observable entries) so '
+                  'they estimate one sigma together, or supply a known sigma for them.')
             print()
         if _tiny:
             print()
@@ -8444,8 +8471,9 @@ def run_optimization_from_groups(
                 print(f"      {bk} · {ob}  (n={n:.0f})")
             print('    Check that no parameter is private to one of these blocks. '
                   'Pooling arms that share a noise process via '
-                  '"sigma_block": "<name>" is the usual fix, and it also stops each '
-                  'arm costing a parameter in AIC/BIC.')
+                  '"sigma_block": "<name>" (or, for observables of one simulation, '
+                  '"sigma_pool": "<name>") is the usual fix, and it also stops each '
+                  'one costing a parameter in AIC/BIC.')
             print()
 
 
