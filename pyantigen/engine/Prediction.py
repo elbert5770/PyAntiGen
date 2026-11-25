@@ -9,7 +9,7 @@ The stages, in the order they are run. Options carry the prefix ``--predict-`` s
                 a member whose file exists is skipped, so a requeued task continues
     band        --predict-out <dir> --predict-band band.npz
                 the envelope over the members' lines, with the growth of the band as members are added; also <band>.notes.json (annotation ranges)
-    plot        --simulate KEY --predict-band band.npz [--predict-note TEXT] [--predict-edges M0:M1] [--predict-tree NAME]
+    plot        --simulate KEY --predict-band band.npz [--predict-note TEXT] [--predict-edges M0:M1|all] [--predict-tree NAME]
                 simulate KEY once and draw the bands behind the lines of its plot function (in a private results tree)
     fdmembers   --predict-store <profile store> --predict-out fd_members.json [--predict-delta 0.01]
     delta       --predict-fd-dir <dir of the fd members' files> --predict-fim <store>/fim/fim.npz --predict-band band.npz [--predict-out delta.npz]
@@ -63,9 +63,9 @@ def add_arguments(parser):
     g.add_argument("--predict-ntasks", type=int, default=1, help="run: the number of tasks")
     g.add_argument("--predict-only", default="", help="run: only these member ids, ':' separated (a trial)")
     g.add_argument("--predict-level", type=float, default=PE.LEVEL, help="members: the dnll level (default chi2(1, 0.95)/2 = 1.9207)")
-    g.add_argument("--predict-tree", default="predict", help="run, plot: name of the private results tree under <results>/predict/")
+    g.add_argument("--predict-tree", default="predict", help="run, plot: name of the ensemble's folder under <results>/predict/; the run tasks use <name>/task_<N>, the plot <name>/plot (a name containing / is used as given for the plot)")
     g.add_argument("--predict-note", default="", help="plot: the footnote under the figure")
-    g.add_argument("--predict-edges", default="", help="plot: axes prefixes (M0:M1) whose bands also get two very thin edge lines")
+    g.add_argument("--predict-edges", default="", help="plot: axes prefixes (M0:M1) whose bands also get two very thin edge lines (white on a dark curve, black on a light one); 'all' gives every band two white edge lines")
     g.add_argument("--predict-delta", type=float, default=0.01, help="fdmembers, delta: the finite-difference step in optimizer space")
     g.add_argument("--predict-fd-dir", help="delta: the folder of the finite-difference members' files")
     g.add_argument("--predict-fim", help="delta: <store>/fim/fim.npz")
@@ -114,6 +114,14 @@ def _values_for(hooks, member):
     return lambda label, replicate: fn(member, label, replicate)
 
 
+def tree_name(tree, stage, task=0):
+    """The folder under ``results/predict`` of one stage's private tree, so that everything of one ensemble is in one folder: the run tasks are ``<tree>/task_<N>`` and the
+    plot is ``<tree>/plot``. A plot tree whose name has its own ``/`` is taken as given (``silk/plot_edges`` for a second drawing of the same band)."""
+    if stage == "run":
+        return f"{tree}/task_{task}"
+    return tree if "/" in tree else f"{tree}/plot"
+
+
 def private_tree(repo_root, name):
     """A results tree of its own under ``<repo_root>/results/predict/<name>`` that shares the project's models and data by links, so a plot function's side files
     (csv, caches) do not touch the project's results. Returns its root. The ``generated`` folder is shared, so tasks run at the same time write the same events text to it."""
@@ -157,7 +165,7 @@ def stage_run(a, experiment_dict, run_settings, hooks):
     chosen = [m for m in data["members"] if (not only or m["id"] in only)]
     mine = chosen[a.predict_task::a.predict_ntasks]
     os.makedirs(a.predict_out, exist_ok=True)
-    root = private_tree(run_settings["REPO_ROOT"], f"{a.predict_tree}_{a.predict_task}")
+    root = private_tree(run_settings["REPO_ROOT"], tree_name(a.predict_tree, "run", a.predict_task))
     _call(hooks, "prepare_tree", root, "run")
     settings = dict(run_settings, REPO_ROOT=root, backend="roadrunner", Verbose=False)
     fig_config = experiment_dict[a.simulate]
@@ -198,7 +206,7 @@ def stage_plot(a, experiment_dict, run_settings, hooks):
     from pyantigen.engine.Model_simulate import setup_simulation
     band = PE.read_band(a.predict_band)
     note = a.predict_note or "Shaded: pointwise 95% band from the profile likelihood (parameter sets of the stored profile with dnll <= 1.92; bands narrower than the line are hidden by it)"
-    root = private_tree(run_settings["REPO_ROOT"], a.predict_tree)
+    root = private_tree(run_settings["REPO_ROOT"], tree_name(a.predict_tree, "plot"))
     _call(hooks, "prepare_tree", root, "plot")
     _call(hooks, "before_plot", a.predict_band)
     settings = dict(run_settings, REPO_ROOT=root, backend="roadrunner")

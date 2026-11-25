@@ -118,11 +118,15 @@ class BandDrawer:
     *band* is ``{key: dict(t, lo, hi, ...)}`` as ``Prediction_ensemble.build_band`` returns it (or ``read_band``); lines whose band is narrower than *tiny* times
     the range of the line (data, fixed quantities) are left alone. *edges*: axes prefixes (``"M0"`` is the first axes of the first figure) whose bands are also
     outlined by two very thin lines on top of the curve (white on a dark curve, black on a light one), for panels where the band is narrower than the curve's own
-    width and the shading is hidden by it. ``offcenter`` lists, per banded line, how far the line being drawn lies from the optimum curve the band was built around.
+    width and the shading is hidden by it. ``edges=["all"]`` is the variant that needs no choice of axes: every banded line gets two white edge lines, whatever the
+    width of its band or the colour of its curve (a white pair is visible inside a dark curve, and at the edge of a wide band it separates the shading from the
+    background; on a very light curve it is faint, which is the price of not detecting thin bands). Bands narrower than *edge_tiny* (1e-6) of the line's range
+    are integration noise, not a band, and get no edges even then. ``offcenter`` lists, per banded line, how far the line being drawn lies from the optimum curve the band was built around.
     """
 
-    def __init__(self, band, note=None, tiny=1e-9, edges=()):
+    def __init__(self, band, note=None, tiny=1e-9, edges=(), edge_tiny=1e-6):
         self.band, self.note, self.tiny, self.edges = band, note, tiny, set(edges)
+        self.edge_all, self.edge_tiny = "all" in self.edges, edge_tiny
         self.drawn, self.edged = 0, 0
         self.offcenter = []      # (key, largest |drawn line - the band's optimum curve| / the optimum's range): the band is about the optimum, not the line drawn
 
@@ -169,10 +173,11 @@ class BandDrawer:
                     me.offcenter.append((key, float(np.max(np.abs(ys - b["opt"]))) / (float(np.ptp(b["opt"])) or 1.0)))
                 except (TypeError, ValueError):
                     pass
-                if key.split(".")[0] in me.edges:
+                noise = float(np.max(b["hi"] - b["lo"])) <= me.edge_tiny * (float(np.ptp(b["opt"])) or 1.0)
+                if (me.edge_all and not noise) or key.split(".")[0] in me.edges:
                     from matplotlib.colors import to_rgb
                     r, g, bl = to_rgb(ln.get_color())
-                    edge = "white" if 0.299 * r + 0.587 * g + 0.114 * bl < 0.55 else "black"
+                    edge = "white" if (me.edge_all and not noise) or 0.299 * r + 0.587 * g + 0.114 * bl < 0.55 else "black"
                     for edge_y in (b["lo"], b["hi"]):
                         me._plot(ax, b["t"], edge_y, color=edge, lw=0.5, zorder=ln.get_zorder() + 0.5, solid_capstyle="butt")
                     me.edged += 1

@@ -62,6 +62,13 @@ Options carry the prefix `--predict-`. Lists use `:` or `;`, because a `,` is sp
 
 `--predict-store` is the profile store of the AMICI profile stage (the folder with `meta.json`); `--predict-fim` is its `fim/fim.npz`.
 
+### Where the private trees go
+
+Each task simulates in a results tree of its own, under `<results>/predict/`, linked to the project's models and data, so a plot function's side files do not touch the
+project's results. `--predict-tree NAME` names the ensemble's folder there and everything of one ensemble is inside it: the run tasks in `NAME/task_<N>` and the plot in
+`NAME/plot` (the figure is `NAME/plot/results/<model>/<figure>.png`). A plot tree name with its own `/` is used as given, so a second drawing of the same band does not
+overwrite the first: `--predict-tree NAME/plot_edges`. Use the same `NAME` for the run and the plot of one ensemble.
+
 ### The lines are the plot function's lines
 
 Nothing in a project has to describe its outputs. `run` wraps `Axes.plot`, `Axes.fill_between` and `Axes.annotate` while the experiment's plot function
@@ -69,6 +76,7 @@ Nothing in a project has to describe its outputs. `run` wraps `Axes.plot`, `Axes
 is the second figure, `F2_`, `F3_` ... the later ones; `.f<n>` is the upper boundary of a stacked area, `.a<n>` an annotation. `plot` draws a
 `fill_between` behind each line that has a band. Consequences:
 
+- `--predict-edges M0:M1` outlines the bands of those axes with two 0.5 pt lines on top of the curve (white on a dark curve, black on a light one), for bands narrower than the curve. `--predict-edges all` is the variant with no choice to make: every banded line gets two white edge lines, whatever its band's width or its curve's colour; it is faint on a very light curve.
 - The key depends on the order a plot function draws, so changing the plot function invalidates band files made before.
 - A line that does not change with the parameters (data, fixed physiology) gets no band; a line of fewer than 20 points is a reference mark and gets none.
 - **The band is about member 0, the stored optimum.** `plot` reports every drawn line that lies further than 1e-6 of its range from that curve

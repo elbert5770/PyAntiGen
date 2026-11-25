@@ -100,7 +100,7 @@ def test_the_stages_run_and_a_member_means_what_the_fit_meant(project):
     out = model_run(project, "--simulate", "Example", "--predict", "ensemble", "--predict-stage", "plot", "--predict-band", str(w / "band.npz"), "--predict-tree", "plot1")
     assert "8 band(s) drawn" in out.stdout
     assert "WARNING" in out.stdout                    # the Example's own parameters are not this store's optimum, so the band is not about the drawn lines
-    assert list(w.glob("proj/results/predict/plot1/results/Example/*.png"))
+    assert list(w.glob("proj/results/predict/plot1/plot/results/Example/*.png"))
 
 
 def test_a_misspelt_parameter_is_an_error_not_a_member_equal_to_the_optimum(project):
@@ -144,8 +144,8 @@ def test_the_projects_hooks_run_in_order_and_what_they_return_is_used(project):
     assert sorted(files) == [0, 3]
     with np.load(files[3], allow_pickle=False) as z:
         assert list(z["extra:v"]) == [3.0, 42.0]
-    assert (w / "proj" / "results" / "predict" / "hooked_0" / "prepared_run").exists()
-    assert (w / "proj" / "results" / "predict" / "hookedplot" / "prepared_plot").exists()
+    assert (w / "proj" / "results" / "predict" / "hooked" / "task_0" / "prepared_run").exists()
+    assert (w / "proj" / "results" / "predict" / "hookedplot" / "plot" / "prepared_plot").exists()
     assert open(w / "hooked.npz.after").read() == "[0, 3]" and (w / "hooked.npz.before_plot").exists()
     # member 3 differs from the optimum only in SF; member_values put SF back to the optimum's 2.0, so its curve is the optimum's
     assert line(files, 3, "[B] ADpos_Early")[-1] == pytest.approx(line(files, 0, "[B] ADpos_Early")[-1], rel=1e-9)
@@ -167,3 +167,10 @@ def test_a_replicate_that_pins_a_fitted_parameter_can_say_so_per_replicate(proje
     # SF moves only the arms that were not pinned: ADneg lines equal the optimum's, ADpos lines do not
     assert np.array_equal(line(files, sf_up, "[B] ADneg_Early"), line(files, 0, "[B] ADneg_Early"))
     assert not np.allclose(line(files, sf_up, "[B] ADpos_Early"), line(files, 0, "[B] ADpos_Early"))
+
+
+def test_the_private_trees_of_one_ensemble_are_grouped_in_one_folder():
+    from pyantigen.engine.Prediction import tree_name
+    assert tree_name("silk", "run", 3) == "silk/task_3"
+    assert tree_name("silk", "plot") == "silk/plot"
+    assert tree_name("silk/plot_edges", "plot") == "silk/plot_edges"

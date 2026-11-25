@@ -277,6 +277,35 @@ def test_edge_lines_are_drawn_only_for_the_chosen_axes_and_their_colour_contrast
     plt.close(fig)
 
 
+def test_edges_all_gives_every_band_white_edge_lines_whatever_the_curve_colour(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def figure():
+        fig, axes = plt.subplots(1, 2)
+        t = np.linspace(0, 1, 50)
+        axes[0].plot(t, t, color="darkred", lw=4)
+        axes[1].plot(t, t, color="gold", lw=4)
+        return fig, axes
+    t = np.linspace(0, 1, 50)
+    for i, s in enumerate((1.0, 1.1)):
+        np.savez(tmp_path / f"member_{i}.npz", **{"M0.0:t": t, "M0.0:y": t * s, "M1.0:t": t, "M1.0:y": t * s})
+    band = PE.build_band([str(tmp_path / "member_0.npz"), str(tmp_path / "member_1.npz")])
+    with PR.BandDrawer(band, edges=["all"]) as d:
+        fig, axes = figure()
+    assert d.drawn == 2 and d.edged == 2
+    colours = [[ln.get_color() for ln in ax.lines] for ax in axes]
+    assert colours[0].count("white") == 2 and colours[1].count("white") == 2      # white on both, the gold one too
+    plt.close(fig)
+    np.savez(tmp_path / "member_2.npz", **{"M0.0:t": t, "M0.0:y": t * 1.0000000001, "M1.0:t": t, "M1.0:y": t * 1.1})
+    band = PE.build_band([str(tmp_path / "member_0.npz"), str(tmp_path / "member_2.npz")])
+    with PR.BandDrawer(band, edges=["all"]) as d:                                  # M0's band is 1e-10 wide: integration noise
+        fig, axes = figure()
+    assert d.edged == 1 and len(axes[0].lines) == 1 and len(axes[1].lines) == 3
+    plt.close(fig)
+
+
 def test_the_drawer_reports_a_line_that_is_not_the_optimum_the_band_was_built_around(tmp_path):
     import matplotlib.pyplot as plt
     files = []
