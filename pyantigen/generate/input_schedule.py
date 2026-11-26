@@ -998,7 +998,9 @@ class InputSchedule:
             seg.index, seg.start, seg.end = sg.index, sg.start, sg.end
             # an observation at a switch time is read after the switch (see PlanSegment); the last segment has no successor
             seg.observed = sg.end in obs and not (sg.end in steps and sg.index < len(segs) - 1)
-            seg.observed_start = sg.index > 0 and sg.start in obs and sg.start in steps
+            # the first segment's start is the window's own start, an observation there reads the initial state (and its
+            # sensitivities): a later segment's start is read only where a switch opens it
+            seg.observed_start = sg.start in obs and (sg.index == 0 or sg.start in steps)
             seg.step = None if sg.start not in steps else sorted(steps[sg.start])
             seg.t0, seg.t1 = self.time(sg.start, params), self.time(sg.end, params)
             seg.dt0 = vec(self.gradient(sg.start, params, wrt=wrt))

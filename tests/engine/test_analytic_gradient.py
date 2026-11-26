@@ -413,6 +413,25 @@ def test_freezing_everything_makes_every_initial_assigned_parameter_plain_at_the
     assert model.getParameter("V").getValue() == pytest.approx(2.0)
 
 
+def test_a_plain_parameter_the_project_changed_is_given_the_value_the_engine_holds():
+    """getSBML() is the model as loaded: a plain parameter Update_parameters set (nobody fits it) must not stay at the default."""
+    libsbml, freeze, r, sbml = _freeze_inputs()
+    r["k_decay"] = 0.9                       # a regional constant, say: no initial assignment, not fitted
+    sbml = r.getSBML()
+    assert libsbml.readSBMLFromString(sbml).getModel().getParameter("k_decay").getValue() == pytest.approx(0.5)
+    out, frozen = freeze(sbml, r, everything=True)
+    assert libsbml.readSBMLFromString(out).getModel().getParameter("k_decay").getValue() == pytest.approx(0.9)
+    assert "k_decay" in frozen
+    untouched, _ = freeze(sbml, r)           # not under `everything`: the loaded values are left alone
+    assert libsbml.readSBMLFromString(untouched).getModel().getParameter("k_decay").getValue() == pytest.approx(0.5)
+
+
+def test_a_parameter_the_engine_left_alone_is_not_reported_frozen():
+    libsbml, freeze, r, sbml = _freeze_inputs()
+    out, frozen = freeze(sbml, r, everything=True)
+    assert "k_decay" not in frozen and "k_fit" not in frozen
+
+
 def test_without_everything_only_the_parameters_that_read_a_varying_one_are_frozen():
     libsbml, freeze, r, sbml = _freeze_inputs()
     out, frozen = freeze(sbml, r, varying=["Q_in"])

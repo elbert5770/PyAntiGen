@@ -333,15 +333,21 @@ def test_a_window_that_starts_at_the_first_tracked_row_matches_finite_difference
     np.testing.assert_allclose(g(x), ref, rtol=2e-4, atol=2e-4 * np.abs(ref).max())
 
 
-def test_a_data_time_at_the_start_of_the_simulation_is_refused_with_a_message(run_only_problem, tmp_path):
-    from pyantigen.engine.Analytic_gradient import AnalyticGradientError
+def test_a_data_time_at_the_start_of_the_simulation_is_the_initial_state_and_matches_finite_differences(
+        run_only_problem, tmp_path):
+    """Zhao's Stage II datasets start at day 0, the first simulated time. That row is the initial state: the first segment
+    reads its own start. (It used to be refused, and the fit silently fell back to finite differences.)"""
     models, reps, text = run_only_problem
     df = models["toy"]["df_dict"]["toy"]
     at_start = pd.concat([pd.DataFrame({"time": [0.0], "ly": [0.0], "zz": [0.0]}), df], ignore_index=True)
     problem = ({"toy": {**models["toy"], "df_dict": {"toy": at_start}}}, reps, text)
     g = _build(problem, tmp_path)
-    with pytest.raises(AnalyticGradientError, match="at or before the start"):
-        g(to_opt(TRUTH))
+    x = to_opt(TRUTH * np.array([0.9, 1.0, 1.2, 0.8, 1.1]))
+    table, _D = g.sims["toy"].tables(TRUTH * np.array([0.9, 1.0, 1.2, 0.8, 1.1]), GROUPS, reps, problem[0])
+    assert table["time"][0] == 0.0                      # the start row is there
+    ref = richardson(engine_objective(problem[0], reps), x)
+    assert np.abs(ref).max() > 1e-3
+    np.testing.assert_allclose(g(x), ref, rtol=2e-4, atol=2e-4 * np.abs(ref).max())
 
 
 def test_extra_times_add_rows_the_loss_may_read_without_changing_the_gradient(

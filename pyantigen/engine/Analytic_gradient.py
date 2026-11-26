@@ -33,7 +33,6 @@ AMICI is optional; on Windows it needs WSL. Nothing here imports it until a
 gradient is built.
 """
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -42,6 +41,11 @@ import threading
 import tempfile
 
 import numpy as np
+
+try:
+    import fcntl
+except ImportError:          # native Windows: no POSIX locks. Importing this module must still work there (a RoadRunner fit
+    fcntl = None             # builds the gradient provider's module on the way); AMICI itself runs under WSL or Linux.
 
 from pyantigen.engine.Multistart import GradientSetupError
 from pyantigen.engine.Parameter_replay import ParameterReplay  # noqa: F401  (moved to its own module; the name stays importable from here)
@@ -566,6 +570,9 @@ def _build_lock(directory):
     with _BUILD_THREAD_LOCKS_GUARD:
         thread_lock = _BUILD_THREAD_LOCKS.setdefault(directory, threading.Lock())
     with thread_lock:
+        if fcntl is None:                     # no POSIX locks (native Windows): the thread lock is all there is
+            yield
+            return
         with open(directory + ".lock", "a") as fh:
             fcntl.lockf(fh, fcntl.LOCK_EX)
             try:
@@ -641,6 +648,13 @@ def freeze_stale_assignments(sbml, r, protected=(), varying=(), everything=False
     ``V = V_base``) has them as initial assignments, and a project's ``Update_parameters`` or hooks may
     overwrite them on the RoadRunner model; AMICI would otherwise integrate the SBML's value, not the
     engine's. Frozen, each is a plain parameter at the value RoadRunner holds.
+
+    Also under *everything*: a plain parameter (no initial assignment, no rule) that ``Update_parameters`` set on the
+    RoadRunner model is given the value RoadRunner holds. ``r.getSBML()`` is the model as it was LOADED, so such a
+    parameter -- a regional population set per replicate and fitted by nobody, say, which a species' initial assignment
+    then reads -- would otherwise be integrated by AMICI at the SBML's default. (The parameters the fitted ones move do not
+    need this, and baking in the value RoadRunner holds at a probe point would only change the compiled model's identity:
+    AMICI is given their values on every evaluation.)
     """
     import libsbml
     doc = libsbml.readSBMLFromString(sbml)
@@ -677,6 +691,20 @@ def freeze_stale_assignments(sbml, r, protected=(), varying=(), everything=False
             p.setValue(float(r[sym]))
             p.setConstant(True)
             frozen.append(sym)
+    if everything:
+        for i in range(model.getNumParameters()):
+            p = model.getParameter(i)
+            sym = p.getId()
+            if sym in keep or sym in frozen or sym in varying or model.getRuleByVariable(sym) is not None \
+                    or model.getInitialAssignmentBySymbol(sym) is not None:
+                continue            # (a parameter the fitted ones move gets its value from AMICI's inputs on every evaluation)
+            try:
+                held = float(r[sym])
+            except Exception:
+                continue
+            if np.isfinite(held) and held != p.getValue():
+                p.setValue(held)
+                frozen.append(sym)
     return libsbml.writeSBMLToString(doc), frozen
 
 
@@ -809,12 +837,11 @@ class _SimGradient:
         theta = dict(values)
         inputs = self._engine_initial_inputs(theta)
         times = _data_times(groups, replicates, models, self.name, self.t_first, self.t_last)
-        # the plan reads outputs at the end of a segment, so the window's own start is never a row:
-        # t_first only anchors the table when it lies after t_start (a pre-equilibration block)
-        if any(t <= self.t_start for t in times):
+        # A data time AT the start of the window is the initial state: the first segment reads its own start (see
+        # InputSchedule.plan). One before it cannot be (_data_times keeps only [t_first, t_last]).
+        if any(t < self.t_start for t in times):
             raise AnalyticGradientError(
-                f"{self.name}: the loss reads a data time at or before the start of the simulation "
-                f"({self.t_start:g} h); AMICI reports the end of each segment, so that row is not available")
+                f"{self.name}: the loss reads a data time before the start of the simulation ({self.t_start:g} h)")
         anchors = {self.t_last} | ({self.t_first} if self.t_first > self.t_start else set())
         # rows the loss reads that are not data times (a pre-dose baseline), asked for in the settings
         anchors |= {t for t in self.extra_times if self.t_start < t <= self.t_last}
