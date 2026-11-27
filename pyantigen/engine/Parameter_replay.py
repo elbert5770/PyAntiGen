@@ -55,8 +55,47 @@ class ParameterReplay:
         self.apply(p_lin)
         return dict(zip(self.plain, self.read(self.plain)))
 
+    # Re-deriving J by central differences replays the model 2K + 1 times (reset, baseline, Update_parameters, K values, hooks) on every
+    # gradient. Most fits need none of that: every fitted name IS a model parameter and no hook moves another one, so J is the selection
+    # matrix (1 where plain[m] is theta_k). That is checked, not assumed: one replay at a perturbed point (every fitted value moved by 10 %,
+    # in alternating directions) must give exactly the selection's prediction, and a hook that moves another plain parameter, or a name
+    # that only a hook understands, changes it and sends the call to the differences below. A failed check is remembered.
+    shortcut = True
+    _SHORTCUT_STEP = 0.1
+
+    def _selection_jacobian(self, p_lin):
+        """``(values, J)`` when the replay's plain parameters are exactly the fitted values (J a selection matrix), else ``None``."""
+        base = self.values(p_lin)
+        base_vec = np.array(list(base.values()))
+        index = {name: m for m, name in enumerate(self.plain)}
+        J = np.zeros((len(self.plain), len(p_lin)))
+        for k, name in enumerate(self.param_names):
+            if name in index:
+                J[index[name], k] = 1.0
+        step = self._SHORTCUT_STEP * (1.0 + (np.arange(len(p_lin)) % 3) / 3.0) * np.where(np.arange(len(p_lin)) % 2 == 0, 1.0, -1.0)
+        moved = np.where(p_lin != 0, p_lin * (1.0 + step), 1e-3 * np.sign(step))
+        up = np.array(list(self.values(moved).values()))
+        expected = base_vec + J @ (moved - p_lin)
+        self.apply(p_lin)
+        if not (np.all(np.isfinite(up)) and np.all(np.isfinite(base_vec))):
+            return None
+        tol = 1e-9 * np.maximum(np.maximum(np.abs(expected), np.abs(base_vec)), 1e-300)
+        return (base, J) if np.all(np.abs(up - expected) <= tol) else None
+
     def jacobian(self, p_lin, h_rel=1e-6):
-        """``(values, J)``: J[m, k] = d(plain parameter m)/d(theta_k), central differences of the replay."""
+        """``(values, J)``: J[m, k] = d(plain parameter m)/d(theta_k).
+
+        The selection matrix when the check above passes (3 replays), else central differences of the replay (``jacobian_fd``)."""
+        p_lin = np.asarray(p_lin, dtype=float)
+        if self.shortcut:
+            found = self._selection_jacobian(p_lin)
+            if found is not None:
+                return found
+            self.shortcut = False                     # not a selection here: do not probe again
+        return self.jacobian_fd(p_lin, h_rel)
+
+    def jacobian_fd(self, p_lin, h_rel=1e-6):
+        """``(values, J)`` by central differences of the replay: 2K + 1 replays."""
         p_lin = np.asarray(p_lin, dtype=float)
         base = self.values(p_lin)
         J = np.zeros((len(self.plain), len(p_lin)))

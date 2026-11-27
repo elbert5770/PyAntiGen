@@ -94,3 +94,76 @@ def test_the_old_import_path_still_works_and_the_module_needs_no_amici_or_fcntl(
     root = os.path.dirname(os.path.dirname(os.path.abspath(pyantigen.__file__)))
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=root, env={**os.environ, "PYTHONPATH": root})
     assert out.returncode == 0, out.stderr
+
+
+# --- the Jacobian of the plain parameters with respect to the fitted ones ------------------------------------------------------------
+
+PLAIN = ["k", "c", "kr", "kf"]
+
+
+def _counting(extra_hook=None):
+    """A replicate that counts its replays (one ``Update_parameters`` call each), with an optional extra hook."""
+    calls = []
+    rep = _replicate(calls)
+    if extra_hook is not None:
+        rep["parameter_hooks"].append(extra_hook)
+    return rep, calls
+
+
+def test_when_every_fitted_name_is_a_model_parameter_the_jacobian_is_a_selection_checked_with_three_replays():
+    r = _model()
+    rep, calls = _counting()
+    replay = ParameterReplay(r, rep, ["k", "kr"], PLAIN)
+    values, J = replay.jacobian([0.7, 2.5])
+    assert len(calls) // 2 == 3                    # (update, hook) per replay: the base, the probe, and the final restore
+    expected = np.zeros((4, 2))
+    expected[0, 0] = expected[2, 1] = 1.0
+    np.testing.assert_array_equal(J, expected)
+    assert values["k"] == 0.7 and values["kr"] == 2.5 and values["c"] == 3.0
+    assert r["k"] == 0.7 and r["kr"] == 2.5          # left at the point asked for, as the differences leave it
+    # the same answer as the central differences, which take 2K + 1 + 1 replays
+    rep2, calls2 = _counting()
+    _v, J_fd = ParameterReplay(_model(), rep2, ["k", "kr"], PLAIN).jacobian_fd(np.array([0.7, 2.5]))
+    np.testing.assert_allclose(J, J_fd, atol=1e-7)
+    assert len(calls2) // 2 == 2 * 2 + 2
+
+
+def test_a_hook_that_moves_another_parameter_is_not_a_selection():
+    """kf = kr / Kd: the fitted Kd is no model parameter, and it moves kf."""
+    r = _model()
+    replay = ParameterReplay(r, _replicate(), ["k", "Kd"], PLAIN)
+    _values, J = replay.jacobian([0.5, 4.0])
+    assert replay.shortcut is False                 # remembered: the next call goes straight to the differences
+    assert J[PLAIN.index("kf"), 1] == pytest.approx(-2.0 / 4.0 ** 2, rel=1e-5)      # d(kr / Kd)/dKd
+    assert J[PLAIN.index("k"), 0] == pytest.approx(1.0)
+
+
+def test_a_fitted_model_parameter_that_a_hook_copies_into_another_is_not_a_selection():
+    """c = 2 k: both are plain parameters, and k is fitted. A selection matrix would say c does not move."""
+    def hook(r, params):
+        if "k" in params:
+            r["c"] = 2.0 * params["k"]
+    r = _model()
+    rep, _calls = _counting(hook)
+    replay = ParameterReplay(r, rep, ["k"], PLAIN)
+    _values, J = replay.jacobian([0.5])
+    assert J[PLAIN.index("c"), 0] == pytest.approx(2.0, rel=1e-6)
+    assert J[PLAIN.index("k"), 0] == pytest.approx(1.0, rel=1e-6)
+
+
+def test_a_nonlinear_hook_is_caught_too():
+    def hook(r, params):
+        r["kr"] = params["k"] ** 2
+    r = _model()
+    rep, _calls = _counting(hook)
+    _values, J = ParameterReplay(r, rep, ["k"], PLAIN).jacobian([3.0])
+    assert J[PLAIN.index("kr"), 0] == pytest.approx(6.0, rel=1e-5)
+
+
+def test_the_shortcut_can_be_turned_off():
+    r = _model()
+    rep, calls = _counting()
+    replay = ParameterReplay(r, rep, ["k", "kr"], PLAIN)
+    replay.shortcut = False
+    replay.jacobian([0.7, 2.5])
+    assert len(calls) // 2 == 2 * 2 + 2
