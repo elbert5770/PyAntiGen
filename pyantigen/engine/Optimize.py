@@ -89,8 +89,8 @@ def _block_title_stats(tr, blocks):
     if state == "declared":
         # n*log(sigma) is kept, as in concentrated_nll, so the panel terms add up to the objective and compare with
         # the floored panels; it is constant for a fixed sigma, which is the only reason it could be dropped.
-        term = n * np.log(max(sigma_used, 1e-300)) + sse / (2.0 * sigma_used * sigma_used)
-        tag = "sigma fixed"
+        term = n * np.log(max(sigma_used, 1e-300)) + sse / (2.0 * sigma_used * sigma_used) + _block_log_sigma(v)
+        tag = "sigma per point" if len(v) >= 5 else "sigma fixed"
     elif state in ("floored_binding", "floored_free"):
         term = n * np.log(sigma_used) + sse / (2.0 * sigma_used * sigma_used)
         tag = ("sigma floor (capped)" if state == "floored_binding"
@@ -590,26 +590,66 @@ def _known_sigma_for(obs_cfg, obs_df=None, valid=None):
     precision is asserted rather than inferred.
 
     Recognised, in priority order:
-      * ``noise_column``  per-datapoint sigma from the data (PEtab style);
-                          reduced to its RMS so the block keeps one sigma.
+      * ``noise_column``  per-datapoint sigma from the data (PEtab style). The block is scored in units of those
+                          sigmas, so its declared sigma is 1.0 (:func:`_point_sigma_for` supplies the per-point
+                          values and :func:`_record_block` keeps ``sum ln sigma_i``);
       * ``sigma_method="fixed"`` with ``sigma_value``.
-    ``sigma_method="relative"`` is deliberately *not* handled here: it depends
-    on the prediction, so it changes every evaluation and is not a fixed known
-    sigma. Everything else estimates sigma.
+    ``sigma_method="relative"`` is rejected (:func:`_reject_unsupported_noise`): it depends on the prediction, so it
+    changes every evaluation and is not a fixed known sigma. Everything else estimates sigma.
     """
-    col = obs_cfg.get("noise_column")
-    if col and obs_df is not None and col in getattr(obs_df, "columns", []):
-        s = np.asarray(obs_df[col], dtype=float)
-        if valid is not None:
-            s = s[valid]
-        s = s[np.isfinite(s) & (s > 0)]
-        if s.size:
-            return float(np.sqrt(np.mean(s ** 2)))
+    if obs_cfg.get("noise_column"):
+        return 1.0
     if obs_cfg.get("sigma_method") == "fixed":
         v = obs_cfg.get("sigma_value")
         if v is not None and float(v) > 0:
             return float(v)
     return None
+
+
+def _point_sigma_for(obs_cfg, obs_df, valid):
+    """The per-datapoint sigmas of an observable that names a ``noise_column``, aligned with the valid rows; None without one.
+
+    Raises if the column is missing or any scored row has no usable sigma (not finite, or not positive): the likelihood
+    is only the stated one if every point carries the sigma it was given, so there is nothing sensible to fall back to.
+    """
+    col = obs_cfg.get("noise_column")
+    if not col:
+        return None
+    if obs_df is None or col not in getattr(obs_df, "columns", []):
+        raise ValueError(
+            f"loss_config observable {obs_cfg.get('observed_variable')!r}: noise_column {col!r} is not a column of its data. "
+            "Fix the name or drop noise_column (the sigma is then estimated).")
+    s = np.asarray(obs_df[col], dtype=float)
+    if valid is not None:
+        s = s[valid]
+    bad = ~(np.isfinite(s) & (s > 0))
+    if bad.any():
+        raise ValueError(
+            f"loss_config observable {obs_cfg.get('observed_variable')!r}: noise_column {col!r} has {int(bad.sum())} "
+            f"scored row(s) that are not a positive finite sigma (first: {s[bad][0]!r}). Every scored point needs one.")
+    return s
+
+
+def _reject_unsupported_noise(obs_cfg):
+    """Raise for noise specifications the block objective cannot honour, instead of ignoring them.
+
+    ``noise_formula`` (a model variable) and ``sigma_method="relative"`` (a fraction of the prediction) make sigma depend
+    on the simulation, so the likelihood is not ``SSE / 2 sigma^2`` in a fixed sigma and its gradient has terms through
+    sigma that the block objective, the exact gradient and the LM residual form do not have. They used to be accepted and
+    to leave the objective every fit minimises unchanged, so a fit ran with the default noise model and nothing said so.
+    """
+    name = obs_cfg.get("observed_variable")
+    if obs_cfg.get("noise_formula"):
+        raise ValueError(
+            f"loss_config observable {name!r}: noise_formula={obs_cfg['noise_formula']!r} is not supported by the likelihood "
+            "blocks the fits minimise (a sigma that depends on the simulation is not implemented). Remove it, declare a "
+            'sigma ("sigma_method": "fixed", "sigma_value"), or give a per-point sigma column ("noise_column").')
+    if obs_cfg.get("sigma_method") == "relative":
+        raise ValueError(
+            f'loss_config observable {name!r}: sigma_method="relative" (sigma proportional to the prediction) is not '
+            "supported by the likelihood blocks the fits minimise. Remove it, declare a sigma "
+            '("sigma_method": "fixed", "sigma_value"), or give a per-point sigma column ("noise_column"), e.g. '
+            "sigma_value times the measured value.")
 
 
 def _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=None):
@@ -794,7 +834,7 @@ _PREDICTION_SINK = None    # a list while LossGradient.gradient collects, per sc
 
 
 def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
-                  sigma_floor=None):
+                  sigma_floor=None, count_weights=None, log_sigma=None):
     """Accumulate weighted SSE and effective count for one observable block.
 
     Entries are ``[weighted_sse, n_eff, known_sigma_or_None,
@@ -803,16 +843,28 @@ def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
     caps its profiled sigma at that data-derived value (see
     ``concentrated_nll``) and costs a parameter only while the cap does not
     bind; one with neither has its sigma fully profiled out.
+
+    A block scored with a sigma on every datapoint (``noise_column``) passes ``weights = w / sigma_i^2`` (what multiplies
+    ``r^2``, and what the residual and prediction sinks scale by), ``count_weights = w`` (what counts as data) and
+    ``log_sigma = sum w ln sigma_i``, with ``known_sigma = 1``. Its entry then has a fifth element, ``log_sigma``, which
+    :func:`concentrated_nll` adds: the block is ``0.5 sum w (r / sigma_i)^2 + sum w ln sigma_i`` exactly, which is what a
+    PEtab likelihood with that noise is (up to ``n/2 ln 2 pi``). Such a block cannot be pooled with one that is not.
     """
     if blocks is None:
         return
-    acc = blocks.setdefault((key, _short_obs_label(obs)),
-                            [0.0, 0.0, known_sigma, sigma_floor])
+    count_w = weights if count_weights is None else count_weights
+    bkey = (key, _short_obs_label(obs))
+    acc = blocks.setdefault(bkey, [0.0, 0.0, known_sigma, sigma_floor] + ([0.0] if log_sigma is not None else []))
+    if (len(acc) >= 5) != (log_sigma is not None):
+        raise ValueError(
+            f"block {bkey} pools observables with a per-point sigma (noise_column) and observables without one; a block's "
+            "sigma is either one number or one per point, so give the per-point ones their own sigma_block / sigma_pool.")
     acc[0] += float(np.dot(weights, np.asarray(residuals, dtype=float) ** 2))
-    acc[1] += float(np.sum(weights))
+    acc[1] += float(np.sum(count_w))
+    if log_sigma is not None:
+        acc[4] += float(log_sigma)
     if _RESIDUAL_SINK is not None:     # the residual form of the loss (Analytic_gradient.LossGradient.residual_jacobian)
-        _RESIDUAL_SINK.append(((key, _short_obs_label(obs)),
-                               np.sqrt(np.asarray(weights, dtype=float)) * np.asarray(residuals, dtype=float)))
+        _RESIDUAL_SINK.append((bkey, np.sqrt(np.asarray(weights, dtype=float)) * np.asarray(residuals, dtype=float)))
     # Pooled blocks must agree: if any contributor asserts a sigma or a floor,
     # the pool keeps it. Mixing asserted/floored/estimated noise in one pool is
     # a spec error, so the first assertion of each kind wins and stays -- no
@@ -822,6 +874,11 @@ def _record_block(blocks, key, obs, residuals, weights, known_sigma=None,
         acc[2] = known_sigma
     if acc[3] is None and sigma_floor is not None:
         acc[3] = sigma_floor
+
+
+def _block_log_sigma(v):
+    """``sum w ln sigma_i`` of a per-point-sigma block (see :func:`_record_block`); 0 for every other block."""
+    return float(v[4]) if len(v) >= 5 else 0.0
 
 
 def _unpack_block(v):
@@ -910,7 +967,7 @@ def concentrated_nll(blocks, include_constant=False):
             # the optimum, by sum(n*log(sigma_used)) over every floored
             # block -- thousands of nats on a spec with many tightly-floored
             # SILK blocks.
-            total += n * np.log(ks) + sse / (2.0 * ks * ks)
+            total += n * np.log(ks) + sse / (2.0 * ks * ks) + _block_log_sigma(v)
             if include_constant:
                 total += 0.5 * n * np.log(2.0 * np.pi)
         elif floor is not None:
@@ -1250,6 +1307,14 @@ def loss_function_evaluated(
             loss_type = obs_cfg.get("loss_type", "nll")
 
             block_id = block_key if block_key is not None else exp_id
+            point_sigma = None
+            if blocks is not None:
+                _reject_unsupported_noise(obs_cfg)
+                point_sigma = _point_sigma_for(obs_cfg, obs_df, valid)
+            scored_weights, log_sigma = obs_weights_v, None
+            if point_sigma is not None:      # a sigma on every point: weights w / sigma^2 and the constant sum w ln sigma
+                scored_weights = obs_weights_v / point_sigma ** 2
+                log_sigma = float(np.dot(obs_weights_v, np.log(point_sigma)))
             known_sigma = _known_sigma_for(obs_cfg, obs_df, valid)
             sigma_floor, floor_obj = (
                 _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
@@ -1260,12 +1325,13 @@ def loss_function_evaluated(
             known_sigma, sigma_floor = _freeze_floor(
                 known_sigma, sigma_floor, frozen_value)
             _record_block(blocks, block_id,
-                          pobs, residuals, obs_weights_v,
-                          known_sigma=known_sigma, sigma_floor=sigma_floor)
+                          pobs, residuals, scored_weights,
+                          known_sigma=known_sigma, sigma_floor=sigma_floor,
+                          count_weights=obs_weights_v, log_sigma=log_sigma)
             if _PREDICTION_SINK is not None:      # Analytic_gradient.LossGradient._exact_gradient
                 _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "result": result, "column": obs_col,
                                          "predict": (lambda tab, _o=obs, _p=param_dict: _observable_series(_o, tab, _p)),
-                                         "y_pred": y_pred, "t_data": t_data, "valid": valid, "weights": obs_weights_v,
+                                         "y_pred": y_pred, "t_data": t_data, "valid": valid, "weights": scored_weights,
                                          "residuals": residuals})
             if seen is not None:
                 # Pre-pooling identity. Block count cannot measure data coverage
@@ -1524,6 +1590,14 @@ def loss_function_composite(
         loss_type = obs_cfg.get("loss_type", "nll")
 
         block_id = block_key if block_key is not None else exp_id
+        point_sigma = None
+        if blocks is not None:
+            _reject_unsupported_noise(obs_cfg)
+            point_sigma = _point_sigma_for(obs_cfg, obs_df, valid)
+        scored_weights, log_sigma = obs_weights_v, None
+        if point_sigma is not None:      # a sigma on every point: weights w / sigma^2 and the constant sum w ln sigma
+            scored_weights = obs_weights_v / point_sigma ** 2
+            log_sigma = float(np.dot(obs_weights_v, np.log(point_sigma)))
         known_sigma = _known_sigma_for(obs_cfg, obs_df, valid)
         sigma_floor, floor_obj = (
             _sigma_floor_for(obs_cfg, t_data, y_data, y_sim_ref=y_pred)
@@ -1534,13 +1608,14 @@ def loss_function_composite(
         known_sigma, sigma_floor = _freeze_floor(
             known_sigma, sigma_floor, frozen_value)
         _record_block(blocks, block_id,
-                      pobs, residuals, obs_weights_v,
-                      known_sigma=known_sigma, sigma_floor=sigma_floor)
+                      pobs, residuals, scored_weights,
+                      known_sigma=known_sigma, sigma_floor=sigma_floor,
+                      count_weights=obs_weights_v, log_sigma=log_sigma)
         if _PREDICTION_SINK is not None:          # an aggregate of simulations: differentiated sub by sub, then through the aggregation
             _PREDICTION_SINK.append({"block": (block_id, _short_obs_label(pobs)), "column": None, "result": None,
                                      "composite": {"subs": subs_info, "aggregation": aggregation,
                                                    "y_pred_subs": y_pred_subs},
-                                     "y_pred": y_pred, "t_data": t_data, "valid": valid, "weights": obs_weights_v,
+                                     "y_pred": y_pred, "t_data": t_data, "valid": valid, "weights": scored_weights,
                                      "residuals": residuals})
         if seen is not None:
             seen.add((str(exp_id), _short_obs_label(obs)))
@@ -1938,7 +2013,7 @@ def describe_nll_terms(p_vec, models, replicates, param_names, scales, groups,
             continue
         sigma, _cost, state = _block_sigma_resolution(sse, n, known, floor)
         if state == "declared":
-            contrib = sse / (2.0 * sigma * sigma)
+            contrib = sse / (2.0 * sigma * sigma) + _block_log_sigma(v)
         elif state in ("floored_binding", "floored_free"):
             contrib = n * np.log(sigma) + sse / (2.0 * sigma * sigma)
         else:

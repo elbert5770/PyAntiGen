@@ -178,7 +178,7 @@ class LossGradient:
                     f"block {key} profiles its sigma ({state}): the residual form needs every sigma known "
                     "(set PYANTIGEN_SIGMA_FLOOR=fixed)")
             sig[key] = s
-            const += n * np.log(max(s, 1e-300))
+            const += n * np.log(max(s, 1e-300)) + O._block_log_sigma(v)       # + sum w ln sigma_i for a per-point-sigma block
         keep = [i for i, (key, v) in enumerate(sink) if key in sig and v.size]
         if not keep:
             raise AnalyticGradientError("the loss has no data to score")
