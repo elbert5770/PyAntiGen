@@ -227,8 +227,19 @@ class AmiciSegmentRunner:
         model.set_initial_state([])
         model.set_initial_state_sensitivities([])
         x = np.array(model.get_initial_state(), dtype=float)
-        sx = (np.array(model.get_initial_state_sensitivities(), dtype=float).reshape(npar, nx)
-              if npar else np.zeros((0, nx)))
+        if npar:
+            # The sensitivities come from a run that stops at t0, not from ``get_initial_state_sensitivities()``: with several
+            # parameters in the list that call (AMICI 1.1.0) puts every parameter's entries in the FIRST parameter's slot,
+            # so a fitted parameter that feeds an initial amount (Schwen's receptor number, Rec1 = ini_R1) got the wrong
+            # sensitivity, or none. The simulation's own sx at t0 is right.
+            model.set_t0(0.0)
+            model.set_timepoints([0.0])
+            init = self._sundials.run_simulation(model, solver)
+            if int(init.status) != self._sundials.AMICI_SUCCESS:
+                raise RuntimeError(f"AMICI failed to evaluate the initial state sensitivities: status {int(init.status)}")
+            sx = np.array(init.sx)[0].reshape(npar, nx).copy()
+        else:
+            sx = np.zeros((0, nx))
         for name, v in (initial or {}).items():
             x[self._state_index(name)] = float(v)
             sx[:, self._state_index(name)] = 0.0
