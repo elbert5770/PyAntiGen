@@ -17,7 +17,10 @@ Passes, each resumable from its JSONL file and run in this order for one side (a
   used as a start. A nuisance on a bound is widened (``widen`` decades at a time, kept per side) and the point re-solved. The
   walk stops once ``dnll > df_stop`` (``level + stop_margin``, so the crossing is bracketed), when the profiled parameter
   has travelled ``max_decades`` from the optimum without a crossing (the side is open), or when a point cannot be
-  evaluated. The profiled parameter is not held to the declared box. A last point over the stop level is first re-fitted
+  evaluated. A hop whose point does not settle (converged, or within the gradient's noise floor: :meth:`PointRecord.settled`) is not
+  extended from: the walk goes back to the last settled point and halves the hop, up to ``max_halvings`` times, and ends with "no converged
+  point" when none settles, so a point over the level that did not converge never brackets a crossing (``adaptive_hop``; its record is kept
+  but is not a start, a neighbour for :func:`fill` or a bracket end). The profiled parameter is not held to the declared box. A last point over the stop level is first re-fitted
   from a start half-way back (:func:`_confirm_end`): a big hop can land in a worse minimum of the nuisance parameters, and
   if the re-fit is lower the walk goes on.
 * :func:`fill` inserts points where the profile crosses ``level``: a quadratic through the nearest points proposes the
@@ -51,7 +54,8 @@ from typing import Callable, Optional
 import numpy as np
 
 from pyantigen.engine.Profile_lm import OutOfTime
-from pyantigen.engine.Profile_record import BOUND_TOL, DNLL_95, STALL_PG, PointRecord, PointRequest, curve, read_jsonl, validate_result
+from pyantigen.engine.Profile_record import (BOUND_TOL, DNLL_95, STALL_PG, PointRecord, PointRequest, curve, read_jsonl, reproduces,
+                                             validate_result)
 
 
 @dataclass
@@ -87,10 +91,27 @@ class WalkSettings:
     plateau_window: int = 0         # 0: off. The nuisance LM stops a point that gained less than ``plateau_tol`` nats in the last ``plateau_window`` evaluations ...
     plateau_tol: float = 0.005
     plateau_pg: float = 0.05        # ... with a projected gradient under this (nats): stalled after the window instead of after ``point_max_evals`` (see Profile_lm.plateau_reached)
+    adaptive_hop: bool = True       # a hop whose point does not settle is retried from the last settled point at half the hop; a point that did not settle is never a start (False: the old walk)
+    max_halvings: int = 5           # ... at most this many times, then the walk ends: the crossing is not bracketed by converged points
+    noise_floor: Optional[float] = None     # nats of projected gradient the gradient's own error hides (measured by Profile_amici.run, or given); None: ``stall_pg`` stands in
+    noise_floor_mode: str = "measure"       # "measure": Profile_amici.run measures the floor at the optimum (two evaluations at different solver tolerances); "off": it does not
+    polish_evals: int = 0           # 0: off. Evaluations of a tighter-tolerance polish of a point that stopped under ``polish_pg`` above the noise floor (Profile_lm.LmSettings.polish_evals)
+    polish_pg: float = 0.5
+    weak_defaults: bool = True      # Profile_amici.run: a side whose parameter loads on a weak FIM direction gets ``weak_first_hop`` and ``weak_plateau_window`` unless set
+    weak_eig: float = 1e-6          # ... "weak": an eigenvalue of J'J under this times the largest
+    weak_load: float = 0.1          # ... "loads": the parameter's squared component on those eigenvectors, summed, is at least this
+    weak_first_hop: float = 0.15    # ... the cap on the first hop (decades) for such a side when ``first_hop_max`` is None
+    weak_plateau_window: int = 20   # ... the plateau window for such a side when ``plateau_window`` is 0
+    fill_seconds: Optional[float] = None    # fill: stop inserting after this many seconds (None: the task's own deadline only)
 
     @property
     def df_stop(self):
         return self.level + self.stop_margin
+
+    @property
+    def settle_pg(self):
+        """The projected gradient (nats) at or under which a point that did not converge still counts as settled: the measured noise floor, else ``stall_pg``."""
+        return self.noise_floor if self.noise_floor is not None else self.stall_pg
 
 
 @dataclass
@@ -396,8 +417,33 @@ def _confirm_end(cur: ProfileProblem, base: ProfileProblem, k, direction, pts, s
     return None, cur
 
 
+def _settled(rec, st):
+    return rec.source == "optimum" or rec.settled(st.settle_pg)
+
+
+def _chain(pts, st):
+    """The points the walk steps from: the optimum and every point that settled. All of them when ``adaptive_hop`` is off."""
+    if not st.adaptive_hop:
+        return list(pts)
+    return [p for p in pts if _settled(p, st)] or [pts[0]]
+
+
+def _tries(pts, last, st):
+    """The records after *last* (the last settled point) in the walk's order: hops that did not settle, oldest first."""
+    if not st.adaptive_hop:
+        return []
+    i = max(j for j, p in enumerate(pts) if p is last)
+    return pts[i + 1:]
+
+
 def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, deadline=None, log=None, kind="profile"):
-    """Walk from the optimum in *direction* (+1 / -1). Returns ``(records, reason)``; reason None means out of time."""
+    """Walk from the optimum in *direction* (+1 / -1). Returns ``(records, reason)``; reason None means out of time.
+
+    Every record is kept, but the walk steps only from settled points (:func:`_chain`): a hop that lands on a point that did not settle is
+    followed by a hop half as long from the last settled point, so the walk never extends an unconverged tail and never takes a point
+    over the level that did not converge for the crossing. The hops tried since the last settled point are read from the store, so a
+    relaunch continues the halving where it stopped.
+    """
     st = st or WalkSettings()
     store = store or MemoryStore()
     say = log or (lambda *_: None)
@@ -413,31 +459,42 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     base, pr = pr, side_problem(pr, store)
     sd = None if pr.sd_first is None else float(pr.sd_first[k])
     while True:
-        last = pts[-1]
+        chain = _chain(pts, st)
+        last = chain[-1]
+        tries = _tries(pts, last, st)
         reason = None
-        if st.confirm and len(pts) > 1 and last.dnll is not None and last.dnll > st.df_stop and last.usable:
+        if st.confirm and len(chain) > 1 and last.dnll is not None and last.dnll > st.df_stop and last.usable:
             try:
-                better, pr = _confirm_end(pr, base, k, direction, pts, st, store, deadline, say)
+                better, pr = _confirm_end(pr, base, k, direction, chain, st, store, deadline, say)
             except OutOfTime:
                 say("deadline reached; exiting to be continued")
                 return pts, None
             if better is not None:
-                pts[-1] = last = better
+                pts[max(j for j, p in enumerate(pts) if p is last)] = better
+                continue
         if last.dnll is not None and last.dnll > st.df_stop:
             reason = f"dnll {last.dnll:.3g} > {st.df_stop}: threshold crossed"
-        elif last.verdict == "failed":
+        elif not st.adaptive_hop and last.verdict == "failed":
             reason = "point could not be evaluated"
-        elif len(pts) > 1 and abs(last.x_fixed - stop_at) < 1e-9:
+        elif len(chain) > 1 and abs(last.x_fixed - stop_at) < 1e-9:
             reason = f"open: {st.max_decades:g} decades from the optimum reached without a crossing"
+        elif tries and (len(tries) > st.max_halvings or 0.5 * abs(tries[-1].x_fixed - last.x_fixed) < st.h_min):
+            if not tries[-1].usable:
+                reason = "point could not be evaluated"
+            else:
+                reason = (f"no converged point within {len(tries) - 1} halving(s) of the hop from x = {last.x_fixed:.5g} "
+                          f"(last try {tries[-1].status(st.settle_pg)}, dnll {tries[-1].dnll:.3g}): the crossing is not bracketed by converged points")
         if reason:
             store.finish(kind, reason)
             say(f"{pr.names[k]} {'up' if direction > 0 else 'down'}: finished: {reason}")
             return pts, reason
-        h = plan_step(pts, bk, sd, st, _unit(pr, k))
+        h = plan_step(chain, bk, sd, st, _unit(pr, k))
+        if tries:
+            h = min(h, 0.5 * abs(tries[-1].x_fixed - last.x_fixed))
         val = float(np.clip(last.x_fixed + direction * h, min(bk, stop_at), max(bk, stop_at)))
         x_prev = np.array(last.x, float)
         try:
-            x_init = predict_start(pr, k, val, pts, direction, st)
+            x_init = predict_start(pr, k, val, chain, direction, st)
         except ValueError:                    # nothing usable (cannot happen: the optimum is one): the last vector
             x_init = np.clip(x_prev, pr.lb, pr.ub)
             x_init[k] = val
@@ -454,6 +511,9 @@ def walk(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
         pts.append(rec)
         say(f"{pr.names[k]} point {len(pts) - 1}: dnll {rec.dnll if rec.dnll is not None else float('nan'):.4f} "
             f"{rec.verdict} ({rec.reason}); {rec.evals} evals")
+        if st.adaptive_hop and not _settled(rec, st):
+            say(f"{pr.names[k]} point {len(pts) - 1} did not settle ({rec.status(st.settle_pg)}): "
+                f"the next hop is half of {abs(val - last.x_fixed):.4g}, from x = {last.x_fixed:.5g}")
         if rec.lower:
             say(f"*** LOWER than the 'optimum' by {-rec.dnll:.4g}: the optimum was not global ***")
 
@@ -563,13 +623,14 @@ def relax(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None,
         if i == 0 or not p.usable or not p.box_limited or tag in seen:
             continue
         start = p.x
+        last_dnll = p.dnll
         for attempt in range(4):                     # a far point may need more than one budget: continue where it stopped
             src = tag if attempt == 0 else f"{tag}:cont{attempt}"
             if src in seen:
                 prev = next(r for r in done if r.source == src)
-                if prev.verdict == "converged" or not prev.usable:
+                if prev.verdict == "converged" or not prev.usable or prev.reproduced:
                     break
-                start = prev.x
+                start, last_dnll = prev.x, prev.dnll
                 continue
             req = wide.request(k, p.x_fixed, start, direction, anchor_x=tuple(p.x), deadline=deadline,
                                max_evals=st.point_max_evals, strict=True, source=src)
@@ -578,15 +639,16 @@ def relax(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None,
             except OutOfTime:
                 return done
             _check(req, rec)
+            rec.reproduced = rec.verdict != "converged" and reproduces(last_dnll, rec.dnll)   # the same dnll again: another budget buys nothing
             store.append("relax", rec)
             done.append(rec)
             seen.add(src)
             say(f"relax point {i} ({', '.join(p.bound_active)}): dnll {p.dnll:.4f} -> "
                 f"{rec.dnll if rec.dnll is not None else float('nan'):.4f} {rec.verdict}; "
                 f"still on a bound: {rec.bound_active or 'none'}")
-            if rec.verdict == "converged" or not rec.usable:
+            if rec.verdict == "converged" or not rec.usable or rec.reproduced:
                 break
-            start = rec.x
+            start, last_dnll = rec.x, rec.dnll
     store.finish("relax", f"{len(done)} point(s) re-solved with bounds widened {st.relax} decade(s)")
     return done
 
@@ -641,15 +703,27 @@ def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
     if store.read("relax") and hasattr(pr.solver, "relaxed"):       # the walk needed room: insert points under the same bounds
         pr = ProfileProblem(**{**pr.__dict__, "solver": pr.solver.relaxed(st.relax)})
 
-    def ordered():
-        return sorted(curve(store.read(walk_kind) + store.read("confirm") + store.read("relax") + store.read("fill")), key=lambda q: direction * q.x_fixed)
+    def every():
+        return store.read(walk_kind) + store.read("confirm") + store.read("relax") + store.read("fill")
 
+    def ordered():
+        # the bracket ends are settled points: the dnll of one that did not converge is only an upper bound of the profile
+        return sorted(curve([r for r in every() if _settled(r, st)]), key=lambda q: direction * q.x_fixed)
+
+    def no_bracket():
+        seen_over = _bracket(sorted(curve(every()), key=lambda q: direction * q.x_fixed), direction, st.level) is not None
+        store.finish("fill", "crossing not bracketed by converged points" if seen_over else "no crossing in the walk")
+
+    t0 = time.time()
     for rnd in range(len(extra), st.fill_rounds):
         pts = ordered()
         br = _bracket(pts, direction, st.level)
         if br is None:
-            store.finish("fill", "no crossing in the walk")
+            no_bracket()
             return None
+        if st.fill_seconds is not None and time.time() - t0 > st.fill_seconds:
+            say(f"fill: {st.fill_seconds:g} s spent; the crossing stays as bracketed")
+            break
         lo, hi = br
         if min(abs(pts[lo].dnll - st.level), abs(pts[hi].dnll - st.level)) <= st.fill_tol:
             break
@@ -666,17 +740,20 @@ def fill(pr: ProfileProblem, k, direction, st: WalkSettings = None, store=None, 
                 return None
             _check(req, rec)
             say(f"fill round {rnd} from {name}: x = {val:.5g}: dnll {rec.dnll if rec.dnll is not None else float('nan'):.5f} {rec.verdict}")
-            if rec.usable and (best is None or rec.nll < best.nll):
+            if rec.usable and (best is None or (_settled(rec, st), -rec.nll) > (_settled(best, st), -best.nll)):
                 best = rec
         if best is None:
             store.finish("fill", "no insert could be evaluated")
             return None
         store.append("fill", best)
         extra.append(best)
+        if not _settled(best, st):          # neither start settled: the same bracket would propose the same value again
+            say(f"fill round {rnd}: the insert did not settle ({best.status(st.settle_pg)}); the bracket stays as it is")
+            break
     pts = ordered()
     br = _bracket(pts, direction, st.level)
     if br is None:
-        store.finish("fill", "no crossing in the walk")
+        no_bracket()
         return None
     a, c = pts[br[0]], pts[br[1]]
     cross = a.x_fixed + (st.level - a.dnll) * (c.x_fixed - a.x_fixed) / (c.dnll - a.dnll)

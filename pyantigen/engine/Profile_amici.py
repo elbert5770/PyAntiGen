@@ -21,6 +21,7 @@ the convergence report and the verdicts are assembled from every side's files.
 AMICI solver objects are not thread-safe, which is why this is one side per process and not one thread per side as the
 RoadRunner route does.
 """
+import dataclasses
 import json
 import math
 import os
@@ -43,6 +44,10 @@ PLATEAU_ENV = "PYANTIGEN_PROFILE_PLATEAU"                # window, in evaluation
 PLATEAU_TOL_ENV = "PYANTIGEN_PROFILE_PLATEAU_TOL"        # nats gained in the window below which the point has plateaued (default 0.005)
 PLATEAU_PG_ENV = "PYANTIGEN_PROFILE_PLATEAU_PG"          # projected gradient (nats) under which a plateaued point is stalled (default 0.05)
 PINS_ENV = "PYANTIGEN_PROFILE_PINS"          # comma-separated relative pins, e.g. 0.1,0.5,2,10
+NOISE_FLOOR_ENV = "PYANTIGEN_PROFILE_NOISE_FLOOR"        # "measure" (default), "off", or the projected-gradient floor in nats (WalkSettings.noise_floor)
+POLISH_ENV = "PYANTIGEN_PROFILE_POLISH"                  # evaluations of the tighter-tolerance polish of a point that stopped near the noise floor (WalkSettings.polish_evals; 0 = off)
+NOISE_SCALE = 0.01                                       # the factor on the AMICI tolerances of the comparison evaluation (noise floor) and of the polish
+NOISE_FILE = "noise_floor.json"
 FAILURE_VALUE = 1e10
 
 
@@ -58,13 +63,29 @@ def side_from_env(n_params, env=None):
     return task // 2, (1 if task % 2 == 0 else -1)
 
 
-def settings_from_env(env=None):
-    """``(mode, WalkSettings)`` from ``PYANTIGEN_PROFILE_MODE``, ``PYANTIGEN_PROFILE_PINS``, ``..._BACKFILL``, ``..._NO_WIDEN``, ``..._FIRST_HOP`` and ``..._POINT_EVALS``."""
+def settings_from_spec(declared):
+    """A :class:`WalkSettings` from the spec's ``standard["profile_walk"]`` dict: any field of it, by name (``{"first_hop_max": 0.15, "plateau_window": 20}``).
+
+    The environment variables (:func:`settings_from_env`) override what the spec says. An unknown name is an error.
+    """
+    st = PR.WalkSettings()
+    known = {f.name for f in dataclasses.fields(PR.WalkSettings)}
+    unknown = sorted(set(declared or {}) - known)
+    if unknown:
+        raise ValueError(f"profile_walk: unknown setting(s) {unknown}; expected a subset of {sorted(known)}")
+    for name, value in (declared or {}).items():
+        setattr(st, name, tuple(value) if name in ("pins", "no_widen") else value)
+    return st
+
+
+def settings_from_env(env=None, declared=None):
+    """``(mode, WalkSettings)`` from the spec's *declared* ``profile_walk`` (:func:`settings_from_spec`), then ``PYANTIGEN_PROFILE_MODE``, ``..._PINS``,
+    ``..._BACKFILL``, ``..._NO_WIDEN``, ``..._FIRST_HOP``, ``..._POINT_EVALS``, ``..._PLATEAU*``, ``..._NOISE_FLOOR`` and ``..._POLISH``, which win."""
     env = os.environ if env is None else env
     mode = (env.get(MODE_ENV) or "walk").strip().lower()
     if mode not in ("walk", "pins", "fim", "collect"):
         raise ValueError(f"{MODE_ENV}={mode!r}: expected 'walk', 'pins', 'fim' or 'collect'")
-    st = PR.WalkSettings()
+    st = settings_from_spec(declared)
     if env.get(PINS_ENV):
         st.pins = tuple(float(v) for v in env[PINS_ENV].split(",") if v.strip())
     if env.get(BACKFILL_ENV, "").strip():
@@ -81,6 +102,13 @@ def settings_from_env(env=None):
         st.plateau_tol = float(env[PLATEAU_TOL_ENV])
     if env.get(PLATEAU_PG_ENV, "").strip():
         st.plateau_pg = float(env[PLATEAU_PG_ENV])
+    raw = env.get(NOISE_FLOOR_ENV, "").strip().lower()
+    if raw in ("off", "measure"):
+        st.noise_floor_mode = raw
+    elif raw:
+        st.noise_floor = float(raw)
+    if env.get(POLISH_ENV, "").strip():
+        st.polish_evals = int(env[POLISH_ENV])
     return mode, st
 
 
@@ -179,6 +207,103 @@ def optimum_state(evaluate, x, lb, ub, failures=()):
 
 def optimum_state_full(evaluate, x, lb, ub, failures=()):
     """:func:`optimum_state` and, as a fourth value, the tangent matrix of the profile at the optimum (``Profile.tangent_matrix``), from the same evaluation."""
+    d = optimum_state_detail(evaluate, x, lb, ub, failures)
+    return d["f"], d["sd"], d["worst"], d["tangent"]
+
+
+def weak_directions(J, rel_eig=1e-6, load=0.1):
+    """Indices of the parameters that load on a weak direction of the Fisher information ``J'J``: the set of k such that the squared
+    component of k on the eigenvectors with eigenvalue under ``rel_eig`` times the largest sums to at least *load*.
+
+    The profile of such a parameter runs along a ridge (a product of rates, a rate and a gain): the Wald step is unbounded there and the
+    nuisance fits along it are the ones that stall, so its sides want a short first hop and the plateau stop.
+    """
+    J = np.asarray(J, float)
+    w, V = np.linalg.eigh(J.T @ J)
+    if not w.size or not w[-1] > 0:
+        return set()
+    weak = w <= rel_eig * w[-1]
+    if not weak.any():
+        return set()
+    return {int(k) for k in np.where((V[:, weak] ** 2).sum(axis=1) >= load)[0]}
+
+
+def measure_noise_floor(evaluate, evaluate_tight, x):
+    """How much of ``J'r`` at *x* is the sensitivities' own error: ``{"per_param": |g - g_tight|, "f_diff", "scale"}``, or None if either evaluation failed.
+
+    *evaluate* and *evaluate_tight* give ``(f, r, J)`` for the same objective under the standard and under tighter AMICI tolerances
+    (:func:`Profile_lm.amici_evaluate` with ``tolerance_scale``); ``g = J'r`` is the gradient the LM judges convergence by, in the same
+    units. The difference is a lower bound on the error of the standard one (the tight one has its own), measured at the optimum, where
+    ``r`` is smallest: far from it the floor is larger, never smaller. A projected gradient at or under it cannot be told from zero.
+    """
+    a, b = evaluate(np.asarray(x, float)), evaluate_tight(np.asarray(x, float))
+    if a is None or b is None:
+        return None
+    ga, gb = a[2].T @ a[1], b[2].T @ b[1]
+    return {"per_param": [float(v) for v in np.abs(ga - gb)], "f_diff": float(abs(a[0] - b[0])), "scale": NOISE_SCALE}
+
+
+def side_noise_floor(per_param, k):
+    """The floor for the side of parameter *k*: the largest error among the nuisance parameters (the profiled one is held, its gradient unused)."""
+    others = [v for i, v in enumerate(per_param) if i != k]
+    return float(max(others)) if others else 0.0
+
+
+def read_noise_floor(store_dir):
+    """``{"per_param", "f_diff", "scale"}`` measured for this profile (shared by every side), or None."""
+    path = os.path.join(store_dir, NOISE_FILE)
+    return json.load(open(path)) if os.path.exists(path) else None
+
+
+def write_noise_floor(store_dir, measured):
+    """Write ``noise_floor.json`` once: the first side to measure it wins and the others read it, so every side judges by the same floor."""
+    path = os.path.join(store_dir, NOISE_FILE)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(measured, fh)
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        pass
+    finally:
+        os.remove(tmp)
+
+
+def side_settings(st, k, nf_per=None, weak=()):
+    """*st* for the side of parameter *k*: its noise floor, and the first-hop cap and plateau stop of a side on a weak FIM direction (unless set)."""
+    out = dataclasses.replace(st)
+    if out.noise_floor is None and nf_per is not None:
+        out.noise_floor = side_noise_floor(nf_per, k)
+    if out.weak_defaults and k in weak:
+        if out.first_hop_max is None:
+            out.first_hop_max = out.weak_first_hop
+        if out.plateau_window == 0:
+            out.plateau_window = out.weak_plateau_window
+    return out
+
+
+def point_counts(records, noise_pg=None):
+    """What became of the points of one side (the lowest record at each value; the optimum left out): ``{"converged", "within_noise", "capped", "budget", "failed"}``."""
+    from pyantigen.engine.Profile_record import curve
+    counts = {"converged": 0, "within_noise": 0, "capped": 0, "budget": 0, "failed": 0}
+    for r in curve(records):
+        if r.source != "optimum":
+            counts[r.status(noise_pg)] += 1
+    counts["failed"] = sum(1 for r in records if not r.usable)
+    return counts
+
+
+def format_point_counts(counts, noise_pg=None):
+    """One line: ``12 points: 9 converged, 2 within the noise floor (<= 0.05), 1 capped far from stationarity, 0 out of budget``."""
+    n = sum(v for k, v in counts.items() if k != "failed")
+    floor = f" (<= {noise_pg:.3g} nats)" if noise_pg is not None else ""
+    text = (f"{n} points: {counts['converged']} converged, {counts['within_noise']} within the noise floor{floor}, "
+            f"{counts['capped']} capped far from stationarity, {counts['budget']} out of budget")
+    return text + (f", {counts['failed']} failed" if counts["failed"] else "")
+
+
+def optimum_state_detail(evaluate, x, lb, ub, failures=()):
+    """``{"f", "sd", "worst", "tangent", "J"}`` at the optimum *x* from one evaluation: the pieces of :func:`optimum_state_full` and the residual Jacobian."""
     out = evaluate(np.asarray(x, float))
     if out is None:
         why = f": {failures[-1]}" if failures else ""
@@ -193,7 +318,7 @@ def optimum_state_full(evaluate, x, lb, ub, failures=()):
         T = PR.tangent_matrix(J, xa, lb, ub)
     except np.linalg.LinAlgError:
         T = None
-    return float(f), sd, float(np.max(np.abs(g) * sd)), T
+    return {"f": float(f), "sd": sd, "worst": float(np.max(np.abs(g) * sd)), "tangent": T, "J": J}
 
 
 def record_to_raw(rec, names, scales):
@@ -256,16 +381,19 @@ def completed_from_store(store_dir, names, scales, key, mode="walk"):
     return completed
 
 
-def side_report(by_param, names, bounds, level=None):
+def side_report(by_param, names, bounds, level=None, noise_pg=None):
     """Per parameter and side: the verdict, the 95% limit, and what the declared box did to the profile.
 
     ``{param: {"below"|"above": {"verdict", "limit", "bound_active", "needs_wider": {nuisance: (lo, hi)}}}}``
     ``bound_active`` names the nuisances on a bound at the points that fix the crossing (a box-limited side is only an upper
     bound on the true limit). ``needs_wider`` lists nuisances whose relaxed fit left the declared bounds, with the range it
     used, so the box can be widened on purpose. Records of the other side and the optimum itself are ignored.
+    The verdict ``"unbracketed"`` says a point is over the level but none that settled (converged, or within *noise_pg* of stationary: ``STALL_PG`` when
+    None) is: the interval is not established. ``counts`` is :func:`point_counts` of the side.
     """
-    from pyantigen.engine.Profile_record import DNLL_95, crossings, side_verdicts
+    from pyantigen.engine.Profile_record import DNLL_95, STALL_PG, crossings, side_verdicts
     level = DNLL_95 if level is None else level
+    noise_pg = STALL_PG if noise_pg is None else noise_pg
     lb = [(-math.inf if b is None or b[0] is None else b[0]) for b in bounds]
     ub = [(math.inf if b is None or b[1] is None else b[1]) for b in bounds]
     out = {}
@@ -275,7 +403,7 @@ def side_report(by_param, names, bounds, level=None):
         if not opt:
             continue
         best = opt[0].x_fixed
-        verdicts = side_verdicts(recs, best, level)
+        verdicts = side_verdicts(recs, best, level, noise_pg)
         limits = crossings(recs, best, level)
         out[name] = {}
         for label, verdict, limit, side in zip(("below", "above"), verdicts, limits, (-1, 1)):
@@ -290,7 +418,9 @@ def side_report(by_param, names, bounds, level=None):
                         if i != k and (xi < lb[i] - 1e-9 or xi > ub[i] + 1e-9):
                             lo, hi = wider.get(names[i], (xi, xi))
                             wider[names[i]] = (min(lo, xi), max(hi, xi))
-            out[name][label] = {"verdict": verdict, "limit": limit, "bound_active": active, "needs_wider": wider}
+            side_recs = [r for r in recs if (r.x_fixed - best) * side > 0 or r.source == "optimum"]
+            out[name][label] = {"verdict": verdict, "limit": limit, "bound_active": active, "needs_wider": wider,
+                                "counts": point_counts(side_recs, noise_pg)}
     return out
 
 
@@ -301,7 +431,8 @@ def format_side_report(report):
         for label, d in sides.items():
             if d["verdict"] == "crossed" and not d["needs_wider"]:
                 continue
-            what = {"box-limited": "BOX-LIMITED (the limit is only an upper bound on the interval)",
+            what = {"unbracketed": "NOT BRACKETED (a point is over the threshold but none that converged: the interval is not established)",
+                    "box-limited": "BOX-LIMITED (the limit is only an upper bound on the interval)",
                     "open": "OPEN (no point past the threshold)", "crossed": "crossed"}[d["verdict"]]
             lines.append(f"  {name} {label}: {what}")
             if d["bound_active"]:
@@ -356,22 +487,48 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
         path = Fim.save_fim(rep, os.path.join(store_dir, "fim"), "fim", out[0])
         log(f"[fim] written to {path} (and fim.npz)")
         return {"anchor": float(out[0]), "floors": stamp, "ran": [], "fim": path}
-    f0, sd, worst, tangent = optimum_state_full(evaluate, xb, lb, ub, failures)
+    detail = optimum_state_detail(evaluate, xb, lb, ub, failures)
+    f0, sd, worst, tangent = detail["f"], detail["sd"], detail["worst"], detail["tangent"]
     record_anchor(store_dir, f0)
     log(f"[profile] AMICI objective at the optimum: f {f0:.6f}; largest projected-gradient gain {worst:.3g} nats")
     if worst > 0.05:
         log("[profile] *** the optimum is not stationary under these floors; a LOWER point is likely and the profile "
             "is measured from a point that is not the minimum ***")
-    st = settings or PR.WalkSettings()
-    solver = LM.LmSolver(evaluate, names, scales, lb, ub, floors_sha256=stamp, log=None,
-                         settings=LM.LmSettings(plateau_window=st.plateau_window, plateau_tol=st.plateau_tol, plateau_pg=st.plateau_pg))
+    st0 = settings or PR.WalkSettings()
+    tight = hasattr(provider, "tolerances_scaled")
+    evaluate_tight = LM.amici_evaluate(provider, scales, tolerance_scale=NOISE_SCALE) if tight else None
+    nf_per = None
+    if st0.noise_floor is not None:
+        log(f"[profile] gradient noise floor given: {st0.noise_floor:.3g} nats of projected gradient")
+    elif st0.noise_floor_mode == "measure" and tight:
+        measured = read_noise_floor(store_dir)
+        if measured is None:
+            measured = measure_noise_floor(evaluate, evaluate_tight, xb)
+            if measured is not None:
+                write_noise_floor(store_dir, measured)
+        if measured is not None:
+            nf_per = measured["per_param"]
+            worst_i = int(np.argmax(nf_per))
+            log(f"[profile] gradient noise floor: |J'r| differs by up to {max(nf_per):.3g} ({names[worst_i]}) between the AMICI tolerances and "
+                f"{measured['scale']:g} times them, at the optimum; a point whose projected gradient is under its side's floor counts as "
+                f"converged within noise (f differs by {measured['f_diff']:.2g})")
+        else:
+            log("[profile] gradient noise floor: the comparison evaluation failed; the fixed stall level stands in for it")
+    weak = weak_directions(detail["J"], st0.weak_eig, st0.weak_load) if st0.weak_defaults else set()
+    if weak:
+        log(f"[profile] parameters on a weak direction of the Fisher information: {', '.join(names[i] for i in sorted(weak))} "
+            f"(first hop <= {st0.weak_first_hop:g} decades and plateau window {st0.weak_plateau_window} on their sides unless set)")
     to_lin = lambda i: float(10.0 ** xb[i]) if scales[i] == "log10" else float(xb[i])
-    pr = PR.ProfileProblem(names=list(names), lb=lb, ub=ub, best_x=xb, anchor_nll=f0, solver=solver, best_value=to_lin,
-                           sd_first=sd, floors_sha256=stamp, tangent=tangent)
     deadline = budget.work_deadline() if budget is not None else None
     todo = all_sides(n) if side is None else [side]
     ran = []
     for k, d in todo:
+        st = side_settings(st0, k, nf_per, weak)
+        solver = LM.LmSolver(evaluate, names, scales, lb, ub, floors_sha256=stamp, log=None, evaluate_tight=evaluate_tight,
+                             settings=LM.LmSettings(plateau_window=st.plateau_window, plateau_tol=st.plateau_tol, plateau_pg=st.plateau_pg,
+                                                    noise_pg=st.noise_floor, polish_evals=st.polish_evals, polish_pg=st.polish_pg))
+        pr = PR.ProfileProblem(names=list(names), lb=lb, ub=ub, best_x=xb, anchor_nll=f0, solver=solver, best_value=to_lin,
+                               sd_first=sd, floors_sha256=stamp, tangent=tangent)
         tag = tag_of(k, d, mode)
         store = PR.JsonlStore(store_dir, tag)
         say = lambda m, tag=tag: log(f"  [walk {tag}] {m}")
@@ -405,5 +562,7 @@ def run(provider, names, bounds, scales, res_x, store_dir, side=None, recheck=Fa
                           or saved["ub"][i] != (None if not math.isfinite(ub[i]) else ub[i])):
                 log(f"[profile] {tag}: bound of {n_i} widened to [{saved['lb'][i]}, {saved['ub'][i]}] "
                     f"(declared [{lb[i]}, {ub[i]}], optimizer space)")
+        counts = point_counts([r for kd in KINDS for r in store.read(kd)], st.settle_pg)
+        log(f"[profile] {tag}: {format_point_counts(counts, st.settle_pg)}")
         ran.append(tag)
     return {"anchor": f0, "floors": stamp, "ran": ran}

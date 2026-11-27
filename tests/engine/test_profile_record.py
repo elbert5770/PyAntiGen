@@ -156,7 +156,7 @@ def test_side_verdicts_crossed_box_limited_open():
     assert P.side_verdicts(pts, 0.0)[1] == "box-limited"
     pts[1].bound_active = []
     pts[2].verdict = "not_converged"
-    assert P.side_verdicts(pts, 0.0)[1] == "box-limited"
+    assert P.side_verdicts(pts, 0.0)[1] == "unbracketed"           # over the level, but only by a point that did not converge: not established
 
 
 def test_roadrunner_solver_strict_tightens_the_simplex_tolerances():

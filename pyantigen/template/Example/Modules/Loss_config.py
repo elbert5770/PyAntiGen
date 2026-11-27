@@ -2,11 +2,17 @@
 #   "sigma_method"/"sigma_value"  a declared sigma ("fixed"), or a heuristic for the fit
 #   "sigma_pool": "<name>"        observables with the same name share ONE estimated sigma
 #                                 (PEtab's single noise parameter for several observables)
+#   "noise_column": "<column>"    a known sigma on every datapoint, read from that column of the data (PEtab's numeric noise);
+#                                 scored exactly, 0.5 sum w (r / sigma_i)^2 + sum w ln sigma_i. Every scored row needs a positive sigma.
+#                                 It cannot share a sigma_block / sigma_pool with observables that have no such column.
+# Not supported, and an error rather than ignored: "noise_formula" and "sigma_method": "relative" (a sigma that depends on the
+# simulation).
 # Pooling the same observable across simulations is "sigma_block" on the loss ELEMENT
 # in Optimizer_settings.py; the two compose.
 #   "reads_parameters": [names]   for a CALLABLE observed_variable only: the fitted parameters it reads by name.
-#                                 Default: all of them (a callable could read anything), which costs four extra passes of
-#                                 the loss per parameter in every AMICI gradient. A callable of the table alone reads none:
+#                                 Default: all of them (a callable could read anything), probed: one extra pass of the loss per
+#                                 parameter in every AMICI gradient, and the four passes of its partial only for a parameter the
+#                                 probe shows it reads (a parameter unread on three points is not probed again). A callable of the table alone reads none:
 #                                 say "reads_parameters": [] and the gradient costs no extra passes. (An expression string
 #                                 needs no declaration: its names are found in it.)
 

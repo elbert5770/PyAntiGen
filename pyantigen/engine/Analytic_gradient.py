@@ -100,6 +100,7 @@ class LossGradient:
         self.groups, self.replicates = groups, replicates
         self.param_names = list(param_names)
         self.rel_step = float(rel_step)
+        self._unread, self._read = {}, set()
         self.explicit = self._explicit_parameters()
         # {(block, observable): sigma}: the floored blocks' sigmas a profile point holds still (see freeze_sigmas)
         self.frozen_sigmas = None
@@ -112,9 +113,12 @@ class LossGradient:
         their own partial derivative (four passes of the loss each). A callable observable could read anything: then
         every parameter counts -- unless its loss_config entry says what it reads with ``"reads_parameters": [names]``
         (``[]`` for a callable of the table alone, which sees a fitted parameter only through a table column, and
-        that the sensitivities already carry). The default stays conservative; a wrong declaration would drop a partial.
+        that the sensitivities already carry). The default stays conservative; a wrong declaration would drop a partial. A
+        parameter that is only assumed read is *probed* before it is differenced (:meth:`_explicit_partial`): one extra
+        evaluation of the loss, and when it does not move the partial is zero instead of four passes.
         """
         found, names = set(), set(self.param_names)
+        self._probe = set()      # the ones assumed read because a callable observable did not say (see _explicit_partial)
         for g in self.groups.values():
             for elem in g.get("loss_elements", []):
                 sims = list(elem.get("simulations", [])) or [elem.get("simulation")]
@@ -128,7 +132,8 @@ class LossGradient:
                         if callable(ov):
                             declared = obs.get("reads_parameters")
                             if declared is None:
-                                return set(range(len(self.param_names)))
+                                self._probe = set(range(len(self.param_names)))
+                                return set(self._probe)
                             found |= set(declared) & names
                             texts = [str(obs.get("noise_formula") or "")]
                         else:
@@ -136,6 +141,35 @@ class LossGradient:
                         for t in texts:
                             found |= set(_NAME.findall(t)) & names
         return {self.param_names.index(n) for n in found}
+
+    def _explicit_partial(self, fn, p_lin, k, base):
+        """The partial of ``fn`` (the loss or its residual vector, with the simulation held fixed) in parameter *k*, ``fn(p_lin) = base``.
+
+        Richardson-extrapolated central differences, four passes of ``fn``. For a parameter that is only assumed to be read (a callable
+        observable that did not declare ``reads_parameters``) one pass at ``p + d`` comes first: if ``fn`` does not move, the loss does
+        not read the parameter and the partial is zero, four passes saved. A parameter that moved ``fn`` is read for good; one that did
+        not, three times, is not probed again (a callable of the table alone cannot read a parameter by name, so what it never did
+        on three points it does not do).
+        """
+        p_lin = np.asarray(p_lin, dtype=float)
+        d = 1e-6 * max(abs(p_lin[k]), 1e-8)
+        if k in self._probe:
+            if self._unread.get(k, 0) >= 3:
+                return 0.0 * np.asarray(base, dtype=float)
+            if k not in self._read:
+                up = p_lin.copy()
+                up[k] += d
+                if np.array_equal(np.asarray(fn(up), dtype=float), np.asarray(base, dtype=float)):
+                    self._unread[k] = self._unread.get(k, 0) + 1
+                    return 0.0 * np.asarray(base, dtype=float)
+                self._read.add(k)
+
+        def partial(sh):
+            up, dn = p_lin.copy(), p_lin.copy()
+            up[k] += sh
+            dn[k] -= sh
+            return (np.asarray(fn(up), dtype=float) - np.asarray(fn(dn), dtype=float)) / (2.0 * sh)
+        return (4.0 * partial(d / 2.0) - partial(d)) / 3.0
 
     # -- the loss -------------------------------------------------------------------
     def value(self, items, p_lin):
@@ -211,15 +245,8 @@ class LossGradient:
         J = np.vstack(rows)
         if J.shape[0] != r0.size:
             return None
-        for k in self.explicit:                         # the loss names this parameter itself: its own partial
-            d = 1e-6 * max(abs(p_lin[k]), 1e-8)
-
-            def partial(sh, k=k):
-                up, dn = p_lin.copy(), p_lin.copy()
-                up[k] += sh
-                dn[k] -= sh
-                return (self.residual_vector(items, up)[0] - self.residual_vector(items, dn)[0]) / (2.0 * sh)
-            J[:, k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+        for k in sorted(self.explicit):                 # the loss names this parameter itself: its own partial
+            J[:, k] += self._explicit_partial(lambda q: self.residual_vector(items, q)[0], p_lin, k, r0)
         return r0, J, const
 
     def residual_jacobian(self, items, directions, p_lin):
@@ -252,14 +279,7 @@ class LossGradient:
                             - res(self._shift_units(items, directions, units, k, -x), p_lin)) / (2.0 * x)
                 J[:, k] += (4.0 * central(h / 2.0) - central(h)) / 3.0
             if k in self.explicit:
-                d = 1e-6 * max(abs(p_lin[k]), 1e-8)
-
-                def partial(s, k=k):
-                    up, dn = p_lin.copy(), p_lin.copy()
-                    up[k] += s
-                    dn[k] -= s
-                    return (res(items, up) - res(items, dn)) / (2.0 * s)
-                J[:, k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+                J[:, k] += self._explicit_partial(lambda q: res(items, q), p_lin, k, r0)
         return r0, J, const
 
     @staticmethod
@@ -502,15 +522,8 @@ class LossGradient:
         g = np.zeros(len(self.param_names))
         for rec, dy in zip(sink, jac):
             g += dsse[rec["block"]] * (-2.0 * (rec["weights"] * rec["residuals"]) @ dy[rec["valid"]])
-        for k in self.explicit:                         # the loss names this parameter itself: its own partial, as below
-            d = 1e-6 * max(abs(p_lin[k]), 1e-8)
-
-            def partial(s, k=k):
-                up, dn = p_lin.copy(), p_lin.copy()
-                up[k] += s
-                dn[k] -= s
-                return (self.value(items, up) - self.value(items, dn)) / (2.0 * s)
-            g[k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+        for k in sorted(self.explicit):                 # the loss names this parameter itself: its own partial, as below
+            g[k] += self._explicit_partial(lambda q: self.value(items, q), p_lin, k, f0)
         return f0, g
 
     def gradient(self, items, directions, p_lin):
@@ -534,14 +547,7 @@ class LossGradient:
                             - self.value(self._shift_units(items, directions, units, k, -x), p_lin)) / (2.0 * x)
                 g[k] += (4.0 * central(h / 2.0) - central(h)) / 3.0
             if k in self.explicit:                      # the loss names this parameter itself
-                d = 1e-6 * max(abs(p_lin[k]), 1e-8)
-
-                def partial(s, k=k):
-                    up, dn = p_lin.copy(), p_lin.copy()
-                    up[k] += s
-                    dn[k] -= s
-                    return (self.value(items, up) - self.value(items, dn)) / (2.0 * s)
-                g[k] += (4.0 * partial(d / 2.0) - partial(d)) / 3.0
+                g[k] += self._explicit_partial(lambda q: self.value(items, q), p_lin, k, f0)
         return f0, g
 
 
@@ -1053,6 +1059,24 @@ class AmiciGradient:
             rp, Jp = self.prior_terms(p_lin)
             r, J = np.concatenate([r, rp]), np.vstack([J, Jp])
         return r, J, const
+
+    @contextlib.contextmanager
+    def tolerances_scaled(self, factor):
+        """Run the AMICI solvers of every simulation at *factor* times their relative and absolute tolerances (state and sensitivities), then restore them.
+
+        ``0.01`` tightens them a hundredfold. The profile uses it to measure how much of ``J'r`` is solver error (``Profile_amici.measure_noise_floor``)
+        and to polish a point that stopped near the gradient's noise floor.
+        """
+        runners = [(sim.runner, sim.runner._tol) for sim in self.sims.values()]
+        try:
+            for rn, (rtol, atol) in runners:
+                rn._tol = (rtol * factor, atol * factor)      # a retry that fails over returns to these, not to the unscaled ones
+                rn._set_tolerances(*rn._tol)
+            yield
+        finally:
+            for rn, tol in runners:
+                rn._tol = tol
+                rn._set_tolerances(*tol)
 
     def __call__(self, x_opt):
         """The gradient in optimizer space (a log10 parameter's derivative is taken with respect to log10 p)."""

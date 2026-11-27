@@ -39,6 +39,9 @@ class LmSettings:
     plateau_window: int = 0         # 0: off. Stop a point that has bought less than ``plateau_tol`` nats in the last ``plateau_window`` evaluations ...
     plateau_tol: float = 0.005
     plateau_pg: float = 0.05        # ... while its projected gradient is under this (nats): it is stalled, within that far of the profile
+    noise_pg: Optional[float] = None   # the gradient's own error floor, measured (Profile_amici.measure_noise_floor); None: not known. A projected gradient at or under it cannot be told from zero
+    polish_evals: int = 0           # 0: off. A point that stopped above ``noise_pg`` but under ``polish_pg`` is refined this many evaluations with ``LmSolver.evaluate_tight`` (tighter sensitivities) ...
+    polish_pg: float = 0.5          # ... when its projected gradient (nats) is under this
 
 
 def plateau_reached(history, evals, window, tol, pg, pg_max):
@@ -168,6 +171,11 @@ def minimize(evaluate: Callable, x0, lb, ub, free, settings: LmSettings = None, 
         if verdict == "converged":
             reason = f"projected gradient {pg:.3g}"
             break
+        if st.noise_pg is not None and pg is not None and pg <= st.noise_pg:
+            # The projected gradient J'r is only as accurate as the sensitivities it is built from. Under their error floor the point cannot
+            # be told from a stationary one, so neither the Newton decrement (computed from the same gradient) nor a longer run decides anything.
+            verdict, reason = "converged", f"projected gradient {pg:.3g} within the gradient noise floor {st.noise_pg:.3g}"
+            break
         nd = lm_step(Jf.T @ Jf, g, st.lam_min, x[free], lb[free], ub[free], 1e9)[1]
         if pg is not None and pg <= pg_loose and nd < newton_tol:
             verdict, reason = "converged", f"newton decrement {nd:.2g} < {newton_tol} (projected gradient {pg:.3g})"
@@ -226,8 +234,9 @@ class LmSolver:
     supports_pin_box = True
 
     def __init__(self, evaluate, names, scales, lb, ub, settings=None, backend="amici", floors_sha256=None, log=None,
-                 on_eval=None):
+                 on_eval=None, evaluate_tight=None):
         self.evaluate, self.names, self.scales = evaluate, list(names), list(scales)
+        self.evaluate_tight = evaluate_tight      # the same objective under tighter solver tolerances, for the polish (``LmSettings.polish_evals``)
         self.lb, self.ub = np.asarray(lb, float), np.asarray(ub, float)
         self.settings = settings or LmSettings()
         self.backend, self.floors_sha256, self.log = backend, floors_sha256, log
@@ -281,8 +290,18 @@ class LmSolver:
                 self.on_eval(x, None if out is None else out[0])
             return out
 
-        res = minimize(ev, x0, lb, ub, free, st, strict=getattr(req, "strict", False), deadline=req.deadline,
-                       anchor=anchor, log=self.log)
+        strict = getattr(req, "strict", False)
+        res = minimize(ev, x0, lb, ub, free, st, strict=strict, deadline=req.deadline, anchor=anchor, log=self.log)
+        if (res.verdict != "converged" and self.evaluate_tight is not None and st.polish_evals > 0 and math.isfinite(res.f)
+                and res.pg is not None and res.pg <= st.polish_pg):
+            # Stopped above the gradient's noise floor but not far from stationary: the sensitivities may be the limit. Refine from here with
+            # the tighter ones, a few evaluations (near the optimum the objective is cheap to re-evaluate), judged without the measured floor
+            # (that was for the standard tolerances).
+            pst = LmSettings(**{**st.__dict__, "max_evals": st.polish_evals, "noise_pg": None})
+            pol = minimize(self.evaluate_tight, res.x, lb, ub, free, pst, strict=strict, deadline=req.deadline, anchor=res.x, log=self.log)
+            if math.isfinite(pol.f):
+                res = LmResult(pol.x, pol.f, pol.verdict, pol.pg, f"polished with tighter sensitivities: {pol.reason} (before: {res.reason}, "
+                               f"projected gradient {res.pg:.3g})", res.evals + pol.evals)
         ok = math.isfinite(res.f)
         rec = PointRecord(
             param=req.param, x_fixed=float(req.x_fixed if req.pin_rel is None else res.x[k]),
@@ -300,12 +319,15 @@ class LmSolver:
         return _flag_lower(rec)
 
 
-def amici_evaluate(provider, scales, log=None):
+def amici_evaluate(provider, scales, log=None, tolerance_scale=None):
     """``evaluate(x) -> (f, r, J) | None`` on an :class:`AmiciGradient`-like provider with ``linear_residual_jacobian``.
 
     ``x`` is in the optimizer space; ``J`` is returned with respect to it (the chain factor ``ln10 * p`` for a log10
     parameter). A failed integration, or a non-finite value, returns None: it is a rejected step, not an error.
+    With *tolerance_scale* the provider's solver tolerances are multiplied by it for the call (``provider.tolerances_scaled``): 0.01 gives the
+    evaluation the noise-floor measurement and the polish compare against.
     """
+    import contextlib
     from pyantigen.engine.Analytic_gradient import AnalyticGradientError
     from pyantigen.engine.Optimize import _to_linear
 
@@ -313,7 +335,8 @@ def amici_evaluate(provider, scales, log=None):
         p_lin = np.asarray(_to_linear(np.asarray(x, float), scales), float)
         t0 = time.time()
         try:
-            r, J, const = provider.linear_residual_jacobian(p_lin)
+            with (provider.tolerances_scaled(tolerance_scale) if tolerance_scale is not None else contextlib.nullcontext()):
+                r, J, const = provider.linear_residual_jacobian(p_lin)
         except (AnalyticGradientError, RuntimeError, FloatingPointError) as exc:
             if log:
                 log(f"evaluation failed: {type(exc).__name__}: {str(exc)[:160]}")

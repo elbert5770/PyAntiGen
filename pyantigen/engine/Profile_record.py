@@ -69,6 +69,7 @@ class PointRecord:
     interrupted: bool = False
     bound_active: list = field(default_factory=list)
     pin_outside: bool = False
+    reproduced: bool = False                # a retry of this point gave the same dnll (see :func:`reproduces`): another budget would buy nothing
 
     @property
     def box_limited(self):
@@ -97,6 +98,27 @@ class PointRecord:
         return (self.verdict == "not_converged" and self.usable and self.pg is not None and math.isfinite(self.pg) and self.pg < pg_max
                 and "no model decrease" in str(self.reason or ""))
 
+    def status(self, noise_pg=None):
+        """What became of the point: ``"converged"``, ``"within_noise"``, ``"capped"``, ``"budget"`` or ``"failed"``.
+
+        ``within_noise``: the solver stopped at a projected gradient no larger than *noise_pg*, the error floor of the gradient itself
+        (:func:`Profile_amici.measure_noise_floor`), or was told so (its reason says "noise floor"). Nothing a longer run could do would
+        tell that point from the profile, so it counts as converged for walking and bracketing. ``capped``: the solver gave up (no model
+        decrease, a runaway damping, a plateau) above the floor, far from stationary. ``budget``: it ran out of evaluations above the floor.
+        """
+        if not self.usable:
+            return "failed"
+        if self.verdict == "converged":
+            return "within_noise" if "noise floor" in str(self.reason or "") else "converged"
+        if noise_pg is not None and self.pg is not None and math.isfinite(self.pg) and self.pg <= noise_pg:
+            return "within_noise"
+        why = str(self.reason or "")
+        return "capped" if any(w in why for w in ("no model decrease", "lambda above", "plateau")) else "budget"
+
+    def settled(self, noise_pg=None):
+        """Converged, or within the gradient noise (:meth:`status`): a point a profile may be walked from and a crossing bracketed by."""
+        return self.status(noise_pg) in ("converged", "within_noise")
+
     def check(self):
         """Problems with the record, as strings; empty if it is well formed."""
         out = []
@@ -109,6 +131,16 @@ class PointRecord:
         if not math.isfinite(float(self.x_fixed)):
             out.append("x_fixed not finite")
         return out
+
+
+def reproduces(a, b, tol=1e-3):
+    """Do two fits of one point agree on dnll, to *tol* of ``max(1, |dnll|)`` (three digits)? Then a third would give it again.
+
+    A stall that comes out the same from a neighbouring start is a property of the nuisance fit there (the gradient's noise), not of the budget.
+    """
+    if a is None or b is None or not (math.isfinite(a) and math.isfinite(b)):
+        return False
+    return abs(a - b) <= tol * max(1.0, abs(a), abs(b))
 
 
 FAILURE_VALUE = 1e10        # what the worker reports for an evaluation that failed (Evaluator.FAILURE_VALUE)
@@ -236,27 +268,37 @@ def flag_bounds(rec, names, lower, upper, tol=BOUND_TOL):
     return rec
 
 
-def side_verdicts(records, best_x, level=DNLL_95):
-    """``(below, above)``, each ``"crossed"``, ``"box-limited"`` or ``"open"``.
+def side_verdicts(records, best_x, level=DNLL_95, noise_pg=None):
+    """``(below, above)``, each ``"crossed"``, ``"box-limited"``, ``"unbracketed"`` or ``"open"``.
 
-    The side's crossing is the pair of points :func:`crossings` interpolates between. It is ``crossed`` only if
-    the first point over *level* converged with no active bound; ``box-limited`` if that point (or the last one
-    under the level) has an active bound or did not converge, since the true profile there may be lower and the
-    limit further out; ``open`` if no point on the side is over *level*.
+    The side's crossing is the pair of points :func:`crossings` interpolates between. It is ``crossed`` only if the first
+    *settled* point over *level* (converged, or within the gradient noise *noise_pg*: :meth:`PointRecord.settled`) has no active bound
+    and neither has the last settled point under the level; ``box-limited`` if one of them has an active bound, since the true
+    profile there may be lower and the limit further out; ``unbracketed`` if a point is over *level* but no settled one is: the dnll of
+    a point that did not converge is only an upper bound of the profile, so the true curve may never reach the level there, and
+    the interval is not established (it used to be reported with the box-limited sides); ``open`` if no point on the side is over *level*.
     """
     pts = curve(records)
     out = []
     for side in (-1, 1):
         walk = sorted((r for r in pts if (r.x_fixed - best_x) * side > 0), key=lambda r: abs(r.x_fixed - best_x))
-        under = None
-        verdict = "open"
+        first_over = next((r for r in walk if r.dnll > level), None)
+        if first_over is None:
+            out.append("open")
+            continue
+        over = under = None
         for r in walk:
+            if not r.settled(noise_pg):
+                continue
             if r.dnll > level:
-                bad = r.box_limited or r.verdict != "converged" or (under is not None and under.box_limited)
-                verdict = "box-limited" if bad else "crossed"
+                over = r
                 break
             under = r
-        out.append(verdict)
+        if over is None:
+            out.append("box-limited" if first_over.box_limited else "unbracketed")
+        else:
+            bad = over.box_limited or (under is not None and under.box_limited)
+            out.append("box-limited" if bad else "crossed")
     return tuple(out)
 
 
@@ -276,15 +318,18 @@ def curve(records):
     return [best[k] for k in sorted(best)]
 
 
-def crossings(records, best_x, level=DNLL_95):
+def crossings(records, best_x, level=DNLL_95, noise_pg=None, settled_only=False):
     """``(below, above)``: where the curve first reaches *level* walking out from *best_x* each way.
+
+    With *settled_only* the curve is made of the settled points alone (:meth:`PointRecord.settled` at *noise_pg*): a point that did not
+    converge is an upper bound on the profile, so a crossing interpolated across one is too narrow.
 
     Each is the linear interpolation in ``x_fixed`` between the last point at or under the level and the first
     over it, or None if no point on that side is over it (the interval is open on that side as far as the
     points show). Interpolating in x is the plain rule; ``sqrt(dnll)`` interpolation, which is exact for a
     quadratic profile, is what the stepping protocol uses to place points.
     """
-    pts = curve(records)
+    pts = curve([r for r in records if r.settled(noise_pg)] if settled_only else records)
     out = []
     for side in (-1, 1):
         walk = [r for r in pts if (r.x_fixed - best_x) * side > 0]

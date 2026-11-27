@@ -204,7 +204,34 @@ def test_an_undeclared_callable_could_read_any_parameter_so_each_gets_a_partial(
     loss.value = counted
     it, dirs = items(THETA)
     loss.gradient(it, dirs, THETA)
-    assert calls["n"] == 4 * 2                                     # four passes of the loss per parameter
+    assert calls["n"] == 2                                         # one probe pass per parameter: the callable reads none, so no partial follows
+    loss.gradient(it, dirs, THETA)
+    loss.gradient(it, dirs, THETA)
+    calls["n"] = 0
+    loss.gradient(it, dirs, THETA)
+    assert calls["n"] == 0                                         # unread on three points: not probed again
+
+
+def test_a_probed_parameter_that_is_read_gets_its_four_pass_partial():
+    loss, _ = make([obs(lambda r: r["p2"], "y2")])
+    n = {"calls": 0}
+
+    def fn(q):
+        n["calls"] += 1
+        return np.array([3.0 * q[0] ** 2, 5.0])                    # reads parameter 0 only
+    p = np.array([2.0, 1.0])
+    base = fn(p)
+    n["calls"] = 0
+    d0 = loss._explicit_partial(fn, p, 0, base)
+    np.testing.assert_allclose(d0, [12.0, 0.0], rtol=1e-6)
+    assert n["calls"] == 1 + 4                                     # the probe, then the Richardson partial
+    n["calls"] = 0
+    loss._explicit_partial(fn, p, 0, base)
+    assert n["calls"] == 4                                         # known to be read: not probed again
+    n["calls"] = 0
+    d1 = loss._explicit_partial(fn, p, 1, base)
+    np.testing.assert_array_equal(d1, [0.0, 0.0])
+    assert n["calls"] == 1                                         # not read: the probe alone
 
 
 def test_a_callable_that_declares_what_it_reads_costs_no_loss_evaluations():

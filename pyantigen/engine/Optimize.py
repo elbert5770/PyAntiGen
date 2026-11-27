@@ -2593,6 +2593,7 @@ _ENGINE_ONLY_OPTIMIZER_KEYS = (
     "profile_method",
     "profile_optimizer_kwargs",
     "profile_grid",             # read by pyantigen.engine.Model_optimize._profile_kwargs
+    "profile_walk",             # WalkSettings fields for the AMICI profile: see pyantigen.engine.Profile_amici.settings_from_spec
     # Multi-start as its own stage: see _resolve_multistart_stage.
     "multistart_method",
     "multistart_optimizer_kwargs",
@@ -6402,7 +6403,8 @@ def _run_amici_profile_stage(res_x, param_names, bounds, scales, optimizer_kwarg
     PA.check_anchor(store_dir, res_x, fit_method=fit_method)
     budget = RunBudget(deadline=resolve_deadline())
     print(f"[profile] {budget.describe()}")
-    mode, settings = PA.settings_from_env()
+    # The spec's ``standard["profile_walk"]``: any WalkSettings field by name ({"first_hop_max": 0.15, "plateau_window": 20}); the environment overrides it.
+    mode, settings = PA.settings_from_env(declared=(optimizer_kwargs or {}).get("profile_walk"))
     # The spec's ``standard["profile_no_widen"]``: bounds the walk must not widen ("name", "name:lower", "name:upper"), added to the environment's.
     declared = [str(v) for v in ((optimizer_kwargs or {}).get("profile_no_widen") or [])]
     settings.no_widen = tuple(dict.fromkeys(list(settings.no_widen) + declared))
@@ -8607,7 +8609,7 @@ def run_optimization_from_groups(
                     continue
                 _sg, _cost_t, _st = _block_sigma_resolution(_sse, _n_t, _known_t, _floor_t)
                 if _st == "declared":
-                    _c = _sse / (2.0 * _sg * _sg)
+                    _c = _sse / (2.0 * _sg * _sg) + _block_log_sigma(_v)
                 elif _st in ("floored_binding", "floored_free"):
                     _c = _n_t * np.log(_sg) + _sse / (2.0 * _sg * _sg)
                 else:
